@@ -1,0 +1,192 @@
+# Builds SkyCraft on GitHub's Windows machines and uploads the Vortex/MO2 mod zip.
+#
+# Put this file in your repo as .github/workflows/build.yml. If SkyCraft-Patch.patch (control mode
+# is already in the source; the patch adds world reset, show world, mobs, mob roaming, roaming on rough
+# ground, chat input, mob life, mob combat and mob polish) is in the root of the repo, it is applied
+# before building, and skipped if the source already has it.
+# Run it from the repo's Actions tab ("Build SkyCraft" -> Run workflow), or it runs on every push.
+#
+# The first run takes a long time (vcpkg compiles the C++ dependencies, Gradle fetches Minecraft);
+# later runs reuse caches and are much faster.
+
+name: Build SkyCraft
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [main, master]
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    # The project's CMake preset needs the "Visual Studio 18 2026" generator. windows-2025 has had
+    # Visual Studio 2026 since June 2026. If a future image drops it, try windows-2025-vs2026.
+    runs-on: windows-2025
+    timeout-minutes: 120
+    env:
+      VCPKG_DEFAULT_BINARY_CACHE: ${{ github.workspace }}\.vcpkg-cache
+      VCPKG_DISABLE_METRICS: "1"
+
+    steps:
+      # Before checkout, so files keep the line endings they have in the repo.
+      - name: Keep line endings as they are in the repo
+        run: git config --global core.autocrlf false
+
+      - name: Check out the source (with the CommonLibSSE-NG submodule, if the repo has it)
+        uses: actions/checkout@v5
+        with:
+          submodules: recursive
+
+      - name: Apply SkyCraft-Patch.patch (world reset, show world, mobs, mob roaming, roaming on rough ground, chat input, mob life, mob combat and mob polish) if it is in the repo
+        shell: bash
+        run: |
+          # The docs aren't part of the build, so a change upstream there must not stop it.
+          opts=(--exclude=README.md '--exclude=docs/*')
+          # A patch whose setting name is already in the source has been applied (or committed): skip
+          # it. (Checking by reversing the patch doesn't work once a later patch has changed the same lines.)
+          apply_patch() {
+            local patch=$1 marker=$2 file=$3
+            if [ ! -f "$patch" ]; then
+              echo "No $patch in the repo; skipping it."
+            elif grep -q "$marker" "$file"; then
+              echo "The source already has what $patch adds; nothing to apply."
+            elif git apply "${opts[@]}" --check "$patch"; then
+              git apply "${opts[@]}" "$patch"
+              echo "Applied $patch."
+            else
+              echo "::error::$patch doesn't apply to this source. The repo has probably changed since the patch was made."
+              exit 1
+            fi
+          }
+          apply_patch SkyCraft-Patch.patch DamageHealthExactly skse/src/Combat.cpp
+
+      # A repo made from "Download ZIP" has no submodule contents. Fetch CommonLibSSE-NG ourselves
+      # then (the branch's latest commit, not the exact one the author built with).
+      - name: Make sure CommonLibSSE-NG is there
+        shell: bash
+        run: |
+          dir=skse/extern/CommonLibSSE-NG
+          if [ -f "$dir/CMakeLists.txt" ]; then
+            echo "CommonLibSSE-NG came with the checkout."
+          else
+            echo "CommonLibSSE-NG is missing; cloning the ng branch."
+            rm -rf "$dir"
+            git clone --recursive --branch ng https://github.com/alandtse/CommonLibVR.git "$dir"
+          fi
+
+      - name: Set up JDK 25 (Minecraft 26.x needs it)
+        uses: actions/setup-java@v5
+        with:
+          distribution: temurin
+          java-version: "25"
+
+      - name: Create the vcpkg cache folder
+        run: New-Item -ItemType Directory -Force "$env:VCPKG_DEFAULT_BINARY_CACHE" | Out-Null
+
+      - name: Restore the vcpkg cache
+        uses: actions/cache@v4
+        with:
+          path: ${{ env.VCPKG_DEFAULT_BINARY_CACHE }}
+          key: vcpkg-${{ runner.os }}-${{ hashFiles('skse/vcpkg.json', 'skse/CMakePresets.json') }}-${{ github.run_id }}
+          restore-keys: |
+            vcpkg-${{ runner.os }}-${{ hashFiles('skse/vcpkg.json', 'skse/CMakePresets.json') }}-
+            vcpkg-${{ runner.os }}-
+
+      - name: Restore the Gradle cache
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.gradle/caches
+            ~/.gradle/wrapper
+          key: gradle-${{ runner.os }}-${{ hashFiles('fabric/gradle.properties', 'fabric/build.gradle', 'fabric/settings.gradle', 'fabric/gradle/wrapper/gradle-wrapper.properties') }}-${{ github.run_id }}
+          restore-keys: |
+            gradle-${{ runner.os }}-${{ hashFiles('fabric/gradle.properties', 'fabric/build.gradle', 'fabric/settings.gradle', 'fabric/gradle/wrapper/gradle-wrapper.properties') }}-
+            gradle-${{ runner.os }}-
+
+      # The CMake preset looks for vcpkg in .tools/vcpkg (the README's "Building from source").
+      # Bootstrapping downloads vcpkg.exe from GitHub's releases, which now and then answers 502 for a
+      # minute or two. Both network steps are retried, waiting a little longer each time.
+      - name: Get vcpkg
+        run: |
+          function Retry([string]$what, [scriptblock]$action) {
+            for ($i = 1; $i -le 5; $i++) {
+              & $action
+              if ($LASTEXITCODE -eq 0) { return }
+              Write-Host "$what failed (attempt $i of 5)."
+              if ($i -lt 5) { Start-Sleep -Seconds (20 * $i) }
+            }
+            throw "$what failed 5 times"
+          }
+          Retry "Cloning vcpkg" {
+            if (Test-Path .tools\vcpkg) { Remove-Item -Recurse -Force .tools\vcpkg }
+            git clone https://github.com/microsoft/vcpkg .tools\vcpkg
+          }
+          Retry "Bootstrapping vcpkg" {
+            .tools\vcpkg\bootstrap-vcpkg.bat -disableMetrics
+          }
+
+      # Done here as well as inside package.ps1, which hides CMake's configure output: if a
+      # dependency fails to build, the reason is in this step's log.
+      - name: Configure the SKSE plugin (vcpkg builds its dependencies here)
+        working-directory: skse
+        run: |
+          cmake --preset default
+          if ($LASTEXITCODE) { throw "CMake couldn't configure the SKSE plugin" }
+
+      # Builds both halves and packs dist\ exactly as the author's release does.
+      - name: Build and package
+        run: |
+          powershell -ExecutionPolicy Bypass -File tools\package.ps1
+          if ($LASTEXITCODE) { throw "tools\package.ps1 failed" }
+
+      - name: Check the controls switch and world reset made it into the build
+        shell: bash
+        run: |
+          if [ -f SkyCraft-Patch.patch ] || grep -q sToggleKey skse/src/Input.cpp; then
+            grep -aq sToggleKey skse/build/RelWithDebInfo/SkyCraft.dll \
+              && echo "SkyCraft.dll has the controls switch." \
+              || { echo "::error::SkyCraft.dll was built without the controls switch."; exit 1; }
+          fi
+          if [ -f SkyCraft-Patch.patch ] || grep -q sResetKey skse/src/Input.cpp; then
+            grep -aq sResetKey skse/build/RelWithDebInfo/SkyCraft.dll \
+              && echo "SkyCraft.dll has the world reset key." \
+              || { echo "::error::SkyCraft.dll was built without the world reset key."; exit 1; }
+          fi
+          if [ -f SkyCraft-Patch.patch ] || grep -q ApplyMobHit skse/src/Combat.cpp; then
+            grep -aq "a Minecraft mob hit" skse/build/RelWithDebInfo/SkyCraft.dll \
+              && echo "SkyCraft.dll has the mob-hit handling." \
+              || { echo "::error::SkyCraft.dll was built without the mob-hit handling."; exit 1; }
+          fi
+
+      - name: Check the mob combat made it into the build
+        shell: bash
+        run: |
+          if [ -f SkyCraft-Patch.patch ] || grep -q kInSkyrimSwing skse/src/Combat.cpp; then
+            grep -aq "Skyrim swing (kind" skse/build/RelWithDebInfo/SkyCraft.dll \
+              && echo "SkyCraft.dll has the Skyrim-mode attacks." \
+              || { echo "::error::SkyCraft.dll was built without the Skyrim-mode attacks."; exit 1; }
+            grep -aq "Mob stand-ins will be made" skse/build/RelWithDebInfo/SkyCraft.dll \
+              && echo "SkyCraft.dll has the mob stand-ins." \
+              || { echo "::error::SkyCraft.dll was built without the mob stand-ins."; exit 1; }
+          fi
+
+      - name: Check the mob polish made it into the build
+        shell: bash
+        run: |
+          if [ -f SkyCraft-Patch.patch ] || grep -q DamageHealthExactly skse/src/Combat.cpp; then
+            grep -aq "Sized a mob stand-in" skse/build/RelWithDebInfo/SkyCraft.dll \
+              && echo "SkyCraft.dll has the stand-in sizing." \
+              || { echo "::error::SkyCraft.dll was built without the mob polish."; exit 1; }
+          fi
+
+      - name: Upload the mod
+        uses: actions/upload-artifact@v4
+        with:
+          name: SkyCraft-for-Vortex
+          path: |
+            dist/SkyCraft-*.zip
+            dist/skycraft-fabric-*.jar
+          if-no-files-found: error
+          retention-days: 30
