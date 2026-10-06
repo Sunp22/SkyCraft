@@ -817,10 +817,10 @@ index 0000000..8e94f08
 +}
 diff --git a/fabric/src/main/java/dev/skycraft/combat/NpcFightsBack.java b/fabric/src/main/java/dev/skycraft/combat/NpcFightsBack.java
 new file mode 100644
-index 0000000..77638f0
+index 0000000..3e89b2d
 --- /dev/null
 +++ b/fabric/src/main/java/dev/skycraft/combat/NpcFightsBack.java
-@@ -0,0 +1,198 @@
+@@ -0,0 +1,199 @@
 +package dev.skycraft.combat;
 +
 +import dev.skycraft.SkyCraft;
@@ -956,7 +956,8 @@ index 0000000..77638f0
 +			if (stance.victim != null && now >= stance.landAt) {
 +				if (stance.victim.isAlive()) {
 +					var blow = level.damageSources().mobAttack(npc);
-+					boolean hurt = npc.bow() ? stance.victim.hurtServer(level, blow, stance.damage) : NoShove.hurt(level, stance.victim, blow, stance.damage);
++					boolean creature = stance.victim.getType().getCategory() == MobCategory.CREATURE;
++					boolean hurt = npc.bow() || creature ? stance.victim.hurtServer(level, blow, stance.damage) : NoShove.hurt(level, stance.victim, blow, stance.damage);
 +					if (swingLogs++ < 60) {
 +						SkyCraft.LOG.info("SkyCraft: NPC {} hit {} for {}: {}", String.format("%08X", npc.formId()), stance.victim.getName().getString(), stance.damage,
 +							hurt ? "landed" : "refused");
@@ -2083,10 +2084,10 @@ index 0000000..9f18d6b
 +}
 diff --git a/fabric/src/main/java/dev/skycraft/combat/SkyrimSwings.java b/fabric/src/main/java/dev/skycraft/combat/SkyrimSwings.java
 new file mode 100644
-index 0000000..c5ece9d
+index 0000000..0a43b78
 --- /dev/null
 +++ b/fabric/src/main/java/dev/skycraft/combat/SkyrimSwings.java
-@@ -0,0 +1,140 @@
+@@ -0,0 +1,170 @@
 +package dev.skycraft.combat;
 +
 +import dev.skycraft.SkyCraft;
@@ -2141,6 +2142,8 @@ index 0000000..c5ece9d
 +		float damage = skyrimDamage * SKYRIM_TO_MC;
 +		if (kind == Proto.SWING_ARROW) {
 +			arrow(player, level, eye, look, damage * (0.25F + 0.75F * Math.max(0.0F, Math.min(1.0F, charge))));
++		} else if (kind == Proto.SWING_SPELL) {
++			spell(player, level, eye, look, damage);
 +		} else {
 +			melee(player, level, eye, look, damage, kind == Proto.SWING_POWER ? 3 : 1);
 +		}
@@ -2167,7 +2170,11 @@ index 0000000..c5ece9d
 +		var source = attacker != null ? level.damageSources().mobAttack(attacker) : level.damageSources().generic();
 +		// An NPC at arm's length struck it; one further off shot it (and the shot keeps its knockback).
 +		boolean closeBlow = attacker != null && Math.sqrt(best) < 3.5;
-+		boolean hurt = closeBlow ? NoShove.hurt(level, mob, source, skyrimDamage * SKYRIM_TO_MC) : mob.hurtServer(level, source, skyrimDamage * SKYRIM_TO_MC);
++		// Passive/neutral creatures need Minecraft's normal knockback/panic path when a Skyrim NPC
++		// actually hits them. Keep the no-shove bridge for monsters so Skyrim can chase its target.
++		boolean creature = mob.getType().getCategory() == net.minecraft.world.entity.MobCategory.CREATURE;
++		boolean hurt = creature || !closeBlow ? mob.hurtServer(level, source, skyrimDamage * SKYRIM_TO_MC)
++			: NoShove.hurt(level, mob, source, skyrimDamage * SKYRIM_TO_MC);
 +		if (proxyLogs++ < 60) {
 +			SkyCraft.LOG.info("SkyCraft: Skyrim NPC hurt {} for {}: {}", mob.getName().getString(), skyrimDamage * SKYRIM_TO_MC, hurt ? "landed" : "refused");
 +		}
@@ -2200,6 +2207,30 @@ index 0000000..c5ece9d
 +			Mob mob = inReach.get(i);
 +			boolean hurt = NoShove.hurt(level, mob, level.damageSources().playerAttack(player), damage);
 +			SkyCraft.LOG.info("SkyCraft: Skyrim swing hit {} for {}{}", mob.getName().getString(), damage, hurt ? "" : " (no effect)");
++		}
++	}
++
++	private static void spell(ServerPlayer player, ServerLevel level, Vec3 eye, Vec3 look, float damage) {
++		Vec3 end = eye.add(look.scale(32.0));
++		Mob best = null;
++		double bestDistance = Double.MAX_VALUE;
++		for (Mob mob : level.getEntitiesOfClass(Mob.class, new AABB(eye, end).inflate(0.8))) {
++			if (!mob.isAlive() || mob.isAlliedTo(player)) {
++				continue;
++			}
++			Optional<Vec3> at = mob.getBoundingBox().inflate(0.2).clip(eye, end);
++			if (at.isEmpty()) {
++				continue;
++			}
++			double distance = eye.distanceToSqr(at.get());
++			if (distance < bestDistance && SkyClip.cast(eye, at.get()) == null) {
++				best = mob;
++				bestDistance = distance;
++			}
++		}
++		if (best != null) {
++			boolean hurt = best.hurtServer(level, level.damageSources().playerAttack(player), damage);
++			SkyCraft.LOG.info("SkyCraft: Skyrim spell hit {} for {}{}", best.getName().getString(), damage, hurt ? "" : " (no effect)");
 +		}
 +	}
 +
@@ -3121,7 +3152,7 @@ index 92b585a..a0b7b5c 100644
  ; Detailed timing, camera, combat and lighting logs in SkyCraft.log (several lines a second), for
  ; reporting problems. 0 = off.
 diff --git a/skse/src/Combat.cpp b/skse/src/Combat.cpp
-index 0954b7f..ae9d1fa 100644
+index 0954b7f..50c6cfd 100644
 --- a/skse/src/Combat.cpp
 +++ b/skse/src/Combat.cpp
 @@ -1,5 +1,7 @@
@@ -3521,7 +3552,7 @@ index 0954b7f..ae9d1fa 100644
  					hit->flags.set(RE::HitData::Flag::kPowerAttack);
  				}
  				processHit(actor, *hit);
-@@ -397,6 +718,695 @@ namespace skycraft
+@@ -397,6 +718,714 @@ namespace skycraft
  				actor->GetLevel(), a_ev.a, damage, crit ? ", critical" : "", projectile ? ", projectile" : "", stagger > 0.0f ? ", stagger" : "");
  		}
  
@@ -3551,6 +3582,22 @@ index 0954b7f..ae9d1fa 100644
 +			const float damage = a_ev.a * 5.0f;  // the same exchange rate as the other way (SendHurt)
 +			if (a_player->IsDead() || !(damage > 0.01f)) {
 +				return;
++			}
++			// Minecraft's shield state lives in Skyrim while Skyrim owns the controls. The event's
++			// b/c vector is the knockback direction (away from the attacker), so a negative dot with
++			// the player's forward direction means the attacker was in front of the raised shield.
++			bool blocking = false;
++			if constexpr (requires { a_player->IsBlocking(); }) {
++				blocking = a_player->IsBlocking();
++			}
++			if (blocking) {
++				const float heading = a_player->data.angle.z;
++				const float fx = std::sin(heading), fz = std::cos(heading);
++				const float dot = a_ev.b * fx + a_ev.c * fz;
++				if (dot < -0.15f) {
++					logger::info("Skyrim's controls: shield blocked {:.1f} Minecraft damage", damage);
++					return;
++				}
 +			}
 +			proto::McEvent hit{};
 +			hit.type = proto::kEvHitActor;
@@ -3816,9 +3863,12 @@ index 0954b7f..ae9d1fa 100644
 +			if constexpr (requires { a_actor->SetAlpha(0.0f); }) {
 +				a_actor->SetAlpha(0.0f);
 +			}
++			// Do not cull the 3D node. Lock-on/target-HUD mods and Skyrim's crosshair actor
++			// targeting inspect the live actor/node tree; culling made these stand-ins untargetable.
++			// Alpha remains zero, AI is off, aggression/damage are zero, so the proxy is still quiet/invisible.
 +			if (auto* node = a_actor->Get3D()) {
-+				if constexpr (requires { node->SetAppCulled(true); }) {
-+					node->SetAppCulled(true);
++				if constexpr (requires { node->SetAppCulled(false); }) {
++					node->SetAppCulled(false);
 +				}
 +			}
 +		}
@@ -4217,7 +4267,7 @@ index 0954b7f..ae9d1fa 100644
  		void KillPlayer(RE::PlayerCharacter* a_player, const proto::McEvent& a_ev)
  		{
  			if (a_player->IsDead()) {
-@@ -580,7 +1590,7 @@ namespace skycraft
+@@ -580,7 +1609,7 @@ namespace skycraft
  			for (auto& handle : lists->highActorHandles) {
  				auto actorPtr = handle.get();
  				auto* actor = actorPtr.get();
@@ -4226,7 +4276,7 @@ index 0954b7f..ae9d1fa 100644
  					continue;
  				}
  				const auto hazard = HazardAtActor(actor);
-@@ -698,6 +1708,7 @@ namespace skycraft
+@@ -698,6 +1727,7 @@ namespace skycraft
  			RE::NiPoint3 center;
  			float        radius;  // Minecraft blocks
  			float        delay;   // seconds: after the blast's damage has landed
@@ -4234,7 +4284,7 @@ index 0954b7f..ae9d1fa 100644
  		};
  		std::vector<PendingExplosion> pendingExplosions;
  
-@@ -786,6 +1797,9 @@ namespace skycraft
+@@ -786,6 +1816,9 @@ namespace skycraft
  					continue;
  				}
  				if (auto* actor = ref->As<RE::Actor>()) {
@@ -4244,7 +4294,7 @@ index 0954b7f..ae9d1fa 100644
  					if (!actor->IsDead()) {
  						if (auto* process = actor->GetActorRuntimeData().currentProcess) {
  							process->KnockExplosion(actor, a_blast.center, 25.0f * falloff * power);
-@@ -830,6 +1844,180 @@ namespace skycraft
+@@ -830,6 +1863,221 @@ namespace skycraft
  			}
  			logger::info("Minecraft explosion (radius {:.1f}): knocked {} people away, threw {} objects", a_blast.radius, people, objects);
  		}
@@ -4299,6 +4349,7 @@ index 0954b7f..ae9d1fa 100644
 +		struct AttackButton
 +		{
 +			bool             down;
++			bool             leftHand;
 +			Clock::time_point at;
 +		};
 +		std::mutex                attackLock;
@@ -4306,28 +4357,65 @@ index 0954b7f..ae9d1fa 100644
 +
 +		struct HeldWeapon
 +		{
-+			bool  usable = true;   // a weapon or bare fists; not a spell, a staff or a torch
-+			bool  ranged = false;  // a bow or crossbow
-+			float damage = 2.0f;   // fists
++			bool  usable = true;
++			bool  ranged = false;
++			bool  spell = false;
++			float damage = 2.0f;
 +		};
 +
-+		HeldWeapon ReadHeldWeapon(RE::PlayerCharacter* a_player)
++		template <class T>
++		float HostileSpellDamage(T* a_spell)
++		{
++			if (!a_spell) {
++				return 0.0f;
++			}
++			if constexpr (requires { a_spell->IsHostile(); }) {
++				if (!a_spell->IsHostile()) {
++					return 0.0f;
++				}
++			}
++			if constexpr (requires { a_spell->GetCostliestEffectItem(); }) {
++				auto* effect = a_spell->GetCostliestEffectItem();
++				if (effect) {
++					if constexpr (requires { effect->magnitude; }) {
++						return std::max(0.0f, static_cast<float>(effect->magnitude));
++					}
++				}
++			}
++			return 0.0f;
++		}
++
++		RE::TESForm* HandItem(RE::PlayerCharacter* a_player, bool a_leftHand)
++		{
++			if constexpr (requires { a_player->GetEquippedObject(a_leftHand); }) {
++				return a_player->GetEquippedObject(a_leftHand);
++			}
++			return nullptr;
++		}
++
++		HeldWeapon ReadHeldWeapon(RE::PlayerCharacter* a_player, bool a_leftHand)
 +		{
 +			HeldWeapon held;
-+			if (RE::TESForm* form = RightHandItem(a_player)) {
++			if (RE::TESForm* form = HandItem(a_player, a_leftHand)) {
 +				if (auto* weapon = form->As<RE::TESObjectWEAP>()) {
 +					held.damage = WeaponBaseDamage(weapon);
 +					held.ranged = WeaponIsRanged(weapon);
 +					held.usable = !WeaponIsStaff(weapon);
++				} else if (auto* spell = form->As<RE::SpellItem>()) {
++					held.damage = HostileSpellDamage(spell);
++					held.spell = held.damage > 0.0f;
++					held.usable = held.spell;
 +				} else {
-+					held.usable = false;  // a spell in the hand: not a blow on a mob
++					held.usable = false;
 +				}
 +			}
 +			// Skyrim's own skill makes the same weapon hit harder, as it does for a hit on a Skyrim enemy.
-+			auto*       values = a_player->AsActorValueOwner();
-+			const float skill = held.ranged ? values->GetActorValue(RE::ActorValue::kArchery) :
-+			                                  std::max(values->GetActorValue(RE::ActorValue::kOneHanded), values->GetActorValue(RE::ActorValue::kTwoHanded));
-+			held.damage *= 1.0f + std::clamp(skill, 0.0f, 100.0f) / 100.0f;
++			if (!held.spell) {
++				auto* values = a_player->AsActorValueOwner();
++				const float skill = held.ranged ? values->GetActorValue(RE::ActorValue::kArchery) :
++				                                  std::max(values->GetActorValue(RE::ActorValue::kOneHanded), values->GetActorValue(RE::ActorValue::kTwoHanded));
++				held.damage *= 1.0f + std::clamp(skill, 0.0f, 100.0f) / 100.0f;
++			}
 +			return held;
 +		}
 +
@@ -4386,11 +4474,14 @@ index 0954b7f..ae9d1fa 100644
 +					if (a_player->IsDead() || !a_player->AsActorState()->IsWeaponDrawn()) {
 +						continue;
 +					}
-+					attack.weapon = ReadHeldWeapon(a_player);
++					attack.weapon = ReadHeldWeapon(a_player, press.leftHand);
 +					if (attack.weapon.usable) {
-+						attack.holding = true;
++						attack.holding = !attack.weapon.spell;
 +						attack.powerSent = false;
 +						attack.since = press.at;
++						if (attack.weapon.spell) {
++							SendSwing(a_player, proto::kSwingSpell, attack.weapon.damage, 1.0f);
++						}
 +					}
 +				} else if (attack.holding) {
 +					attack.holding = false;
@@ -4425,7 +4516,7 @@ index 0954b7f..ae9d1fa 100644
  	}
  
  	namespace Combat
-@@ -854,16 +2042,52 @@ namespace skycraft
+@@ -854,16 +2102,52 @@ namespace skycraft
  				}
  				healthPrimed = false;
  				engaged = false;
@@ -4453,8 +4544,11 @@ index 0954b7f..ae9d1fa 100644
 +						}
 +					} else if (mirror) {
 +						HandleEvent(a_player, ev, true);
-+					}
-+				}
+ 					}
+ 				}
+-				pendingExplosions.clear();
+-				pendingFlings.clear();
+-				link.WriteActors(nullptr, 0);
 +				if (mirror) {
 +					WriteActorTable(a_player);
 +					UpdateFlings(a_delta);
@@ -4466,7 +4560,7 @@ index 0954b7f..ae9d1fa 100644
 +						} else {
 +							++it;
 +						}
- 					}
++					}
 +					UpdateSkyrimAttacks(a_player);
 +					UpdateNpcBows(a_delta);
 +					UpdateProxies(a_player, a_delta);
@@ -4477,14 +4571,11 @@ index 0954b7f..ae9d1fa 100644
 +					ClearProxies();
 +					ParkPool(a_player, a_delta);
 +					link.WriteActors(nullptr, 0);
- 				}
--				pendingExplosions.clear();
--				pendingFlings.clear();
--				link.WriteActors(nullptr, 0);
++				}
  				return;
  			}
  			// Skyrim can't kill the player while Minecraft decides: one huge hit knocks them down
-@@ -878,29 +2102,11 @@ namespace skycraft
+@@ -878,29 +2162,11 @@ namespace skycraft
  
  			proto::McEvent ev;
  			while (link.PopEvent(ev)) {
@@ -4517,20 +4608,52 @@ index 0954b7f..ae9d1fa 100644
  			for (auto it = pendingExplosions.begin(); it != pendingExplosions.end();) {
  				it->delay -= a_delta;
  				if (it->delay <= 0.0f) {
-@@ -924,5 +2130,13 @@ namespace skycraft
+@@ -924,5 +2190,18 @@ namespace skycraft
  		}
  
  		bool PlayerEngaged() { return engaged; }
 +
-+		void NoteSkyrimAttackButton(bool a_down)
++		void NoteSkyrimAttackButton(bool a_down, bool a_leftHand)
 +		{
 +			std::scoped_lock lock(attackLock);
 +			if (attackQueue.size() < 16) {
-+				attackQueue.push_back({ a_down, Clock::now() });
++				attackQueue.push_back({ a_down, a_leftHand, Clock::now() });
 +			}
++		}
++
++		void NoteSkyrimAttackButton(bool a_down)
++		{
++			NoteSkyrimAttackButton(a_down, false);
 +		}
  	}
  }
+diff --git a/skse/src/DigPhysics.cpp b/skse/src/DigPhysics.cpp
+index 4ce955a..4b2b31b 100644
+--- a/skse/src/DigPhysics.cpp
++++ b/skse/src/DigPhysics.cpp
+@@ -212,6 +212,12 @@ namespace skycraft::Dig
+ 			static void thunk(RE::bhkCharProxyController* a_this, RE::hkpCharacterProxy* a_proxy, const RE::hkArray<RE::hkpRootCdPoint>& a_manifold, RE::hkpSimplexSolverInput& a_input)
+ 			{
+ 				Perf::Scope timer(Perf::kHookPlanes);
++				// Increase Havok's per-proxy plane budget before the vanilla solver sizes its input.
++				// The old code raised userPlanes after func(), so the first frame still had the default
++				// four-plane budget; a player standing on a block edge could therefore lose the top plane.
++				if (a_proxy && a_proxy->userPlanes < kWantUserPlanes) {
++					a_proxy->userPlanes = kWantUserPlanes;
++				}
+ 				const int before = a_input.numConstraints;
+ 				func(a_this, a_proxy, a_manifold, a_input);
+ 				if (!a_proxy || !a_proxy->shapePhantom || !a_input.constraints) {
+@@ -219,9 +225,6 @@ namespace skycraft::Dig
+ 				}
+ 				// Room for our planes: what Havok set aside, minus what Skyrim's callback just used.
+ 				const int room = a_proxy->userPlanes - (a_input.numConstraints - before);
+-				if (a_proxy->userPlanes < kWantUserPlanes) {
+-					a_proxy->userPlanes = kWantUserPlanes;  // bigger arrays from the next update on
+-				}
+ 				if (room <= 0) {
+ 					return;
+ 				}
 diff --git a/skse/src/Game.cpp b/skse/src/Game.cpp
 index 3bb4d34..67915fc 100644
 --- a/skse/src/Game.cpp
@@ -4738,10 +4861,16 @@ index 3bb4d34..67915fc 100644
  
  			// Blocks dug out of Skyrim's world: its collision around them goes to Minecraft again, and
 diff --git a/skse/src/Game.h b/skse/src/Game.h
-index 05788b1..ab15723 100644
+index 05788b1..1564b94 100644
 --- a/skse/src/Game.h
 +++ b/skse/src/Game.h
-@@ -17,6 +17,20 @@ namespace skycraft
+@@ -13,10 +13,26 @@ namespace skycraft
+ 		// The same, or waiting for Minecraft to arrive after a teleport: Skyrim's own controls
+ 		// don't move its player either way (it would wander off from where Minecraft is going).
+ 		std::atomic<bool> minecraftOwnsPlayer{ false };
++		// Skyrim owns the player controls; Minecraft is only mirroring the player/world.
++		std::atomic<bool> skyrimControl{ false };
+ 		// A Minecraft GUI screen (inventory, chat, ...) is open: mouse moves MC's cursor.
  		std::atomic<bool> mcScreenOpen{ false };
  		// A Skyrim menu (journal, dialogue, console, loading, ...) owns input.
  		std::atomic<bool> skyrimMenuOpen{ false };
@@ -4762,7 +4891,7 @@ index 05788b1..ab15723 100644
  		// MC reports its player is in a world (overlay should be drawn).
  		std::atomic<bool> mcInWorld{ false };
  
-@@ -96,10 +110,15 @@ namespace skycraft
+@@ -96,10 +112,15 @@ namespace skycraft
  	namespace Input
  	{
  		void Install();
@@ -4778,18 +4907,19 @@ index 05788b1..ab15723 100644
  	}
  
  	namespace Input
-@@ -115,6 +134,9 @@ namespace skycraft
+@@ -115,6 +136,10 @@ namespace skycraft
  		void PerFrame(RE::PlayerCharacter* a_player, bool a_puppeting, float a_delta);
  		// Someone nearby is fighting the player (in combat with them as its target). Main thread.
  		bool PlayerEngaged();
 +		// The attack button (left mouse) went down or up while Skyrim has the controls (input sink). Combat works out
 +		// from it, once per frame, what the player swung or shot and has Minecraft hit the mobs in the way.
 +		void NoteSkyrimAttackButton(bool a_down);
++		void NoteSkyrimAttackButton(bool a_down, bool a_leftHand);
  	}
  
  	namespace BlockLights
 diff --git a/skse/src/Input.cpp b/skse/src/Input.cpp
-index 092862e..e28be18 100644
+index 092862e..089c14f 100644
 --- a/skse/src/Input.cpp
 +++ b/skse/src/Input.cpp
 @@ -1,5 +1,14 @@
@@ -4807,7 +4937,7 @@ index 092862e..e28be18 100644
  namespace skycraft
  {
  	namespace
-@@ -48,6 +57,150 @@ namespace skycraft
+@@ -48,6 +57,153 @@ namespace skycraft
  			return a_code == kDikEscape || a_code == kDikConsole || a_code == kDikJ || a_code == kDikM || a_code == kDikF9;
  		}
  
@@ -4945,6 +5075,9 @@ index 092862e..e28be18 100644
 +			if (resetAskedAt == std::chrono::steady_clock::time_point{} || now - resetAskedAt > kResetConfirmWindow) {
 +				resetAskedAt = now;
 +				const std::string note = "SkyCraft: press " + resetKeyName + " again to reset the Minecraft world. Everything built or dug is removed.";
++							if (st.skyrimControl && !menuOpen && button->GetDevice() == RE::INPUT_DEVICE::kMouse && (button->GetIDCode() == 0 || button->GetIDCode() == 1) && (down || up)) {
++								Combat::NoteSkyrimAttackButton(down, button->GetIDCode() == 1);
++							}
 +				RE::SendHUDMessage::ShowHUDMessage(note.c_str());
 +				return;
 +			}
@@ -4958,7 +5091,7 @@ index 092862e..e28be18 100644
  		float lookDx = 0.0f;
  		float lookDy = 0.0f;
  
-@@ -81,6 +234,24 @@ namespace skycraft
+@@ -81,6 +237,24 @@ namespace skycraft
  			}
  		}
  
@@ -4983,7 +5116,7 @@ index 092862e..e28be18 100644
  		class InputSink final : public RE::BSTEventSink<RE::InputEvent*>
  		{
  		public:
-@@ -92,7 +263,7 @@ namespace skycraft
+@@ -92,7 +266,7 @@ namespace skycraft
  
  			RE::BSEventNotifyControl ProcessEvent(RE::InputEvent* const* a_event, RE::BSTEventSource<RE::InputEvent*>*) override
  			{
@@ -4992,7 +5125,7 @@ index 092862e..e28be18 100644
  					return RE::BSEventNotifyControl::kContinue;
  				}
  				auto& st = State();
-@@ -106,6 +277,7 @@ namespace skycraft
+@@ -106,6 +280,7 @@ namespace skycraft
  					st.skyrimMenuOpen = true;
  				}
  				const bool route = st.puppeting && !menuOpen;
@@ -5000,7 +5133,7 @@ index 092862e..e28be18 100644
  
  				for (auto* e = *a_event; e; e = e->next) {
  					switch (e->GetEventType()) {
-@@ -132,14 +304,35 @@ namespace skycraft
+@@ -132,14 +307,35 @@ namespace skycraft
  							auto* button = e->AsButtonEvent();
  							const bool down = button->IsDown();
  							const bool up = button->IsUp();
@@ -5037,7 +5170,7 @@ index 092862e..e28be18 100644
  									if (IsSkyrimMenuKey(code)) {
  										break;  // MenuControls (see the hook below) opens Skyrim's menu
  									}
-@@ -176,7 +369,7 @@ namespace skycraft
+@@ -176,7 +372,7 @@ namespace skycraft
  							break;
  						}
  					case RE::INPUT_EVENT_TYPE::kChar:
@@ -5046,7 +5179,7 @@ index 092862e..e28be18 100644
  							link.PushInput(proto::kInText, 0, static_cast<std::int32_t>(e->AsCharEvent()->keyCode));
  						}
  						break;
-@@ -184,6 +377,30 @@ namespace skycraft
+@@ -184,6 +380,30 @@ namespace skycraft
  						break;
  					}
  				}
@@ -5077,7 +5210,7 @@ index 092862e..e28be18 100644
  				return RE::BSEventNotifyControl::kContinue;
  			}
  		};
-@@ -201,13 +418,21 @@ namespace skycraft
+@@ -201,13 +421,21 @@ namespace skycraft
  				}
  				std::vector<RE::InputEvent*> keep;
  				std::vector<RE::InputEvent*> all;
@@ -5103,7 +5236,7 @@ index 092862e..e28be18 100644
  							keep.push_back(e);
  						}
  					}
-@@ -250,11 +475,64 @@ namespace skycraft
+@@ -250,11 +478,64 @@ namespace skycraft
  
  	namespace Input
  	{
@@ -5169,7 +5302,7 @@ index 092862e..e28be18 100644
  			REL::Relocation<std::uintptr_t> vtbl{ RE::VTABLE_MenuControls[0] };
  			MenuControlsHook::func = vtbl.write_vfunc(0x1, MenuControlsHook::thunk);
  			REL::Relocation<std::uintptr_t> playerVtbl{ RE::VTABLE_PlayerControls[0] };
-@@ -274,6 +552,11 @@ namespace skycraft
+@@ -274,6 +555,11 @@ namespace skycraft
  			Link::Get().PushInput(proto::kInReleaseAll, 0);
  		}
  
