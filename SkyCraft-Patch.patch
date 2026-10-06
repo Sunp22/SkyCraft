@@ -416,6 +416,91 @@ index 3127e6e..6929eed 100644
  
  		if ((flags & Proto.MC_IN_WORLD) != 0) {
  			try {
+diff --git a/fabric/src/client/java/dev/skycraft/client/render/WorldExporter.java b/fabric/src/client/java/dev/skycraft/client/render/WorldExporter.java
+index 9f909ce..ea5a230 100644
+--- a/fabric/src/client/java/dev/skycraft/client/render/WorldExporter.java
++++ b/fabric/src/client/java/dev/skycraft/client/render/WorldExporter.java
+@@ -67,6 +67,8 @@ public final class WorldExporter {
+ 	private static final LongLinkedOpenHashSet DIRTY = new LongLinkedOpenHashSet();
+ 	private static final LongOpenHashSet SENT = new LongOpenHashSet(); // sections Skyrim holds a mesh for
+ 	private static final LongOpenHashSet LIT = new LongOpenHashSet(); // sections Skyrim holds lights for
++	private static final LongOpenHashSet SHAPE = new LongOpenHashSet(); // sections Skyrim holds exact block shapes for
++	private static final ByteBuffer SHAPES = ByteBuffer.allocate(4096 * (3 + 8 * 6)).order(ByteOrder.LITTLE_ENDIAN);
+ 	private static final LongOpenHashSet SOLID = new LongOpenHashSet(); // sections Skyrim holds NPC collision for
+ 	private static final long[] SOLID_BITS = new long[64]; // 4096 blocks: bit x + 16z + 256y
+ 	private static final LongOpenHashSet DUG = new LongOpenHashSet(); // sections Skyrim holds dug cells for
+@@ -136,6 +138,7 @@ public final class WorldExporter {
+ 		SENT.clear();
+ 		LIT.clear();
+ 		SOLID.clear();
++		SHAPE.clear();
+ 		DUG.clear();
+ 		dev.skycraft.client.SkyDigClient.resendAll();
+ 		// Everything already loaded needs meshing again; later chunk loads mark themselves dirty.
+@@ -205,6 +208,8 @@ public final class WorldExporter {
+ 		int lightCount = 0;
+ 		java.util.Arrays.fill(SOLID_BITS, 0L);
+ 		int solidCount = 0;
++		SHAPES.clear();
++		int shapeCount = 0;
+ 		MESH.cardinal = level.cardinalLighting();
+ 		if (!empty) {
+ 			BlockPos origin = SectionPos.of(sx, sy, sz).origin();
+@@ -218,10 +223,25 @@ public final class WorldExporter {
+ 							continue;
+ 						}
+ 						// Blocks Skyrim's NPCs can't walk through (anything with a collision shape).
+-						if (!state.getCollisionShape(level, pos).isEmpty()) {
++						var collision = state.getCollisionShape(level, pos);
++						if (!collision.isEmpty()) {
+ 							int bit = x + 16 * z + 256 * y;
+ 							SOLID_BITS[bit >> 6] |= 1L << (bit & 63);
+ 							solidCount++;
++							// Anything but a whole cube (slab, stair, fence, carpet...) goes to Skyrim with its exact boxes.
++							List<net.minecraft.world.phys.AABB> boxes = collision.toAabbs();
++							boolean whole = boxes.size() == 1 && boxes.get(0).minX <= 0.0 && boxes.get(0).minY <= 0.0 && boxes.get(0).minZ <= 0.0
++								&& boxes.get(0).maxX >= 1.0 && boxes.get(0).maxY == 1.0 && boxes.get(0).maxZ >= 1.0;
++							if (!whole && !boxes.isEmpty()) {
++								int n = Math.min(boxes.size(), 8);
++								SHAPES.putShort((short) bit).put((byte) n);
++								for (int i = 0; i < n; i++) {
++									var b = boxes.get(i);
++									SHAPES.put(sixteenths(b.minX)).put(sixteenths(b.minY)).put(sixteenths(b.minZ));
++									SHAPES.put(sixteenths(b.maxX)).put(sixteenths(b.maxY)).put(sixteenths(b.maxZ));
++								}
++								shapeCount++;
++							}
+ 						}
+ 						// Light-emitting blocks (torches, lava, glowstone, ...) light Skyrim's world too.
+ 						int emission = state.getLightEmission();
+@@ -288,6 +308,17 @@ public final class WorldExporter {
+ 					SOLID.remove(key);
+ 				}
+ 			}
++			// Exact shapes of the solid blocks that aren't whole cubes (after the solids, so they replace the cubes).
++			if (shapeCount > 0 || SHAPE.contains(key)) {
++				ByteBuffer shapeHeader = ByteBuffer.allocate(16).order(ByteOrder.LITTLE_ENDIAN).putInt(sx).putInt(sy).putInt(sz).putInt(shapeCount).flip();
++				if (!SkyLink.writeRender(Proto.REN_SHAPES, shapeHeader, SHAPES.flip())) {
++					markDirty(sx, sy, sz);
++				} else if (shapeCount > 0) {
++					SHAPE.add(key);
++				} else {
++					SHAPE.remove(key);
++				}
++			}
+ 			// Cells dug out of Skyrim's world: its geometry there goes.
+ 			if (dugCount > 0 || DUG.contains(key)) {
+ 				ByteBuffer dugHeader = ByteBuffer.allocate(24).order(ByteOrder.LITTLE_ENDIAN).putInt(sx).putInt(sy).putInt(sz).putInt(dugCount)
+@@ -651,4 +682,9 @@ public final class WorldExporter {
+ 			return this;
+ 		}
+ 	}
++
++	/** A block coordinate in sixteenths, 0..32 (fences stand 1.5 tall). */
++	private static byte sixteenths(double v) {
++		return (byte) Math.max(0, Math.min(32, (int) Math.round(v * 16.0)));
++	}
+ }
 diff --git a/fabric/src/main/java/dev/skycraft/SkyCraft.java b/fabric/src/main/java/dev/skycraft/SkyCraft.java
 index 1670d74..8be5e03 100644
 --- a/fabric/src/main/java/dev/skycraft/SkyCraft.java
@@ -2406,7 +2491,7 @@ index 0000000..258911a
 +	}
 +}
 diff --git a/fabric/src/main/java/dev/skycraft/link/Proto.java b/fabric/src/main/java/dev/skycraft/link/Proto.java
-index 26b7fe6..1f754ac 100644
+index 26b7fe6..f4312cf 100644
 --- a/fabric/src/main/java/dev/skycraft/link/Proto.java
 +++ b/fabric/src/main/java/dev/skycraft/link/Proto.java
 @@ -8,7 +8,7 @@ public final class Proto {
@@ -2484,7 +2569,15 @@ index 26b7fe6..1f754ac 100644
  	public static final int WEAPON_UNARMED = 0;
  	public static final int WEAPON_BLADE = 1;
  	public static final int WEAPON_AXE = 2;
-@@ -144,10 +182,14 @@ public final class Proto {
+@@ -118,6 +156,7 @@ public final class Proto {
+ 	public static final int REN_RAGDOLL = 9;
+ 	public static final int REN_SOLIDS = 10;
+ 	public static final int REN_DUG = 11;
++	public static final int REN_SHAPES = 12;
+ 	public static final int PART_HEAD = 1, PART_BODY = 2, PART_RIGHT_ARM = 3, PART_LEFT_ARM = 4, PART_RIGHT_LEG = 5, PART_LEFT_LEG = 6;
+ 	public static final int LIGHT_STEADY = 0, LIGHT_FLAME = 1, LIGHT_LAVA = 2;
+ 	public static final int REN_VERTEX_BYTES = 32;
+@@ -144,10 +183,14 @@ public final class Proto {
  	public static final long SS_VIEWPORT_W = 0x34;
  	public static final long SS_VIEWPORT_H = 0x38;
  	public static final long SS_GAME_HOUR = 0x3C;
@@ -2499,7 +2592,7 @@ index 26b7fe6..1f754ac 100644
  
  	// McState (relative to OFF_MC_STATE)
  	public static final long MS_SEQ = 0x00;
-@@ -189,6 +231,7 @@ public final class Proto {
+@@ -189,6 +232,7 @@ public final class Proto {
  	public static final int MC_DEAD = 1 << 5;
  	public static final int MC_SWIMMING = 1 << 6;
  	public static final int MC_FLYING = 1 << 7;
@@ -3179,7 +3272,7 @@ index 5ea8e5b..ae3cf6e 100644
      "PressurePlateMixin",
      "ProjectileMixin",
 diff --git a/protocol/skycraft_protocol.h b/protocol/skycraft_protocol.h
-index fce6cf8..1385991 100644
+index fce6cf8..77bf3e0 100644
 --- a/protocol/skycraft_protocol.h
 +++ b/protocol/skycraft_protocol.h
 @@ -13,7 +13,7 @@
@@ -3309,6 +3402,31 @@ index fce6cf8..1385991 100644
  	};
  	static_assert(sizeof(McEvent) == 32);
  
+@@ -345,6 +396,11 @@ namespace skycraft::proto
+ 		                      // section NPCs collide with (sent after its kRenSection; 0 = none)
+ 		kRenDug = 11,         // RenDug + 512-byte bitset (bit x + 16z + 256y): which blocks of a section
+ 		                      // were dug out of Skyrim's world (its geometry there is gone); 0 = none
++		kRenShapes = 12,      // RenShapes + entries (sent right after kRenSolids): the exact collision
++		                      // boxes of the section's solid blocks that are NOT a full cube (slabs,
++		                      // stairs, fences, carpets...). Each entry: u16 block index (x + 16z + 256y),
++		                      // u8 boxCount, then boxCount * 6 bytes (x0 y0 z0 x1 y1 z1, sixteenths of
++		                      // a block from the block's min corner, 0..32). count 0 = none.
+ 		kRenRagdoll = 9,      // RenAvatar + RenBatch[] + RenVertex[]: the player's body standing still,
+ 		                      // relative to the feet and facing +Z, split into its parts (RenBatch
+ 		                      // flags bits 8-11: RagdollPart). Sent about once a second while alive;
+@@ -357,6 +413,12 @@ namespace skycraft::proto
+ 		std::uint32_t count;       // solid blocks (0: none, and no bitset follows)
+ 	};
+ 
++	struct RenShapes
++	{
++		std::int32_t  sx, sy, sz;  // section coords, as in RenSection
++		std::uint32_t count;       // blocks with their own shape (0: none, and nothing follows)
++	};
++
+ 	struct RenDug
+ 	{
+ 		std::int32_t  sx, sy, sz;  // section coords, as in RenSection
 diff --git a/skse/SkyCraft.ini b/skse/SkyCraft.ini
 index 92b585a..ca2c3c4 100644
 --- a/skse/SkyCraft.ini
@@ -5458,6 +5576,127 @@ index 0954b7f..3f0dca9 100644
 +		}
  	}
  }
+diff --git a/skse/src/DigPhysics.cpp b/skse/src/DigPhysics.cpp
+index 4ce955a..ebdf8e2 100644
+--- a/skse/src/DigPhysics.cpp
++++ b/skse/src/DigPhysics.cpp
+@@ -145,62 +145,68 @@ namespace skycraft::Dig
+ 			if ((x1 - x0 + 1) * (y1 - y0 + 1) * (z1 - z0 + 1) > 512) {
+ 				return;  // something huge (a dragon): not worth it
+ 			}
+-			for (int by = y0; by <= y1; ++by) {
++			for (int by = y0 - 1; by <= y1; ++by) {  // a fence reaches up from the block below
+ 				for (int bz = z0; bz <= z1; ++bz) {
+ 					for (int bx = x0; bx <= x1; ++bx) {
+ 						if (!NpcBlocks::SolidAt(bx, by, bz)) {
+ 							continue;
+ 						}
+-						// The block in Havok space.
+-						const float bxl = bx / k, bxh = (bx + 1) / k;
+-						const float byl = -(bz + 1) / k, byh = -bz / k;
+-						const float bzl = by / k, bzh = (by + 1) / k;
+-						float d[3];
+-						d[0] = cx - std::clamp(cx, bxl, bxh);
+-						d[1] = cy - std::clamp(cy, byl, byh);
+-						d[2] = zTop < bzl ? zTop - bzl : (zBot > bzh ? zBot - bzh : 0.0f);
+-						// Faces shared with another solid block are inside the wall: no edge
+-						// planes at the seams, or walking over a block floor would snag.
+-						if (d[0] > 0 && NpcBlocks::SolidAt(bx + 1, by, bz)) d[0] = 0;
+-						if (d[0] < 0 && NpcBlocks::SolidAt(bx - 1, by, bz)) d[0] = 0;
+-						if (d[1] > 0 && NpcBlocks::SolidAt(bx, by, bz - 1)) d[1] = 0;
+-						if (d[1] < 0 && NpcBlocks::SolidAt(bx, by, bz + 1)) d[1] = 0;
+-						if (d[2] > 0 && NpcBlocks::SolidAt(bx, by + 1, bz)) d[2] = 0;
+-						if (d[2] < 0 && NpcBlocks::SolidAt(bx, by - 1, bz)) d[2] = 0;
+-						const float len = std::sqrt(d[0] * d[0] + d[1] * d[1] + d[2] * d[2]);
+-						Plane plane;
+-						if (len > 1e-5f) {
+-							plane = { { d[0] / len, d[1] / len, d[2] / len }, len - r };
+-						} else {
+-							// The capsule's core is inside the block: out through the top if the feet
+-							// are near it, else the nearest side.
+-							const float up = bzh - (zBot - r);
+-							const float side[4] = { cx - bxl, bxh - cx, cy - byl, byh - cy };
+-							const float nearest = std::min({ side[0], side[1], side[2], side[3] });
+-							if (up <= nearest + 0.25f || (!NpcBlocks::SolidAt(bx, by + 1, bz) && up < 0.6f)) {
+-								plane = { { 0, 0, 1 }, -up };
+-							} else if (nearest == side[0]) {
+-								plane = { { -1, 0, 0 }, -(side[0] + r) };
+-							} else if (nearest == side[1]) {
+-								plane = { { 1, 0, 0 }, -(side[1] + r) };
+-							} else if (nearest == side[2]) {
+-								plane = { { 0, -1, 0 }, -(side[2] + r) };
++						NpcBlocks::BlockBox boxes[NpcBlocks::kMaxBoxes];
++						const int           boxCount = NpcBlocks::BoxesAt(bx, by, bz, boxes);
++						for (int bi = 0; bi < boxCount; ++bi) {
++							const auto& bb = boxes[bi];
++							// The box in Havok space.
++							const NpcBlocks::BlockBox ab{ { bx + bb.lo[0], by + bb.lo[1], bz + bb.lo[2] }, { bx + bb.hi[0], by + bb.hi[1], bz + bb.hi[2] } };
++							const float bxl = ab.lo[0] / k, bxh = ab.hi[0] / k;
++							const float byl = -ab.hi[2] / k, byh = -ab.lo[2] / k;
++							const float bzl = ab.lo[1] / k, bzh = ab.hi[1] / k;
++							float d[3];
++							d[0] = cx - std::clamp(cx, bxl, bxh);
++							d[1] = cy - std::clamp(cy, byl, byh);
++							d[2] = zTop < bzl ? zTop - bzl : (zBot > bzh ? zBot - bzh : 0.0f);
++							// Faces shared with another solid block are inside the wall: no edge
++							// planes at the seams, or walking over a block floor would snag.
++							if (d[0] > 0 && NpcBlocks::FaceCovered(ab, 0, 1)) d[0] = 0;
++							if (d[0] < 0 && NpcBlocks::FaceCovered(ab, 0, -1)) d[0] = 0;
++							if (d[1] > 0 && NpcBlocks::FaceCovered(ab, 2, -1)) d[1] = 0;
++							if (d[1] < 0 && NpcBlocks::FaceCovered(ab, 2, 1)) d[1] = 0;
++							if (d[2] > 0 && NpcBlocks::FaceCovered(ab, 1, 1)) d[2] = 0;
++							if (d[2] < 0 && NpcBlocks::FaceCovered(ab, 1, -1)) d[2] = 0;
++							const float len = std::sqrt(d[0] * d[0] + d[1] * d[1] + d[2] * d[2]);
++							Plane plane;
++							if (len > 1e-5f) {
++								plane = { { d[0] / len, d[1] / len, d[2] / len }, len - r };
+ 							} else {
+-								plane = { { 0, 1, 0 }, -(side[3] + r) };
++								// The capsule's core is inside the block: out through the top if the feet
++								// are near it, else the nearest side.
++								const float up = bzh - (zBot - r);
++								const float side[4] = { cx - bxl, bxh - cx, cy - byl, byh - cy };
++								const float nearest = std::min({ side[0], side[1], side[2], side[3] });
++								if (up <= nearest + 0.25f || (!NpcBlocks::FaceCovered(ab, 1, 1) && up < 0.6f)) {
++									plane = { { 0, 0, 1 }, -up };
++								} else if (nearest == side[0]) {
++									plane = { { -1, 0, 0 }, -(side[0] + r) };
++								} else if (nearest == side[1]) {
++									plane = { { 1, 0, 0 }, -(side[1] + r) };
++								} else if (nearest == side[2]) {
++									plane = { { 0, -1, 0 }, -(side[2] + r) };
++								} else {
++									plane = { { 0, 1, 0 }, -(side[3] + r) };
++								}
+ 							}
+-						}
+-						if (plane.d > kPlaneReach) {
+-							continue;
+-						}
+-						bool duplicate = false;
+-						for (const auto& other : a_out) {
+-							if (std::fabs(other.d - plane.d) < 1e-3f && other.n[0] * plane.n[0] + other.n[1] * plane.n[1] + other.n[2] * plane.n[2] > 0.9999f) {
+-								duplicate = true;
+-								break;
++							if (plane.d > kPlaneReach) {
++								continue;
++							}
++							bool duplicate = false;
++							for (const auto& other : a_out) {
++								if (std::fabs(other.d - plane.d) < 1e-3f && other.n[0] * plane.n[0] + other.n[1] * plane.n[1] + other.n[2] * plane.n[2] > 0.9999f) {
++									duplicate = true;
++									break;
++								}
++							}
++							if (!duplicate) {
++								a_out.push_back(plane);
+ 							}
+-						}
+-						if (!duplicate) {
+-							a_out.push_back(plane);
+ 						}
+ 					}
+ 				}
 diff --git a/skse/src/Game.cpp b/skse/src/Game.cpp
 index 3bb4d34..c3ec0c7 100644
 --- a/skse/src/Game.cpp
@@ -5686,7 +5925,7 @@ index 3bb4d34..c3ec0c7 100644
  				Perf::Scope timer(Perf::kDigMeshes);
  				Dig::UpdateMeshes(digSettled > 3.0f ? a_player : nullptr, a_delta, !dugChanged.empty());
 diff --git a/skse/src/Game.h b/skse/src/Game.h
-index 05788b1..9ff1cc9 100644
+index 05788b1..00612f1 100644
 --- a/skse/src/Game.h
 +++ b/skse/src/Game.h
 @@ -17,6 +17,20 @@ namespace skycraft
@@ -5750,7 +5989,29 @@ index 05788b1..9ff1cc9 100644
  	}
  
  	namespace BlockLights
-@@ -153,6 +182,9 @@ namespace skycraft
+@@ -146,6 +175,21 @@ namespace skycraft
+ 		void OnSolids(const std::uint8_t* a_data, std::uint32_t a_bytes);
+ 		void Clear();
+ 		bool SolidAt(std::int32_t a_x, std::int32_t a_y, std::int32_t a_z);
++		// Minecraft's exact collision boxes (blocks, absolute Minecraft coordinates, y up). A block that
++		// isn't a full cube (slab, stair, fence, carpet...) has its own boxes; a full one has one cube.
++		struct BlockBox
++		{
++			float lo[3], hi[3];
++		};
++		static constexpr int kMaxBoxes = 8;
++		// Boxes of block (x, y, z) in block-local coordinates (0..1, fences up to 1.5); 0 if not solid.
++		int BoxesAt(std::int32_t a_x, std::int32_t a_y, std::int32_t a_z, BlockBox a_out[kMaxBoxes]);
++		// Every box of every solid block in the given block range (inclusive), absolute coordinates.
++		void GatherBoxes(int a_x0, int a_x1, int a_y0, int a_y1, int a_z0, int a_z1, std::vector<BlockBox>& a_out);
++		// Is the face of a_box (absolute coords) on a_axis (0 x, 1 y, 2 z), direction a_sign, flush against
++		// another solid box that covers it (so the face is inside a wall and mustn't snag anything)?
++		bool FaceCovered(const BlockBox& a_box, int a_axis, int a_sign);
++		void OnShapes(const std::uint8_t* a_data, std::uint32_t a_bytes);
+ 		// For the blocks' contact shadows (any thread): sets a_bit in a_out[x + w*(y + h*z)] for
+ 		// each solid block of the box at a_origin (Minecraft block coords) of a_size blocks. The
+ 		// generation changes whenever any section's blocks do.
+@@ -153,6 +197,9 @@ namespace skycraft
  		std::uint32_t Generation();
  		// Main thread, every frame: NPCs overlapping solid Minecraft blocks are pushed back out.
  		void PushActorsOut(RE::PlayerCharacter* a_player, float a_delta);
@@ -6206,10 +6467,250 @@ index 741fcca..8ca0083 100644
  
  namespace skycraft::Launcher
 diff --git a/skse/src/NpcBlocks.cpp b/skse/src/NpcBlocks.cpp
-index 5e25a7d..749e6db 100644
+index 5e25a7d..7a6905e 100644
 --- a/skse/src/NpcBlocks.cpp
 +++ b/skse/src/NpcBlocks.cpp
-@@ -250,5 +250,114 @@ namespace skycraft
+@@ -12,6 +12,14 @@ namespace skycraft
+ 		std::shared_mutex solidsLock;
+ 		std::atomic<std::uint32_t> solidsGeneration{ 0 };  // bumped on every change
+ 
++		// Blocks that aren't whole cubes: section -> block index (x + 16z + 256y) -> their boxes (sixteenths).
++		struct ShapeBlock
++		{
++			std::uint8_t n{ 0 };
++			std::uint8_t b[8][6]{};
++		};
++		std::unordered_map<std::uint64_t, std::unordered_map<std::uint16_t, ShapeBlock>> shapes;  // guarded by solidsLock
++
+ 		std::uint64_t SectionKey(std::int32_t a_x, std::int32_t a_y, std::int32_t a_z)
+ 		{
+ 			return (std::uint64_t(std::uint32_t(a_x) & 0x3FFFFF) << 42) | (std::uint64_t(std::uint32_t(a_z) & 0x3FFFFF) << 20) |
+@@ -36,6 +44,29 @@ namespace skycraft
+ 		std::unordered_map<RE::FormID, Detour> detours;
+ 
+ 		bool ColumnBlocked(int a_x, int a_z, int a_y0, int a_y1);
++
++		// A circle (an actor seen from above) against a box's footprint: adds the push out to a_px, a_pz.
++		void PushOutOfRect(double a_cx, double a_cz, double a_r, double a_x0, double a_x1, double a_z0, double a_z1, double& a_px, double& a_pz)
++		{
++			const double qx = std::clamp(a_cx, a_x0, a_x1), qz = std::clamp(a_cz, a_z0, a_z1);
++			double       dx = a_cx - qx, dz = a_cz - qz;
++			const double d = std::sqrt(dx * dx + dz * dz);
++			if (d >= a_r) {
++				return;
++			}
++			if (d < 1e-6) {
++				// Centre inside the footprint: out through the nearest side.
++				const double toW = a_cx - a_x0, toE = a_x1 - a_cx, toN = a_cz - a_z0, toS = a_z1 - a_cz;
++				const double m = std::min({ toW, toE, toN, toS });
++				dx = m == toW ? -1.0 : m == toE ? 1.0 : 0.0;
++				dz = m == toN ? -1.0 : m == toS ? 1.0 : 0.0;
++				a_px += dx * (m + a_r);
++				a_pz += dz * (m + a_r);
++			} else {
++				a_px += dx / d * (a_r - d);
++				a_pz += dz / d * (a_r - d);
++			}
++		}
+ 	}
+ 
+ 	namespace NpcBlocks
+@@ -69,6 +100,7 @@ namespace skycraft
+ 			++solidsGeneration;
+ 			if (hdr->count == 0 || a_bytes < sizeof(proto::RenSolids) + 512) {
+ 				solids.erase(key);
++				shapes.erase(key);
+ 				return;
+ 			}
+ 			std::memcpy(solids[key].data(), a_data + sizeof(proto::RenSolids), 512);
+@@ -79,6 +111,7 @@ namespace skycraft
+ 			std::unique_lock lock(solidsLock);
+ 			++solidsGeneration;
+ 			solids.clear();
++			shapes.clear();
+ 		}
+ 
+ 		std::uint32_t Generation() { return solidsGeneration.load(); }
+@@ -120,6 +153,132 @@ namespace skycraft
+ 			}
+ 		}
+ 
++
++		// Boxes of one block, block-local, in blocks. The caller holds solidsLock.
++		int BoxesLocked(std::int32_t a_x, std::int32_t a_y, std::int32_t a_z, BlockBox a_out[kMaxBoxes])
++		{
++			const auto key = SectionKey(FloorDiv16(a_x), FloorDiv16(a_y), FloorDiv16(a_z));
++			const auto it = solids.find(key);
++			if (it == solids.end()) {
++				return 0;
++			}
++			const int bit = (a_x & 15) + 16 * (a_z & 15) + 256 * (a_y & 15);
++			if (!((it->second[bit >> 6] >> (bit & 63)) & 1)) {
++				return 0;
++			}
++			const auto sit = shapes.find(key);
++			if (sit != shapes.end()) {
++				const auto bit2 = sit->second.find(std::uint16_t(bit));
++				if (bit2 != sit->second.end()) {
++					const auto& sb = bit2->second;
++					for (int i = 0; i < sb.n && i < kMaxBoxes; ++i) {
++						for (int k = 0; k < 3; ++k) {
++							a_out[i].lo[k] = sb.b[i][k] / 16.0f;
++							a_out[i].hi[k] = sb.b[i][3 + k] / 16.0f;
++						}
++					}
++					return std::min<int>(sb.n, kMaxBoxes);
++				}
++			}
++			a_out[0] = { { 0, 0, 0 }, { 1, 1, 1 } };
++			return 1;
++		}
++
++		int BoxesAt(std::int32_t a_x, std::int32_t a_y, std::int32_t a_z, BlockBox a_out[kMaxBoxes])
++		{
++			std::shared_lock lock(solidsLock);
++			return BoxesLocked(a_x, a_y, a_z, a_out);
++		}
++
++		void GatherBoxes(int a_x0, int a_x1, int a_y0, int a_y1, int a_z0, int a_z1, std::vector<BlockBox>& a_out)
++		{
++			std::shared_lock lock(solidsLock);
++			if (solids.empty()) {
++				return;
++			}
++			BlockBox local[kMaxBoxes];
++			for (int y = a_y0; y <= a_y1; ++y) {
++				for (int z = a_z0; z <= a_z1; ++z) {
++					for (int x = a_x0; x <= a_x1; ++x) {
++						const int n = BoxesLocked(x, y, z, local);
++						for (int i = 0; i < n; ++i) {
++							BlockBox abs = local[i];
++							abs.lo[0] += float(x), abs.hi[0] += float(x);
++							abs.lo[1] += float(y), abs.hi[1] += float(y);
++							abs.lo[2] += float(z), abs.hi[2] += float(z);
++							a_out.push_back(abs);
++						}
++					}
++				}
++			}
++		}
++
++		bool FaceCovered(const BlockBox& a_box, int a_axis, int a_sign)
++		{
++			constexpr float eps = 1e-3f;
++			const int       a1 = (a_axis + 1) % 3, a2 = (a_axis + 2) % 3;
++			const float     c = a_sign > 0 ? a_box.hi[a_axis] : a_box.lo[a_axis];
++			int             lo[3], hi[3];
++			lo[a_axis] = hi[a_axis] = int(std::floor(c + (a_sign > 0 ? 1e-4f : -1e-4f)));
++			lo[a1] = int(std::floor(a_box.lo[a1] + 1e-4f)), hi[a1] = int(std::floor(a_box.hi[a1] - 1e-4f));
++			lo[a2] = int(std::floor(a_box.lo[a2] + 1e-4f)), hi[a2] = int(std::floor(a_box.hi[a2] - 1e-4f));
++			std::shared_lock lock(solidsLock);
++			BlockBox         local[kMaxBoxes];
++			for (int z = lo[2]; z <= hi[2]; ++z) {
++				for (int y = lo[1]; y <= hi[1]; ++y) {
++					for (int x = lo[0]; x <= hi[0]; ++x) {
++						const int n = BoxesLocked(x, y, z, local);
++						const int cell[3] = { x, y, z };
++						for (int i = 0; i < n; ++i) {
++							const float opposite = (a_sign > 0 ? local[i].lo[a_axis] : local[i].hi[a_axis]) + float(cell[a_axis]);
++							if (std::fabs(opposite - c) > eps) {
++								continue;
++							}
++							if (local[i].lo[a1] + float(cell[a1]) <= a_box.lo[a1] + eps && local[i].hi[a1] + float(cell[a1]) >= a_box.hi[a1] - eps &&
++								local[i].lo[a2] + float(cell[a2]) <= a_box.lo[a2] + eps && local[i].hi[a2] + float(cell[a2]) >= a_box.hi[a2] - eps) {
++								return true;
++							}
++						}
++					}
++				}
++			}
++			return false;
++		}
++
++		void OnShapes(const std::uint8_t* a_data, std::uint32_t a_bytes)
++		{
++			if (a_bytes < sizeof(proto::RenShapes)) {
++				return;
++			}
++			const auto* hdr = reinterpret_cast<const proto::RenShapes*>(a_data);
++			const auto  key = SectionKey(hdr->sx, hdr->sy, hdr->sz);
++			std::unordered_map<std::uint16_t, ShapeBlock> parsed;
++			std::uint32_t                                  at = sizeof(proto::RenShapes);
++			for (std::uint32_t i = 0; i < hdr->count; ++i) {
++				if (at + 3 > a_bytes) {
++					break;
++				}
++				const std::uint16_t index = std::uint16_t(a_data[at] | (a_data[at + 1] << 8));
++				const std::uint8_t  n = a_data[at + 2];
++				at += 3;
++				if (n > kMaxBoxes || at + std::uint32_t(n) * 6 > a_bytes || index >= 4096) {
++					break;
++				}
++				ShapeBlock sb;
++				sb.n = n;
++				std::memcpy(sb.b, a_data + at, std::size_t(n) * 6);
++				at += std::uint32_t(n) * 6;
++				parsed[index] = sb;
++			}
++			std::unique_lock lock(solidsLock);
++			++solidsGeneration;
++			if (parsed.empty()) {
++				shapes.erase(key);
++			} else {
++				shapes[key] = std::move(parsed);
++			}
++		}
++
+ 		bool SolidAt(std::int32_t a_x, std::int32_t a_y, std::int32_t a_z)
+ 		{
+ 			std::shared_lock lock(solidsLock);
+@@ -169,37 +328,15 @@ namespace skycraft
+ 				const int y0 = int(std::floor(mc.y + 0.3)), y1 = int(std::floor(mc.y + h - 0.1));
+ 				double    cx = mc.x, cz = mc.z;
+ 				bool      moved = false;
+-				for (int pass = 0; pass < 3; ++pass) {
++				// The exact boxes around the actor that reach into its height (a fence from the block below too).
++				std::vector<BlockBox> nearby;
++				GatherBoxes(int(std::floor(cx - r - 1.0)), int(std::floor(cx + r + 1.0)), y0 - 1, y1, int(std::floor(cz - r - 1.0)), int(std::floor(cz + r + 1.0)), nearby);
++				const float bodyLo = float(mc.y + 0.3), bodyHi = float(mc.y + h - 0.1);
++				std::erase_if(nearby, [&](const BlockBox& a_box) { return a_box.hi[1] <= bodyLo || a_box.lo[1] >= bodyHi; });
++				for (int pass = 0; pass < 3 && !nearby.empty(); ++pass) {
+ 					double pushX = 0.0, pushZ = 0.0;
+-					for (int bx = int(std::floor(cx - r)); bx <= int(std::floor(cx + r)); ++bx) {
+-						for (int bz = int(std::floor(cz - r)); bz <= int(std::floor(cz + r)); ++bz) {
+-							bool hit = false;
+-							for (int by = y0; by <= y1 && !hit; ++by) {
+-								hit = SolidAt(bx, by, bz);
+-							}
+-							if (!hit) {
+-								continue;
+-							}
+-							// Circle (the actor) against the block's square, seen from above.
+-							const double qx = std::clamp(cx, double(bx), double(bx + 1)), qz = std::clamp(cz, double(bz), double(bz + 1));
+-							double       dx = cx - qx, dz = cz - qz;
+-							double       d = std::sqrt(dx * dx + dz * dz);
+-							if (d >= r) {
+-								continue;
+-							}
+-							if (d < 1e-6) {
+-								// Centre inside the block: out through the nearest side.
+-								const double toW = cx - bx, toE = bx + 1 - cx, toN = cz - bz, toS = bz + 1 - cz;
+-								const double m = std::min({ toW, toE, toN, toS });
+-								dx = m == toW ? -1.0 : m == toE ? 1.0 : 0.0;
+-								dz = m == toN ? -1.0 : m == toS ? 1.0 : 0.0;
+-								pushX += dx * (m + r);
+-								pushZ += dz * (m + r);
+-							} else {
+-								pushX += dx / d * (r - d);
+-								pushZ += dz / d * (r - d);
+-							}
+-						}
++					for (const auto& box : nearby) {
++						PushOutOfRect(cx, cz, r, box.lo[0], box.hi[0], box.lo[2], box.hi[2], pushX, pushZ);
+ 					}
+ 					if (std::abs(pushX) < 1e-4 && std::abs(pushZ) < 1e-4) {
+ 						break;
+@@ -250,5 +387,101 @@ namespace skycraft
  				detours.clear();
  			}
  		}
@@ -6237,37 +6738,22 @@ index 5e25a7d..749e6db 100644
 +			double           cx = mc.x, cz = mc.z, feet = mc.y;
 +			bool             moved = false, landed = false;
 +
-+			// Sides: any block above the step height and below the head pushes the body back out (as it does NPCs).
-+			const int wallLo = int(std::floor(feet - 0.35)) + 1, wallHi = int(std::ceil(feet + kHeight)) - 1;
++			// Minecraft's exact boxes around the body (the block above and below too: fences stand 1.5 tall).
++			std::vector<BlockBox> nearby;
++			GatherBoxes(int(std::floor(cx - kRadius - 1.0)), int(std::floor(cx + kRadius + 1.0)), int(std::floor(feet - 0.5)) - 1,
++				int(std::floor(feet + kStep + kHeight)) + 1, int(std::floor(cz - kRadius - 1.0)), int(std::floor(cz + kRadius + 1.0)), nearby);
++			if (nearby.empty()) {
++				return;
++			}
++
++			// Sides: any box rising above the step height and starting below the head pushes the body back out.
 +			for (int pass = 0; pass < 3; ++pass) {
 +				double pushX = 0.0, pushZ = 0.0;
-+				for (int bx = int(std::floor(cx - kRadius)); bx <= int(std::floor(cx + kRadius)); ++bx) {
-+					for (int bz = int(std::floor(cz - kRadius)); bz <= int(std::floor(cz + kRadius)); ++bz) {
-+						bool hit = false;
-+						for (int by = wallLo; by <= wallHi && !hit; ++by) {
-+							hit = SolidAt(bx, by, bz);
-+						}
-+						if (!hit) {
-+							continue;
-+						}
-+						const double qx = std::clamp(cx, double(bx), double(bx + 1)), qz = std::clamp(cz, double(bz), double(bz + 1));
-+						double       dx = cx - qx, dz = cz - qz;
-+						const double d = std::sqrt(dx * dx + dz * dz);
-+						if (d >= kRadius) {
-+							continue;
-+						}
-+						if (d < 1e-6) {
-+							const double toW = cx - bx, toE = bx + 1 - cx, toN = cz - bz, toS = bz + 1 - cz;
-+							const double m = std::min({ toW, toE, toN, toS });
-+							dx = m == toW ? -1.0 : m == toE ? 1.0 : 0.0;
-+							dz = m == toN ? -1.0 : m == toS ? 1.0 : 0.0;
-+							pushX += dx * (m + kRadius);
-+							pushZ += dz * (m + kRadius);
-+						} else {
-+							pushX += dx / d * (kRadius - d);
-+							pushZ += dz / d * (kRadius - d);
-+						}
++				for (const auto& box : nearby) {
++					if (box.hi[1] <= feet + kStep || box.lo[1] >= feet + kHeight) {
++						continue;
 +					}
++					PushOutOfRect(cx, cz, kRadius, box.lo[0], box.hi[0], box.lo[2], box.hi[2], pushX, pushZ);
 +				}
 +				if (std::abs(pushX) < 1e-4 && std::abs(pushZ) < 1e-4) {
 +					break;
@@ -6277,26 +6763,28 @@ index 5e25a7d..749e6db 100644
 +				moved = true;
 +			}
 +
-+			// Underfoot: the highest block top within a step of the feet (with room above it) is the floor.
++			// Underfoot: the highest box top within a step of the feet (with the body's height free above it) is the floor.
 +			bool   have = false;
 +			double best = 0.0;
-+			for (int bx = int(std::floor(cx - kRadius)); bx <= int(std::floor(cx + kRadius)); ++bx) {
-+				for (int bz = int(std::floor(cz - kRadius)); bz <= int(std::floor(cz + kRadius)); ++bz) {
-+					const double qx = std::clamp(cx, double(bx), double(bx + 1)), qz = std::clamp(cz, double(bz), double(bz + 1));
-+					if (std::hypot(cx - qx, cz - qz) >= kRadius) {
-+						continue;
-+					}
-+					for (int by = int(std::floor(feet + kStep)); by >= int(std::floor(feet - 0.5)); --by) {
-+						if (!SolidAt(bx, by, bz)) {
-+							continue;
-+						}
-+						const double top = by + 1.0;  // the highest solid block in this column is the one that counts
-+						if (top <= feet + kStep && top >= feet - 0.5 && !SolidAt(bx, by + 1, bz) && !SolidAt(bx, by + 2, bz) && (!have || top > best)) {
-+							have = true;
-+							best = top;
-+						}
++			auto   underBody = [&](const BlockBox& a_box) {
++				const double qx = std::clamp(cx, double(a_box.lo[0]), double(a_box.hi[0])), qz = std::clamp(cz, double(a_box.lo[2]), double(a_box.hi[2]));
++				return std::hypot(cx - qx, cz - qz) < kRadius;
++			};
++			for (const auto& box : nearby) {
++				const double top = box.hi[1];
++				if (top > feet + kStep || top < feet - 0.5 || !underBody(box) || (have && top <= best)) {
++					continue;
++				}
++				bool clear = true;
++				for (const auto& other : nearby) {
++					if (&other != &box && other.hi[1] > top + 0.01 && other.lo[1] < top + kHeight && underBody(other)) {
++						clear = false;
 +						break;
 +					}
++				}
++				if (clear) {
++					have = true;
++					best = top;
 +				}
 +			}
 +			if (have && feet < best + 0.03) {
@@ -6339,10 +6827,20 @@ index 4a78706..ae60836 100644
  			}
  			UploadLatestFrame();
 diff --git a/skse/src/WorldRender.cpp b/skse/src/WorldRender.cpp
-index b877ae5..260c2f0 100644
+index b877ae5..22fc725 100644
 --- a/skse/src/WorldRender.cpp
 +++ b/skse/src/WorldRender.cpp
-@@ -1324,7 +1324,9 @@ float4 OverlayPS(float4 pos : SV_Position) : SV_Target
+@@ -1100,6 +1100,9 @@ float4 OverlayPS(float4 pos : SV_Position) : SV_Target
+ 					case proto::kRenSolids:
+ 						NpcBlocks::OnSolids(a_data, a_bytes);
+ 						break;
++					case proto::kRenShapes:
++						NpcBlocks::OnShapes(a_data, a_bytes);
++						break;
+ 					case proto::kRenDug:
+ 						Dig::OnDug(a_data, a_bytes);
+ 						break;
+@@ -1324,7 +1327,9 @@ float4 OverlayPS(float4 pos : SV_Position) : SV_Target
  
  		void BuildOutline(const double a_o[3])
  		{
@@ -6353,7 +6851,7 @@ index b877ae5..260c2f0 100644
  				return;
  			}
  			constexpr float g = 0.002f;
-@@ -1991,7 +1993,7 @@ float4 OverlayPS(float4 pos : SV_Position) : SV_Target
+@@ -1991,7 +1996,7 @@ float4 OverlayPS(float4 pos : SV_Position) : SV_Target
  		void CaptureSunShadows(RE::BSShadowLight* a_sun)
  		{
  			auto* renderer = RE::BSGraphics::Renderer::GetSingleton();
@@ -6362,7 +6860,7 @@ index b877ae5..260c2f0 100644
  				return;
  			}
  			auto& descs = a_sun->GetRuntimeData().shadowmapDescriptors;
-@@ -2889,6 +2891,25 @@ float4 OverlayPS(float4 pos : SV_Position) : SV_Target
+@@ -2889,6 +2894,25 @@ float4 OverlayPS(float4 pos : SV_Position) : SV_Target
  			passTimer.Finish(a_context);
  		}
  
@@ -6388,7 +6886,7 @@ index b877ae5..260c2f0 100644
  		// Right after Skyrim renders its 3D scene, before its post-processing: the blocks go into
  		// the HDR scene and Skyrim's depth, so its fog, tone mapping, eye adaptation, bloom, depth
  		// of field, colour grading and TAA treat them like any Skyrim object.
-@@ -2901,7 +2922,7 @@ float4 OverlayPS(float4 pos : SV_Position) : SV_Target
+@@ -2901,7 +2925,7 @@ float4 OverlayPS(float4 pos : SV_Position) : SV_Target
  				Game::NoteFrameStep('D');
  				Game::NoteRenderedCamera(camera->world.translate, camera->world.rotate);
  			}
@@ -6397,7 +6895,7 @@ index b877ae5..260c2f0 100644
  				return;
  			}
  			Link::Get().ReadWorldEntities(entities);
-@@ -3048,7 +3069,7 @@ float4 OverlayPS(float4 pos : SV_Position) : SV_Target
+@@ -3048,7 +3072,7 @@ float4 OverlayPS(float4 pos : SV_Position) : SV_Target
  			static void thunk(void* a_1, void* a_2, void* a_3, std::uint32_t a_4)
  			{
  				static int logged = 0;
@@ -6406,7 +6904,7 @@ index b877ae5..260c2f0 100644
  					++logged;
  					if (auto* renderer = RE::BSGraphics::Renderer::GetSingleton()) {
  						auto&                   rd = renderer->GetRuntimeData();
-@@ -3217,7 +3238,7 @@ float4 OverlayPS(float4 pos : SV_Position) : SV_Target
+@@ -3217,7 +3241,7 @@ float4 OverlayPS(float4 pos : SV_Position) : SV_Target
  
  			auto& st = State();
  			auto* camera = RE::Main::WorldRootCamera();
@@ -6415,7 +6913,7 @@ index b877ae5..260c2f0 100644
  				return;
  			}
  
-@@ -3288,8 +3309,41 @@ float4 OverlayPS(float4 pos : SV_Position) : SV_Target
+@@ -3288,8 +3312,41 @@ float4 OverlayPS(float4 pos : SV_Position) : SV_Target
  			};
  			// Main::RenderWorld's one call, in the frame function: right after it, Skyrim's scene is
  			// complete and its post-processing (tone mapping, bloom, depth of field, grading) hasn't run.
