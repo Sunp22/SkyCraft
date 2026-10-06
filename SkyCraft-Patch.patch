@@ -3428,7 +3428,7 @@ index fce6cf8..77bf3e0 100644
  	{
  		std::int32_t  sx, sy, sz;  // section coords, as in RenSection
 diff --git a/skse/SkyCraft.ini b/skse/SkyCraft.ini
-index 92b585a..ca2c3c4 100644
+index 92b585a..64fb15a 100644
 --- a/skse/SkyCraft.ini
 +++ b/skse/SkyCraft.ini
 @@ -14,6 +14,42 @@ sLauncher =
@@ -3468,14 +3468,14 @@ index 92b585a..ca2c3c4 100644
 +
 +; The creature a stand-in is made from. Its sounds are the stand-in's sounds (the footsteps, growls and hurt cries are the creature's own), so
 +; the default is a rabbit, which has no growls to make. A name of any creature in your game, or "Plugin.esp:0xFORMID" (the FormID without its
-+; load-order byte) for an actor from a mod, e.g. a silent one you made. Skeever brings the old, noisier behaviour back.
++; load-order byte) for an actor from a mod, e.g. a silent one you made. Stand-ins are never made from a skeever by default, nor from a creature that has spells or abilities of its own (the Wabbajack's rabbit does, which shows as a red mist).
 +sStandInBase =
 +
  [Debug]
  ; Detailed timing, camera, combat and lighting logs in SkyCraft.log (several lines a second), for
  ; reporting problems. 0 = off.
 diff --git a/skse/src/Combat.cpp b/skse/src/Combat.cpp
-index 0954b7f..3f0dca9 100644
+index 0954b7f..bad2e03 100644
 --- a/skse/src/Combat.cpp
 +++ b/skse/src/Combat.cpp
 @@ -1,5 +1,7 @@
@@ -3626,7 +3626,7 @@ index 0954b7f..3f0dca9 100644
  				const auto mc = SkyToMc(pos);
  				r.x = static_cast<float>(mc.x);
  				r.y = static_cast<float>(mc.y);
-@@ -240,161 +343,1510 @@ namespace skycraft
+@@ -240,161 +343,1530 @@ namespace skycraft
  				logger::warn("hit pipeline: melee call site doesn't match this game build; using plain damage");
  				return;
  			}
@@ -4301,13 +4301,26 @@ index 0954b7f..3f0dca9 100644
 +			}
 +		}
 +
++		// True when the creature has no spells, abilities or shaders of its own to bring along (the Wabbajack's rabbit has).
++		template <class N>
++		bool BaseIsPlain(N* a_npc)
++		{
++			bool plain = true;
++			if constexpr (requires { a_npc->actorEffects->numSpells; }) {
++				if (a_npc->actorEffects && (a_npc->actorEffects->numSpells > 0)) {
++					plain = false;
++				}
++			}
++			return plain;
++		}
++
 +		template <class D>
 +		RE::TESNPC* PickProxyBase(D* a_data)
 +		{
 +			// A small, plain creature that is no use to anyone: its attacks, size and looks don't matter, it is hidden. What matters is that it
 +			// is quiet: a rabbit has no growls or hisses to make, a skeever has plenty. SkyCraft.ini [Mobs] sStandInBase chooses another: a
 +			// creature's name, or "Plugin.esp:0xFORMID" for one from a mod (a silent actor made for the purpose, say).
-+			std::vector<std::string> names{ "Rabbit", "Skeever", "Mudcrab", "Wolf" };
++			std::vector<std::string> names{ "Rabbit", "Mudcrab", "Wolf" };  // (no skeever: its noises and its disease are the old trouble)
 +			const std::string        wanted = StandInBaseSetting();
 +			if (!wanted.empty()) {
 +				if (const auto colon = wanted.find(':'); colon != std::string::npos) {
@@ -4323,10 +4336,17 @@ index 0954b7f..3f0dca9 100644
 +					names.insert(names.begin(), wanted);
 +				}
 +			}
++			// A creature of the right name is not always a plain one: the game has several rabbits, and the one the Wabbajack's
++			// transformation makes carries spells of its own, which show as a red mist where it appears. Only a base with no
++			// spells or abilities at all is used; the ones turned down are logged by name and FormID.
 +			for (const auto& name : names) {
 +				if constexpr (requires { a_data->template GetFormArray<RE::TESNPC>(); }) {
 +					for (auto* npc : a_data->template GetFormArray<RE::TESNPC>()) {
 +						if (npc && npc->GetName() && std::string_view(npc->GetName()) == name) {
++							if (!BaseIsPlain(npc)) {
++								logger::info("Stand-in base {:08X} ('{}') turned down: it has spells or abilities of its own", npc->GetFormID(), name);
++								continue;
++							}
 +							return npc;
 +						}
 +					}
@@ -5259,7 +5279,7 @@ index 0954b7f..3f0dca9 100644
  		}
  
  		void KillPlayer(RE::PlayerCharacter* a_player, const proto::McEvent& a_ev)
-@@ -580,7 +2032,7 @@ namespace skycraft
+@@ -580,7 +2052,7 @@ namespace skycraft
  			for (auto& handle : lists->highActorHandles) {
  				auto actorPtr = handle.get();
  				auto* actor = actorPtr.get();
@@ -5268,7 +5288,7 @@ index 0954b7f..3f0dca9 100644
  					continue;
  				}
  				const auto hazard = HazardAtActor(actor);
-@@ -698,6 +2150,7 @@ namespace skycraft
+@@ -698,6 +2170,7 @@ namespace skycraft
  			RE::NiPoint3 center;
  			float        radius;  // Minecraft blocks
  			float        delay;   // seconds: after the blast's damage has landed
@@ -5276,7 +5296,7 @@ index 0954b7f..3f0dca9 100644
  		};
  		std::vector<PendingExplosion> pendingExplosions;
  
-@@ -786,6 +2239,9 @@ namespace skycraft
+@@ -786,6 +2259,9 @@ namespace skycraft
  					continue;
  				}
  				if (auto* actor = ref->As<RE::Actor>()) {
@@ -5286,7 +5306,7 @@ index 0954b7f..3f0dca9 100644
  					if (!actor->IsDead()) {
  						if (auto* process = actor->GetActorRuntimeData().currentProcess) {
  							process->KnockExplosion(actor, a_blast.center, 25.0f * falloff * power);
-@@ -830,6 +2286,183 @@ namespace skycraft
+@@ -830,6 +2306,183 @@ namespace skycraft
  			}
  			logger::info("Minecraft explosion (radius {:.1f}): knocked {} people away, threw {} objects", a_blast.radius, people, objects);
  		}
@@ -5470,7 +5490,7 @@ index 0954b7f..3f0dca9 100644
  	}
  
  	namespace Combat
-@@ -854,16 +2487,52 @@ namespace skycraft
+@@ -854,16 +2507,52 @@ namespace skycraft
  				}
  				healthPrimed = false;
  				engaged = false;
@@ -5529,7 +5549,7 @@ index 0954b7f..3f0dca9 100644
  				return;
  			}
  			// Skyrim can't kill the player while Minecraft decides: one huge hit knocks them down
-@@ -878,29 +2547,11 @@ namespace skycraft
+@@ -878,29 +2567,11 @@ namespace skycraft
  
  			proto::McEvent ev;
  			while (link.PopEvent(ev)) {
@@ -5562,7 +5582,7 @@ index 0954b7f..3f0dca9 100644
  			for (auto it = pendingExplosions.begin(); it != pendingExplosions.end();) {
  				it->delay -= a_delta;
  				if (it->delay <= 0.0f) {
-@@ -924,5 +2575,13 @@ namespace skycraft
+@@ -924,5 +2595,13 @@ namespace skycraft
  		}
  
  		bool PlayerEngaged() { return engaged; }
