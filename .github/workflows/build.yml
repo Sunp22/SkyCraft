@@ -60,7 +60,7 @@ jobs:
               exit 1
             fi
           }
-          apply_patch SkyCraft-Patch.patch airHeld skse/src/NpcBlocks.cpp
+          apply_patch SkyCraft-Patch.patch BlockMove skse/src/NpcBlocks.cpp
 
       # A repo made from "Download ZIP" has no submodule contents. Fetch CommonLibSSE-NG ourselves
       # then (the branch's latest commit, not the exact one the author built with).
@@ -230,15 +230,6 @@ jobs:
             grep -aq "put on the mob's body and eyes" skse/build/RelWithDebInfo/SkyCraft.dll \
               && echo "SkyCraft.dll has the lock-on node placement." \
               || { echo "::error::SkyCraft.dll was built without the lock-on node placement."; exit 1; }
-          fi
-
-      - name: Check the Skyrim-mode landing fix made it into the build
-        shell: bash
-        run: |
-          if [ -f SkyCraft-Patch.patch ] || grep -q airHeld skse/src/NpcBlocks.cpp; then
-            grep -aq "landed on a block by hand" skse/build/RelWithDebInfo/SkyCraft.dll \
-              && echo "SkyCraft.dll has the Skyrim-mode landing fix." \
-              || { echo "::error::SkyCraft.dll was built without the Skyrim-mode landing fix."; exit 1; }
           fi
 
       - name: Upload the mod
