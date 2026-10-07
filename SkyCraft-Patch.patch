@@ -3474,6 +3474,170 @@ index 92b585a..64fb15a 100644
  [Debug]
  ; Detailed timing, camera, combat and lighting logs in SkyCraft.log (several lines a second), for
  ; reporting problems. 0 = off.
+diff --git a/skse/src/BlockMove.h b/skse/src/BlockMove.h
+new file mode 100644
+index 0000000..0cbdd07
+--- /dev/null
++++ b/skse/src/BlockMove.h
+@@ -0,0 +1,158 @@
++#pragma once
++
++#include <algorithm>
++#include <cmath>
++#include <vector>
++
++// Minecraft's own movement collision (Entity.collide / collideBoundingBox / the step-up test),
++// on plain boxes and with no game types in it, so it is the same algorithm Minecraft runs and can
++// be tested on its own. Used to hold the Skyrim-controlled player against Minecraft's blocks 1:1.
++// Coordinates are Minecraft's (x east, y up, z south), in blocks. B is any box type with float or
++// double lo[3] and hi[3].
++namespace skycraft::BlockMove
++{
++	struct Aabb
++	{
++		double lo[3], hi[3];
++
++		Aabb Moved(double a_x, double a_y, double a_z) const
++		{
++			return { { lo[0] + a_x, lo[1] + a_y, lo[2] + a_z }, { hi[0] + a_x, hi[1] + a_y, hi[2] + a_z } };
++		}
++		// Minecraft's AABB.expandTowards: grows the box in the direction of the movement.
++		Aabb Expanded(double a_x, double a_y, double a_z) const
++		{
++			Aabb r = *this;
++			(a_x < 0 ? r.lo[0] : r.hi[0]) += a_x;
++			(a_y < 0 ? r.lo[1] : r.hi[1]) += a_y;
++			(a_z < 0 ? r.lo[2] : r.hi[2]) += a_z;
++			return r;
++		}
++	};
++
++	struct Vec
++	{
++		double x, y, z;
++		double HorizSqr() const { return x * x + z * z; }
++	};
++
++	constexpr double kEps = 1.0e-7;       // Shapes.collide's epsilon
++	constexpr double kStepHeight = 0.6;   // the player's maxUpStep
++
++	// Shapes.collide: how far the box can move along a_axis (by a_d) before a box stops it.
++	template <class B>
++	double ClipAxis(const std::vector<B>& a_boxes, const Aabb& a_a, int a_axis, double a_d)
++	{
++		const int o1 = (a_axis + 1) % 3, o2 = (a_axis + 2) % 3;
++		for (const auto& b : a_boxes) {
++			if (!(a_a.hi[o1] > b.lo[o1] + kEps && a_a.lo[o1] < b.hi[o1] - kEps && a_a.hi[o2] > b.lo[o2] + kEps && a_a.lo[o2] < b.hi[o2] - kEps)) {
++				continue;
++			}
++			if (a_d > 0.0 && b.lo[a_axis] >= a_a.hi[a_axis] - kEps) {
++				a_d = std::min(a_d, double(b.lo[a_axis]) - a_a.hi[a_axis]);
++			} else if (a_d < 0.0 && b.hi[a_axis] <= a_a.lo[a_axis] + kEps) {
++				a_d = std::max(a_d, double(b.hi[a_axis]) - a_a.lo[a_axis]);
++			}
++		}
++		return a_d;
++	}
++
++	// Entity.collideBoundingBox: y first, then whichever of x and z is the longer move first.
++	template <class B>
++	Vec CollideBox(const std::vector<B>& a_boxes, Aabb a_a, Vec a_m)
++	{
++		if (a_m.y != 0.0) {
++			a_m.y = ClipAxis(a_boxes, a_a, 1, a_m.y);
++			if (a_m.y != 0.0) {
++				a_a = a_a.Moved(0, a_m.y, 0);
++			}
++		}
++		const bool zFirst = std::abs(a_m.x) < std::abs(a_m.z);
++		if (zFirst && a_m.z != 0.0) {
++			a_m.z = ClipAxis(a_boxes, a_a, 2, a_m.z);
++			if (a_m.z != 0.0) {
++				a_a = a_a.Moved(0, 0, a_m.z);
++			}
++		}
++		if (a_m.x != 0.0) {
++			a_m.x = ClipAxis(a_boxes, a_a, 0, a_m.x);
++			if (!zFirst && a_m.x != 0.0) {
++				a_a = a_a.Moved(a_m.x, 0, 0);
++			}
++		}
++		if (!zFirst && a_m.z != 0.0) {
++			a_m.z = ClipAxis(a_boxes, a_a, 2, a_m.z);
++		}
++		return a_m;
++	}
++
++	// Entity.collide: the move the entity actually makes, with the step-up onto ledges of up to
++	// a_stepHeight when it was a_onGround (or lands this very move).
++	template <class B>
++	Vec Collide(const std::vector<B>& a_boxes, const Aabb& a_a, Vec a_m, bool a_onGround, double a_stepHeight = kStepHeight)
++	{
++		const Vec  c = CollideBox(a_boxes, a_a, a_m);
++		const bool xc = a_m.x != c.x, yc = a_m.y != c.y, zc = a_m.z != c.z;
++		const bool below = yc && a_m.y < 0.0;
++		if (a_stepHeight > 0.0 && (a_onGround || below) && (xc || zc)) {
++			Vec up = CollideBox(a_boxes, a_a, { a_m.x, a_stepHeight, a_m.z });
++			const Vec vert = CollideBox(a_boxes, a_a.Expanded(a_m.x, 0.0, a_m.z), { 0.0, a_stepHeight, 0.0 });
++			if (vert.y < a_stepHeight) {
++				Vec h = CollideBox(a_boxes, a_a.Moved(0, vert.y, 0), { a_m.x, 0.0, a_m.z });
++				h.y += vert.y;
++				if (h.HorizSqr() > up.HorizSqr()) {
++					up = h;
++				}
++			}
++			if (up.HorizSqr() > c.HorizSqr()) {
++				const Vec down = CollideBox(a_boxes, a_a.Moved(up.x, up.y, up.z), { 0.0, -up.y + a_m.y, 0.0 });
++				return { up.x + down.x, up.y + down.y, up.z + down.z };
++			}
++		}
++		return c;
++	}
++
++	// Pushes a box that ended up inside blocks (a block placed on it, a teleport) back out the
++	// shortest way, up first when the ledge is within a step. Returns how far it moved.
++	template <class B>
++	Vec Depenetrate(const std::vector<B>& a_boxes, Aabb a_a, double a_stepHeight = kStepHeight)
++	{
++		Vec total{ 0, 0, 0 };
++		for (int pass = 0; pass < 6; ++pass) {
++			bool hit = false;
++			for (const auto& b : a_boxes) {
++				bool in = true;
++				for (int i = 0; i < 3; ++i) {
++					in = in && a_a.hi[i] > b.lo[i] + 1e-4 && a_a.lo[i] < b.hi[i] - 1e-4;
++				}
++				if (!in) {
++					continue;
++				}
++				const double up = b.hi[1] - a_a.lo[1];
++				double       best = 1e9;
++				Vec          move{ 0, 0, 0 };
++				if (up <= a_stepHeight + 0.05) {
++					best = up;
++					move = { 0, up, 0 };
++				} else {
++					const double d[4] = { b.hi[0] - a_a.lo[0], a_a.hi[0] - b.lo[0], b.hi[2] - a_a.lo[2], a_a.hi[2] - b.lo[2] };
++					const Vec    v[4] = { { d[0], 0, 0 }, { -d[1], 0, 0 }, { 0, 0, d[2] }, { 0, 0, -d[3] } };
++					for (int i = 0; i < 4; ++i) {
++						if (d[i] < best) {
++							best = d[i];
++							move = v[i];
++						}
++					}
++				}
++				a_a = a_a.Moved(move.x, move.y, move.z);
++				total = { total.x + move.x, total.y + move.y, total.z + move.z };
++				hit = true;
++				break;
++			}
++			if (!hit) {
++				break;
++			}
++		}
++		return total;
++	}
++}
 diff --git a/skse/src/Combat.cpp b/skse/src/Combat.cpp
 index 0954b7f..bad2e03 100644
 --- a/skse/src/Combat.cpp
@@ -5596,11 +5760,35 @@ index 0954b7f..bad2e03 100644
 +		}
  	}
  }
+diff --git a/skse/src/Dig.h b/skse/src/Dig.h
+index 9b1d191..4f0ed70 100644
+--- a/skse/src/Dig.h
++++ b/skse/src/Dig.h
+@@ -48,6 +48,9 @@ namespace skycraft::Dig
+ 	// drives the player (null otherwise), and its feet (Havok z). Its body only stands on what's
+ 	// under its feet: anything else (the ground over a hole it's in) would shove it out.
+ 	void SetPuppet(const RE::hkpCollidable* a_proxy, float a_feetHavokZ);
++	// Main thread, every frame: the player proxy's collidable while Skyrim drives the player (null otherwise).
++	// Minecraft's blocks are held against it by NpcBlocks::HoldPlayerUp, not by Havok planes.
++	void SetSkyrimPlayer(const RE::hkpCollidable* a_proxy);
+ 	// Main thread, every frame: cuts dug blocks out of the meshes Skyrim draws (DigMesh.cpp).
+ 	// a_changed: blocks were dug this frame.
+ 	void UpdateMeshes(RE::PlayerCharacter* a_player, float a_delta, bool a_changed);
 diff --git a/skse/src/DigPhysics.cpp b/skse/src/DigPhysics.cpp
-index 4ce955a..ebdf8e2 100644
+index 4ce955a..6694a76 100644
 --- a/skse/src/DigPhysics.cpp
 +++ b/skse/src/DigPhysics.cpp
-@@ -145,62 +145,68 @@ namespace skycraft::Dig
+@@ -66,6 +66,9 @@ namespace skycraft::Dig
+ 		std::atomic<int> loggedDropped{ 0 };
+ 		std::atomic<int> loggedPlanes{ 0 };
+ 		std::atomic<const RE::hkpCollidable*> puppet{ nullptr };
++		// The player's proxy in Skyrim's own control mode: held against the blocks by NpcBlocks.cpp (Minecraft's own
++		// collision), so Havok adds no block planes to it.
++		std::atomic<const RE::hkpCollidable*> skyPlayer{ nullptr };
+ 		std::atomic<float>                    puppetFeet{ 0.0f };
+ 		constexpr float                       kFeetSlack = 0.3f;  // Havok units above the feet still "under" them
+ 
+@@ -145,62 +148,68 @@ namespace skycraft::Dig
  			if ((x1 - x0 + 1) * (y1 - y0 + 1) * (z1 - z0 + 1) > 512) {
  				return;  // something huge (a dragon): not worth it
  			}
@@ -5717,8 +5905,30 @@ index 4ce955a..ebdf8e2 100644
  						}
  					}
  				}
+@@ -230,6 +239,9 @@ namespace skycraft::Dig
+ 				if (!shape) {
+ 					return;
+ 				}
++				if (&phantom->collidable == skyPlayer.load(std::memory_order_relaxed)) {
++					return;
++				}
+ 				RE::hkAabb box;
+ 				shape->GetAabbImpl(phantom->motionState.transform, 0.0f, box);
+ 				static thread_local std::vector<Plane> planes;
+@@ -302,6 +314,11 @@ namespace skycraft::Dig
+ 		puppet.store(a_proxy, std::memory_order_relaxed);
+ 	}
+ 
++	void SetSkyrimPlayer(const RE::hkpCollidable* a_proxy)
++	{
++		skyPlayer.store(a_proxy, std::memory_order_relaxed);
++	}
++
+ 	void Install()
+ 	{
+ 		REL::Relocation<std::uintptr_t> collector{ RE::VTABLE_bhkCharacterPointCollector[0] };
 diff --git a/skse/src/Game.cpp b/skse/src/Game.cpp
-index 3bb4d34..c3ec0c7 100644
+index 3bb4d34..023db82 100644
 --- a/skse/src/Game.cpp
 +++ b/skse/src/Game.cpp
 @@ -4,6 +4,8 @@
@@ -5892,7 +6102,7 @@ index 3bb4d34..c3ec0c7 100644
  			if (puppet) {
  				EnsureControlsEnabled();
  				Game::NoteFrameStep('P');
-@@ -657,6 +772,10 @@ namespace skycraft
+@@ -657,6 +772,15 @@ namespace skycraft
  			WorldRender::UpdateRagdoll(a_player, haveMc && st.mcInWorld);
  			if (puppet) {
  				NpcBlocks::PushActorsOut(a_player, a_delta);
@@ -5900,10 +6110,15 @@ index 3bb4d34..c3ec0c7 100644
 +				// Skyrim's own control mode: the blocks are still there, for NPCs and for the player.
 +				NpcBlocks::PushActorsOut(a_player, a_delta);
 +				NpcBlocks::HoldPlayerUp(a_player);
++				auto* proxyController = skyrim_cast<RE::bhkCharProxyController*>(a_player->GetCharController());
++				auto* proxy = proxyController ? proxyController->GetCharacterProxy() : nullptr;
++				Dig::SetSkyrimPlayer(proxy && proxy->shapePhantom ? &proxy->shapePhantom->collidable : nullptr);
++			} else {
++				Dig::SetSkyrimPlayer(nullptr);
  			}
  
  			// Interpolate Minecraft's 20 Hz physics ticks on our own clock (what MC's renderer does
-@@ -976,7 +1095,8 @@ namespace skycraft
+@@ -976,7 +1100,8 @@ namespace skycraft
  
  			// Tell Minecraft where Skyrim's player is and where they're looking.
  			proto::SkyState sky{};
@@ -5913,7 +6128,7 @@ index 3bb4d34..c3ec0c7 100644
  			const auto skyMc = SkyToMc(current);
  			sky.worldId = worldId;
  			sky.collisionEpoch = epoch;
-@@ -991,6 +1111,10 @@ namespace skycraft
+@@ -991,6 +1116,10 @@ namespace skycraft
  			if (auto* calendar = RE::Calendar::GetSingleton()) {
  				sky.gameHour = calendar->GetHour();
  			}
@@ -5924,7 +6139,7 @@ index 3bb4d34..c3ec0c7 100644
  			link.WriteSkyState(sky);
  
  			settleTimer -= a_delta;
-@@ -1009,7 +1133,8 @@ namespace skycraft
+@@ -1009,7 +1138,8 @@ namespace skycraft
  			const McVec lightCentre = puppet ? McVec{ mc.x, mc.y, mc.z } : skyMc;
  			{
  				Perf::Scope timer(Perf::kLights);
@@ -5934,7 +6149,7 @@ index 3bb4d34..c3ec0c7 100644
  			}
  
  			// Blocks dug out of Skyrim's world: its collision around them goes to Minecraft again, and
-@@ -1023,7 +1148,8 @@ namespace skycraft
+@@ -1023,7 +1153,8 @@ namespace skycraft
  			}
  			// Not while the world is still settling after a load (its cells are still being attached).
  			static float digSettled = 0.0f;
@@ -6487,10 +6702,16 @@ index 741fcca..8ca0083 100644
  
  namespace skycraft::Launcher
 diff --git a/skse/src/NpcBlocks.cpp b/skse/src/NpcBlocks.cpp
-index 5e25a7d..7a6905e 100644
+index 5e25a7d..0d96a78 100644
 --- a/skse/src/NpcBlocks.cpp
 +++ b/skse/src/NpcBlocks.cpp
-@@ -12,6 +12,14 @@ namespace skycraft
+@@ -1,4 +1,5 @@
+ #include "Game.h"
++#include "BlockMove.h"
+ 
+ // Skyrim's NPCs don't walk through Minecraft's blocks: Minecraft sends which blocks of each section
+ // have a collision shape (proto::kRenSolids), and every frame any NPC overlapping one is pushed
+@@ -12,6 +13,14 @@ namespace skycraft
  		std::shared_mutex solidsLock;
  		std::atomic<std::uint32_t> solidsGeneration{ 0 };  // bumped on every change
  
@@ -6505,7 +6726,7 @@ index 5e25a7d..7a6905e 100644
  		std::uint64_t SectionKey(std::int32_t a_x, std::int32_t a_y, std::int32_t a_z)
  		{
  			return (std::uint64_t(std::uint32_t(a_x) & 0x3FFFFF) << 42) | (std::uint64_t(std::uint32_t(a_z) & 0x3FFFFF) << 20) |
-@@ -36,6 +44,29 @@ namespace skycraft
+@@ -36,6 +45,29 @@ namespace skycraft
  		std::unordered_map<RE::FormID, Detour> detours;
  
  		bool ColumnBlocked(int a_x, int a_z, int a_y0, int a_y1);
@@ -6535,7 +6756,7 @@ index 5e25a7d..7a6905e 100644
  	}
  
  	namespace NpcBlocks
-@@ -69,6 +100,7 @@ namespace skycraft
+@@ -69,6 +101,7 @@ namespace skycraft
  			++solidsGeneration;
  			if (hdr->count == 0 || a_bytes < sizeof(proto::RenSolids) + 512) {
  				solids.erase(key);
@@ -6543,7 +6764,7 @@ index 5e25a7d..7a6905e 100644
  				return;
  			}
  			std::memcpy(solids[key].data(), a_data + sizeof(proto::RenSolids), 512);
-@@ -79,6 +111,7 @@ namespace skycraft
+@@ -79,6 +112,7 @@ namespace skycraft
  			std::unique_lock lock(solidsLock);
  			++solidsGeneration;
  			solids.clear();
@@ -6551,7 +6772,7 @@ index 5e25a7d..7a6905e 100644
  		}
  
  		std::uint32_t Generation() { return solidsGeneration.load(); }
-@@ -120,6 +153,132 @@ namespace skycraft
+@@ -120,6 +154,132 @@ namespace skycraft
  			}
  		}
  
@@ -6684,7 +6905,7 @@ index 5e25a7d..7a6905e 100644
  		bool SolidAt(std::int32_t a_x, std::int32_t a_y, std::int32_t a_z)
  		{
  			std::shared_lock lock(solidsLock);
-@@ -169,37 +328,15 @@ namespace skycraft
+@@ -169,37 +329,15 @@ namespace skycraft
  				const int y0 = int(std::floor(mc.y + 0.3)), y1 = int(std::floor(mc.y + h - 0.1));
  				double    cx = mc.x, cz = mc.z;
  				bool      moved = false;
@@ -6730,104 +6951,98 @@ index 5e25a7d..7a6905e 100644
  					}
  					if (std::abs(pushX) < 1e-4 && std::abs(pushZ) < 1e-4) {
  						break;
-@@ -250,5 +387,101 @@ namespace skycraft
+@@ -250,5 +388,95 @@ namespace skycraft
  				detours.clear();
  			}
  		}
 +
 +		// In Skyrim's own control mode Skyrim moves the player with its own physics, which has no idea Minecraft's blocks are
-+		// there (the Havok planes NPCs get from DigPhysics.cpp weren't enough to hold the player: it sank through them and
-+		// walked through their sides). So the player is held the way Minecraft would hold it: standing on a block's top, stepping
-+		// up onto a ledge of up to 0.65 of a block (Minecraft's step is 0.6; a jump gets the rest), and stopped by anything higher.
++		// there. So every frame the move Skyrim made (from where this held the player last frame to where Skyrim put it) is run
++		// through Minecraft's own movement collision (BlockMove.h: Entity.collide with its 0.6 step-up, on the exact boxes of
++		// slabs, stairs, fences...), and the player is put where Minecraft would have left it. The player's Havok proxy gets no
++		// block planes of its own (DigPhysics.cpp), so the two never fight.
 +		void HoldPlayerUp(RE::PlayerCharacter* a_player)
 +		{
++			static bool                     haveLast = false, groundLast = false;
++			static BlockMove::Vec           last{ 0, 0, 0 };
++			static const RE::TESObjectCELL* lastCell = nullptr;
++
 +			if (!a_player || a_player->IsDead()) {
++				haveLast = false;
 +				return;
 +			}
 +			{
 +				std::shared_lock lock(solidsLock);
 +				if (solids.empty()) {
++					haveLast = false;
 +					return;
 +				}
 +			}
-+			constexpr double kRadius = 0.32;  // the player's body, in blocks
++			static bool announced = false;
++			if (!announced) {
++				announced = true;
++				logger::info("Skyrim control: Minecraft block collision");
++			}
++			constexpr double kHalf = 0.3;  // Minecraft's player: 0.6 wide, 1.8 tall
 +			constexpr double kHeight = 1.8;
-+			constexpr double kStep = 0.65;
 +			const auto       sky = a_player->GetPosition();
 +			const auto       mc = SkyToMc(sky);
-+			double           cx = mc.x, cz = mc.z, feet = mc.y;
-+			bool             moved = false, landed = false;
++			const auto*      cell = a_player->GetParentCell();
++			auto*            controller = a_player->GetCharController();
++			const bool       skyGround = controller && controller->context.currentState == RE::hkpCharacterStateType::kOnGround;
 +
-+			// Minecraft's exact boxes around the body (the block above and below too: fences stand 1.5 tall).
++			BlockMove::Vec move{ 0, 0, 0 };
++			if (haveLast && cell == lastCell) {
++				move = { mc.x - last.x, mc.y - last.y, mc.z - last.z };
++			}
++			// First frame, a load door, fast travel or anything else that moved the player further than it can walk: start over here.
++			if (!haveLast || cell != lastCell || std::abs(move.x) > 4.0 || std::abs(move.y) > 8.0 || std::abs(move.z) > 4.0) {
++				last = { mc.x, mc.y, mc.z };
++				move = { 0, 0, 0 };
++				haveLast = true;
++				lastCell = cell;
++				groundLast = skyGround;
++			}
++
++			const BlockMove::Aabb from{ { last.x - kHalf, last.y, last.z - kHalf }, { last.x + kHalf, last.y + kHeight, last.z + kHalf } };
++			const double          x0 = std::min(from.lo[0], from.lo[0] + move.x), x1 = std::max(from.hi[0], from.hi[0] + move.x);
++			const double          z0 = std::min(from.lo[2], from.lo[2] + move.z), z1 = std::max(from.hi[2], from.hi[2] + move.z);
++			const double          y0 = std::min(from.lo[1], from.lo[1] + move.y), y1 = std::max(from.hi[1], from.hi[1] + move.y);
++			// Minecraft's exact boxes around the whole move (the block below too: fences stand 1.5 tall; and a step up).
 +			std::vector<BlockBox> nearby;
-+			GatherBoxes(int(std::floor(cx - kRadius - 1.0)), int(std::floor(cx + kRadius + 1.0)), int(std::floor(feet - 0.5)) - 1,
-+				int(std::floor(feet + kStep + kHeight)) + 1, int(std::floor(cz - kRadius - 1.0)), int(std::floor(cz + kRadius + 1.0)), nearby);
++			GatherBoxes(int(std::floor(x0 - 1.0)), int(std::floor(x1 + 1.0)), int(std::floor(y0 - 1.0)), int(std::floor(y1 + BlockMove::kStepHeight)) + 1,
++				int(std::floor(z0 - 1.0)), int(std::floor(z1 + 1.0)), nearby);
 +			if (nearby.empty()) {
++				last = { mc.x, mc.y, mc.z };
++				groundLast = skyGround;
 +				return;
 +			}
 +
-+			// Sides: any box rising above the step height and starting below the head pushes the body back out.
-+			for (int pass = 0; pass < 3; ++pass) {
-+				double pushX = 0.0, pushZ = 0.0;
-+				for (const auto& box : nearby) {
-+					if (box.hi[1] <= feet + kStep || box.lo[1] >= feet + kHeight) {
-+						continue;
-+					}
-+					PushOutOfRect(cx, cz, kRadius, box.lo[0], box.hi[0], box.lo[2], box.hi[2], pushX, pushZ);
-+				}
-+				if (std::abs(pushX) < 1e-4 && std::abs(pushZ) < 1e-4) {
-+					break;
-+				}
-+				cx += pushX;
-+				cz += pushZ;
-+				moved = true;
-+			}
++			const bool            onGround = groundLast || skyGround;
++			const BlockMove::Vec  got = BlockMove::Collide(nearby, from, move, onGround);
++			// Held up by a block under it: landing on one, or stepping up onto one.
++			const bool            landed = got.y > move.y + 1e-6;
++			BlockMove::Vec        end{ last.x + got.x, last.y + got.y, last.z + got.z };
 +
-+			// Underfoot: the highest box top within a step of the feet (with the body's height free above it) is the floor.
-+			bool   have = false;
-+			double best = 0.0;
-+			auto   underBody = [&](const BlockBox& a_box) {
-+				const double qx = std::clamp(cx, double(a_box.lo[0]), double(a_box.hi[0])), qz = std::clamp(cz, double(a_box.lo[2]), double(a_box.hi[2]));
-+				return std::hypot(cx - qx, cz - qz) < kRadius;
-+			};
-+			for (const auto& box : nearby) {
-+				const double top = box.hi[1];
-+				if (top > feet + kStep || top < feet - 0.5 || !underBody(box) || (have && top <= best)) {
-+					continue;
-+				}
-+				bool clear = true;
-+				for (const auto& other : nearby) {
-+					if (&other != &box && other.hi[1] > top + 0.01 && other.lo[1] < top + kHeight && underBody(other)) {
-+						clear = false;
-+						break;
-+					}
-+				}
-+				if (clear) {
-+					have = true;
-+					best = top;
-+				}
++			// A block that ended up around the body (placed on it, or it was dropped in): out the shortest way.
++			const BlockMove::Vec out = BlockMove::Depenetrate(nearby, { { end.x - kHalf, end.y, end.z - kHalf }, { end.x + kHalf, end.y + kHeight, end.z + kHalf } });
++			end = { end.x + out.x, end.y + out.y, end.z + out.z };
++			const bool stoodUp = out.y > 0.0;
++
++			bool standing = landed || stoodUp;
++			groundLast = standing || (skyGround && std::abs(got.y - move.y) < 1e-6 && got.y >= -1e-6);
++
++			if (std::abs(end.x - mc.x) > 1e-4 || std::abs(end.y - mc.y) > 1e-4 || std::abs(end.z - mc.z) > 1e-4) {
++				a_player->SetPosition(McToSky(end.x, end.y, end.z), true);
 +			}
-+			if (have && feet < best + 0.03) {
-+				feet = best;
-+				landed = true;
-+			}
-+			if (!moved && !landed) {
-+				return;
-+			}
-+			auto pos = McToSky(cx, feet, cz);
-+			if (!landed) {
-+				pos.z = sky.z;
-+			}
-+			a_player->SetPosition(pos, true);
-+			if (landed) {
-+				if (auto* controller = a_player->GetCharController()) {
-+					// It is standing, not falling: no fall to land from, no momentum to carry into the block.
-+					controller->SetLinearVelocityImpl(RE::hkVector4(0.0f, 0.0f, 0.0f, 0.0f));
-+					controller->fallStartHeight = pos.z;
-+					controller->fallTime = 0.0f;
-+					controller->context.currentState = RE::hkpCharacterStateType::kOnGround;
-+					controller->flags.set(RE::CHARACTER_FLAGS::kSupport);
-+				}
++			last = end;
++			if (standing && controller) {
++				// It is standing, not falling: no fall to land from, no momentum to carry into the block.
++				controller->SetLinearVelocityImpl(RE::hkVector4(0.0f, 0.0f, 0.0f, 0.0f));
++				controller->fallStartHeight = float(end.y * proto::kUnitsPerBlock);
++				controller->fallTime = 0.0f;
++				controller->context.currentState = RE::hkpCharacterStateType::kOnGround;
++				controller->flags.set(RE::CHARACTER_FLAGS::kSupport);
 +			}
 +		}
  	}
