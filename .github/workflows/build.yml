@@ -259,6 +259,15 @@ jobs:
               || { echo "::error::SkyCraft.dll was built without the Skyrim-mode body-width collision."; exit 1; }
           fi
 
+      - name: Check the Skyrim-mode standing fix made it into the build
+        shell: bash
+        run: |
+          if [ -f SkyCraft-Patch.patch ] || grep -q kProbe skse/src/NpcBlocks.cpp; then
+            grep -aq "held the player on the ground" skse/build/RelWithDebInfo/SkyCraft.dll \
+              && echo "SkyCraft.dll has the Skyrim-mode standing fix." \
+              || { echo "::error::SkyCraft.dll was built without the Skyrim-mode standing fix."; exit 1; }
+          fi
+
       - name: Upload the mod
         uses: actions/upload-artifact@v4
         with:
