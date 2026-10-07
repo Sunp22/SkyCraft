@@ -3746,7 +3746,7 @@ index 4ce955a..5bcb3ff 100644
  	{
  		REL::Relocation<std::uintptr_t> collector{ RE::VTABLE_bhkCharacterPointCollector[0] };
 diff --git a/skse/src/Game.cpp b/skse/src/Game.cpp
-index 3bb4d34..5751027 100644
+index 3bb4d34..f09be7c 100644
 --- a/skse/src/Game.cpp
 +++ b/skse/src/Game.cpp
 @@ -4,6 +4,8 @@
@@ -3927,7 +3927,7 @@ index 3bb4d34..5751027 100644
 +			} else if (skyrimMode && haveMc && st.mcInWorld && !loading && !a_player->IsDead()) {
 +				// Skyrim's own control mode: the blocks are still there, for NPCs and for the player.
 +				NpcBlocks::PushActorsOut(a_player, a_delta);
-+				NpcBlocks::HoldPlayerUp(a_player);
++				NpcBlocks::HoldPlayerUp(a_player, a_delta);
 +				auto* proxyController = skyrim_cast<RE::bhkCharProxyController*>(a_player->GetCharController());
 +				auto* proxy = proxyController ? proxyController->GetCharacterProxy() : nullptr;
 +				Dig::SetSkyrimPlayer(proxy && proxy->shapePhantom ? &proxy->shapePhantom->collidable : nullptr);
@@ -3979,7 +3979,7 @@ index 3bb4d34..5751027 100644
  				Perf::Scope timer(Perf::kDigMeshes);
  				Dig::UpdateMeshes(digSettled > 3.0f ? a_player : nullptr, a_delta, !dugChanged.empty());
 diff --git a/skse/src/Game.h b/skse/src/Game.h
-index 05788b1..f34266c 100644
+index 05788b1..4588a30 100644
 --- a/skse/src/Game.h
 +++ b/skse/src/Game.h
 @@ -17,6 +17,20 @@ namespace skycraft
@@ -4073,7 +4073,7 @@ index 05788b1..f34266c 100644
  		void PushActorsOut(RE::PlayerCharacter* a_player, float a_delta);
 +		// Main thread, every frame in Skyrim's own control mode: the Skyrim player stands on, steps up onto and is stopped by
 +		// Minecraft's blocks (Minecraft's physics doesn't move the player then, and Skyrim's own know nothing of the blocks).
-+		void HoldPlayerUp(RE::PlayerCharacter* a_player);
++		void HoldPlayerUp(RE::PlayerCharacter* a_player, float a_delta);
 +		// Main thread: Skyrim's jump matches Minecraft's (1.25 blocks) while true; Skyrim's own again when false.
 +		void SetJumpBoost(bool a_on);
  	}
@@ -4525,7 +4525,7 @@ index 741fcca..8ca0083 100644
  
  namespace skycraft::Launcher
 diff --git a/skse/src/NpcBlocks.cpp b/skse/src/NpcBlocks.cpp
-index 5e25a7d..ca2384b 100644
+index 5e25a7d..6713263 100644
 --- a/skse/src/NpcBlocks.cpp
 +++ b/skse/src/NpcBlocks.cpp
 @@ -1,4 +1,5 @@
@@ -4783,7 +4783,7 @@ index 5e25a7d..ca2384b 100644
  					}
  					if (std::abs(pushX) < 1e-4 && std::abs(pushZ) < 1e-4) {
  						break;
-@@ -250,5 +388,147 @@ namespace skycraft
+@@ -250,5 +388,171 @@ namespace skycraft
  				detours.clear();
  			}
  		}
@@ -4834,9 +4834,10 @@ index 5e25a7d..ca2384b 100644
 +		// through Minecraft's own movement collision (BlockMove.h: Entity.collide with its 0.6 step-up, on the exact boxes of
 +		// slabs, stairs, fences...), and the player is put where Minecraft would have left it. The player's Havok proxy only gets the planes of the blocks it stands on
 +		// (DigPhysics.cpp), so Skyrim really is standing and the two never fight.
-+		void HoldPlayerUp(RE::PlayerCharacter* a_player)
++		void HoldPlayerUp(RE::PlayerCharacter* a_player, float a_delta)
 +		{
 +			static bool                     haveLast = false, groundLast = false;
++			static float                    airHeld = 0.0f;  // seconds held on a block while Skyrim still says it is in the air
 +			static BlockMove::Vec           last{ 0, 0, 0 };
 +			static const RE::TESObjectCELL* lastCell = nullptr;
 +
@@ -4925,8 +4926,31 @@ index 5e25a7d..ca2384b 100644
 +				StopFalling(controller);  // (only the vertical speed: zeroing all of it, as this used to, stopped the player walking on a block)
 +				controller->fallStartHeight = float(end.y * proto::kUnitsPerBlock);
 +				controller->fallTime = 0.0f;
-+				controller->context.currentState = RE::hkpCharacterStateType::kOnGround;
 +				controller->flags.set(RE::CHARACTER_FLAGS::kSupport);
++				if (controller->context.currentState == RE::hkpCharacterStateType::kOnGround) {
++					airHeld = 0.0f;
++				} else {
++					// Skyrim still has it in the air (jumping or falling). Writing "on the ground" over that here, as this
++					// used to, skips the state change Skyrim makes when it lands, and with it the landing: the animation
++					// stays in the jump / fall pose (arms out) while the player slides across the block, and walking into a
++					// wall looks like clinging to it. So the held player gets a moment to land by itself (the planes
++					// under it, DigPhysics.cpp, make Skyrim's own physics do that); only if it doesn't is it put on the
++					// ground, with the landing played.
++					airHeld += a_delta;
++					if (airHeld > 0.12f) {
++						airHeld = 0.0f;
++						controller->context.currentState = RE::hkpCharacterStateType::kOnGround;
++						a_player->NotifyAnimationGraph("JumpLand");
++						a_player->NotifyAnimationGraph("JumpLandEnd");
++						static int announcedLand = 0;
++						if (announcedLand < 5) {
++							++announcedLand;
++							logger::info("Skyrim control: landed on a block by hand (Skyrim still had the player in the air)");
++						}
++					}
++				}
++			} else {
++				airHeld = 0.0f;
 +			}
 +		}
  	}
