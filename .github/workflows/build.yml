@@ -2,7 +2,7 @@
 #
 # Put this file in your repo as .github/workflows/build.yml. If SkyCraft-Patch.patch (control mode
 # is already in the source; the patch adds world reset, show world, mobs, mob roaming, roaming on rough
-# ground, chat input, mob life, mob combat and mob polish) is in the root of the repo, it is applied
+# ground, chat input, mob life, mob combat, mob polish and mob hit effects, stand-in cleanup, no mobs in settlements) is in the root of the repo, it is applied
 # before building, and skipped if the source already has it.
 # Run it from the repo's Actions tab ("Build SkyCraft" -> Run workflow), or it runs on every push.
 #
@@ -60,7 +60,7 @@ jobs:
               exit 1
             fi
           }
-          apply_patch SkyCraft-Patch.patch DamageHealthExactly skse/src/Combat.cpp
+          apply_patch SkyCraft-Patch.patch BlockMove skse/src/NpcBlocks.cpp
 
       # A repo made from "Download ZIP" has no submodule contents. Fetch CommonLibSSE-NG ourselves
       # then (the branch's latest commit, not the exact one the author built with).
@@ -179,6 +179,27 @@ jobs:
             grep -aq "Sized a mob stand-in" skse/build/RelWithDebInfo/SkyCraft.dll \
               && echo "SkyCraft.dll has the stand-in sizing." \
               || { echo "::error::SkyCraft.dll was built without the mob polish."; exit 1; }
+          fi
+
+      - name: Check the mob hit effects, stand-in cleanup and settlement check made it into the build
+        shell: bash
+        run: |
+          if [ -f SkyCraft-Patch.patch ] || grep -q PlayMobImpact skse/src/Combat.cpp; then
+            grep -aq "had no mob; put away" skse/build/RelWithDebInfo/SkyCraft.dll \
+              && echo "SkyCraft.dll has the stand-in cleanup." \
+              || { echo "::error::SkyCraft.dll was built without the stand-in cleanup."; exit 1; }
+            grep -aq "a place people live" skse/build/RelWithDebInfo/SkyCraft.dll \
+              && echo "SkyCraft.dll has the settlement check." \
+              || { echo "::error::SkyCraft.dll was built without the settlement check."; exit 1; }
+          fi
+
+      - name: Check the Skyrim-mode block collision made it into the build
+        shell: bash
+        run: |
+          if [ -f SkyCraft-Patch.patch ] || grep -q BlockMove skse/src/NpcBlocks.cpp; then
+            grep -aq "Skyrim control: Minecraft block collision" skse/build/RelWithDebInfo/SkyCraft.dll \
+              && echo "SkyCraft.dll has the Skyrim-mode block collision." \
+              || { echo "::error::SkyCraft.dll was built without the Skyrim-mode block collision."; exit 1; }
           fi
 
       - name: Upload the mod
