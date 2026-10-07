@@ -5828,7 +5828,7 @@ index 9b1d191..4f0ed70 100644
  	// a_changed: blocks were dug this frame.
  	void UpdateMeshes(RE::PlayerCharacter* a_player, float a_delta, bool a_changed);
 diff --git a/skse/src/DigPhysics.cpp b/skse/src/DigPhysics.cpp
-index 4ce955a..6694a76 100644
+index 4ce955a..d546fca 100644
 --- a/skse/src/DigPhysics.cpp
 +++ b/skse/src/DigPhysics.cpp
 @@ -66,6 +66,9 @@ namespace skycraft::Dig
@@ -5836,7 +5836,7 @@ index 4ce955a..6694a76 100644
  		std::atomic<int> loggedPlanes{ 0 };
  		std::atomic<const RE::hkpCollidable*> puppet{ nullptr };
 +		// The player's proxy in Skyrim's own control mode: held against the blocks by NpcBlocks.cpp (Minecraft's own
-+		// collision), so Havok adds no block planes to it.
++		// collision), so Havok only gives it the planes it stands on.
 +		std::atomic<const RE::hkpCollidable*> skyPlayer{ nullptr };
  		std::atomic<float>                    puppetFeet{ 0.0f };
  		constexpr float                       kFeetSlack = 0.3f;  // Havok units above the feet still "under" them
@@ -5958,17 +5958,19 @@ index 4ce955a..6694a76 100644
  						}
  					}
  				}
-@@ -230,6 +239,9 @@ namespace skycraft::Dig
- 				if (!shape) {
- 					return;
- 				}
-+				if (&phantom->collidable == skyPlayer.load(std::memory_order_relaxed)) {
-+					return;
-+				}
- 				RE::hkAabb box;
- 				shape->GetAabbImpl(phantom->motionState.transform, 0.0f, box);
+@@ -235,8 +244,9 @@ namespace skycraft::Dig
  				static thread_local std::vector<Plane> planes;
-@@ -302,6 +314,11 @@ namespace skycraft::Dig
+ 				planes.clear();
+ 				BlockPlanes(box, planes);
+-				if (&phantom->collidable == puppet.load(std::memory_order_relaxed)) {
+-					// The player's body: only the blocks it stands on (Minecraft does the rest).
++				if (&phantom->collidable == puppet.load(std::memory_order_relaxed) || &phantom->collidable == skyPlayer.load(std::memory_order_relaxed)) {
++					// The player's body: only the blocks it stands on (Minecraft's own collision does the rest). Skyrim then
++					// really is standing on them: on the ground, able to jump, no falling pose.
+ 					std::erase_if(planes, [](const Plane& a_plane) { return a_plane.n[2] < 0.7f; });
+ 				}
+ 				if (planes.empty()) {
+@@ -302,6 +312,11 @@ namespace skycraft::Dig
  		puppet.store(a_proxy, std::memory_order_relaxed);
  	}
  
@@ -6757,7 +6759,7 @@ index 741fcca..8ca0083 100644
  
  namespace skycraft::Launcher
 diff --git a/skse/src/NpcBlocks.cpp b/skse/src/NpcBlocks.cpp
-index 5e25a7d..12be6ea 100644
+index 5e25a7d..2c30390 100644
 --- a/skse/src/NpcBlocks.cpp
 +++ b/skse/src/NpcBlocks.cpp
 @@ -1,4 +1,5 @@
@@ -7015,16 +7017,30 @@ index 5e25a7d..12be6ea 100644
  					}
  					if (std::abs(pushX) < 1e-4 && std::abs(pushZ) < 1e-4) {
  						break;
-@@ -250,5 +388,95 @@ namespace skycraft
+@@ -250,5 +388,109 @@ namespace skycraft
  				detours.clear();
  			}
  		}
 +
++		// Takes the downward speed off a character controller and leaves its sideways speed alone (if this CommonLib can read it).
++		template <class C, class V = RE::hkVector4>
++		void StopFalling(C* a_controller)
++		{
++			if constexpr (requires(V v) { a_controller->GetLinearVelocityImpl(v); v.quad.m128_f32[2]; a_controller->SetLinearVelocityImpl(v); }) {
++				V v;
++				a_controller->GetLinearVelocityImpl(v);
++				if (v.quad.m128_f32[2] < 0.0f) {
++					v.quad.m128_f32[2] = 0.0f;
++					a_controller->SetLinearVelocityImpl(v);
++				}
++			}
++		}
++
 +		// In Skyrim's own control mode Skyrim moves the player with its own physics, which has no idea Minecraft's blocks are
 +		// there. So every frame the move Skyrim made (from where this held the player last frame to where Skyrim put it) is run
 +		// through Minecraft's own movement collision (BlockMove.h: Entity.collide with its 0.6 step-up, on the exact boxes of
-+		// slabs, stairs, fences...), and the player is put where Minecraft would have left it. The player's Havok proxy gets no
-+		// block planes of its own (DigPhysics.cpp), so the two never fight.
++		// slabs, stairs, fences...), and the player is put where Minecraft would have left it. The player's Havok proxy only gets the planes of the blocks it stands on
++		// (DigPhysics.cpp), so Skyrim really is standing and the two never fight.
 +		void HoldPlayerUp(RE::PlayerCharacter* a_player)
 +		{
 +			static bool                     haveLast = false, groundLast = false;
@@ -7102,7 +7118,7 @@ index 5e25a7d..12be6ea 100644
 +			last = end;
 +			if (standing && controller) {
 +				// It is standing, not falling: no fall to land from, no momentum to carry into the block.
-+				controller->SetLinearVelocityImpl(RE::hkVector4(0.0f, 0.0f, 0.0f, 0.0f));
++				StopFalling(controller);  // (only the vertical speed: zeroing all of it, as this used to, stopped the player walking on a block)
 +				controller->fallStartHeight = float(end.y * proto::kUnitsPerBlock);
 +				controller->fallTime = 0.0f;
 +				controller->context.currentState = RE::hkpCharacterStateType::kOnGround;
