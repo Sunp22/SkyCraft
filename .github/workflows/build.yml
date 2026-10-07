@@ -202,6 +202,15 @@ jobs:
               || { echo "::error::SkyCraft.dll was built without the Skyrim-mode block collision."; exit 1; }
           fi
 
+      - name: Check the block-edge and jump fixes made it into the build
+        shell: bash
+        run: |
+          if [ -f SkyCraft-Patch.patch ] || grep -q SupportPlanes skse/src/DigPhysics.cpp; then
+            grep -aq "Skyrim control: jump height" skse/build/RelWithDebInfo/SkyCraft.dll \
+              && echo "SkyCraft.dll has the Skyrim-mode jump height." \
+              || { echo "::error::SkyCraft.dll was built without the Skyrim-mode jump height."; exit 1; }
+          fi
+
       - name: Check the stand-in warm-up made it into the build
         shell: bash
         run: |
