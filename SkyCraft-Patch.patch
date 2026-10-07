@@ -7156,7 +7156,7 @@ index 741fcca..8ca0083 100644
  
  namespace skycraft::Launcher
 diff --git a/skse/src/NpcBlocks.cpp b/skse/src/NpcBlocks.cpp
-index 5e25a7d..4aa7563 100644
+index 5e25a7d..afd5ebc 100644
 --- a/skse/src/NpcBlocks.cpp
 +++ b/skse/src/NpcBlocks.cpp
 @@ -1,4 +1,6 @@
@@ -7415,7 +7415,7 @@ index 5e25a7d..4aa7563 100644
  					}
  					if (std::abs(pushX) < 1e-4 && std::abs(pushZ) < 1e-4) {
  						break;
-@@ -250,5 +389,184 @@ namespace skycraft
+@@ -250,5 +389,190 @@ namespace skycraft
  				detours.clear();
  			}
  		}
@@ -7469,7 +7469,7 @@ index 5e25a7d..4aa7563 100644
 +		void HoldPlayerUp(RE::PlayerCharacter* a_player, float a_delta)
 +		{
 +			static bool                     haveLast = false, groundLast = false;
-+			static float                    airHeld = 0.0f;  // seconds held on a block while Skyrim still says it is in the air
++			static float                    airTime = 0.0f;  // seconds Skyrim has had the player in the air without Minecraft standing it on a block
 +			static BlockMove::Vec           last{ 0, 0, 0 };
 +			static const RE::TESObjectCELL* lastCell = nullptr;
 +
@@ -7547,8 +7547,12 @@ index 5e25a7d..4aa7563 100644
 +			// Resting on a block: a short probe down from where it ends up is stopped at once. Not counted while Skyrim is
 +			// moving it up (a jump): then it is leaving the block, and nothing may hold it.
 +			const BlockMove::Aabb endBox{ { end.x - kHalf, end.y, end.z - kHalf }, { end.x + kHalf, end.y + kHeight, end.z + kHalf } };
-+			const double          probe = BlockMove::ClipAxis(nearby, endBox, 1, -0.05);
-+			const bool            resting = move.y <= 0.002 && probe > -0.05 + 1e-6;
++			// Havok keeps the player's capsule keepDistance (0.05) clear of what it stands on, so Skyrim's feet hover about that far above a
++			// block's top. A probe of exactly 0.05 reaches the top to the last digit and was counted as "not resting" half the time, so the
++			// player flickered between standing and falling. Anything within 0.1 above a top counts as standing on it.
++			constexpr double      kProbe = 0.10;
++			const double          probe = BlockMove::ClipAxis(nearby, endBox, 1, -kProbe);
++			const bool            resting = move.y <= 0.002 && probe > -kProbe + 1e-6;
 +
 +			bool standing = landed || stoodUp || resting;
 +			Dig::SetSkyrimPlayerResting(standing);
@@ -7566,25 +7570,28 @@ index 5e25a7d..4aa7563 100644
 +				}
 +			}
 +			last = end;
++			if (!standing) {
++				airTime = (skyGround || !controller) ? 0.0f : airTime + a_delta;
++			}
 +			if (standing && controller) {
 +				// It is standing, not falling: no fall to land from, no momentum to carry into the block.
-+				StopFalling(controller);  // (only the vertical speed: zeroing all of it, as this used to, stopped the player walking on a block)
++				StopFalling(controller);  // (only the vertical speed: zeroing all of it stopped the player walking on a block)
 +				controller->fallStartHeight = float(end.y * proto::kUnitsPerBlock);
 +				controller->fallTime = 0.0f;
 +				controller->flags.set(RE::CHARACTER_FLAGS::kSupport);
-+				if (controller->context.currentState == RE::hkpCharacterStateType::kOnGround) {
-+					airHeld = 0.0f;
-+				} else {
-+					// Skyrim still has it in the air (jumping or falling). Writing "on the ground" over that here, as this
-+					// used to, skips the state change Skyrim makes when it lands, and with it the landing: the animation
-+					// stays in the jump / fall pose (arms out) while the player slides across the block, and walking into a
-+					// wall looks like clinging to it. So the held player gets a moment to land by itself (the planes
-+					// under it, DigPhysics.cpp, make Skyrim's own physics do that); only if it doesn't is it put on the
-+					// ground, with the landing played.
-+					airHeld += a_delta;
-+					if (airHeld > 0.06f) {
-+						airHeld = 0.0f;
-+						controller->context.currentState = RE::hkpCharacterStateType::kOnGround;
++				if (controller->context.currentState != RE::hkpCharacterStateType::kOnGround) {
++					// Minecraft has it standing on a block but Skyrim's own physics still says it is in the air (its support check
++					// does not always agree with Minecraft's, e.g. at a block's edge). Skyrim moves an airborne player slowly and in
++					// the jump pose, so the ground state is put back at once, every frame it is needed, not after a wait: waiting
++					// left the player in the air for most frames, and each forced landing replayed the landing animation (arms out).
++					// The landing animation is only played for a real fall or jump (in the air for a while), not for a flicker.
++					controller->context.currentState = RE::hkpCharacterStateType::kOnGround;
++					static int announcedHold = 0;
++					if (announcedHold < 5) {
++						++announcedHold;
++						logger::info("Skyrim control: held the player on the ground (Skyrim had it in the air, {:.2f} s) on a block", airTime);
++					}
++					if (airTime >= 0.10f) {
 +						a_player->NotifyAnimationGraph("JumpLand");
 +						a_player->NotifyAnimationGraph("JumpLandEnd");
 +						static int announcedLand = 0;
@@ -7594,8 +7601,7 @@ index 5e25a7d..4aa7563 100644
 +						}
 +					}
 +				}
-+			} else {
-+				airHeld = 0.0f;
++				airTime = 0.0f;
 +			}
 +		}
  	}
