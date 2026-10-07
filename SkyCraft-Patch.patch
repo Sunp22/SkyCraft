@@ -5975,7 +5975,7 @@ index 9b1d191..4f0ed70 100644
  	// a_changed: blocks were dug this frame.
  	void UpdateMeshes(RE::PlayerCharacter* a_player, float a_delta, bool a_changed);
 diff --git a/skse/src/DigPhysics.cpp b/skse/src/DigPhysics.cpp
-index 4ce955a..d546fca 100644
+index 4ce955a..5bcb3ff 100644
 --- a/skse/src/DigPhysics.cpp
 +++ b/skse/src/DigPhysics.cpp
 @@ -66,6 +66,9 @@ namespace skycraft::Dig
@@ -5988,7 +5988,7 @@ index 4ce955a..d546fca 100644
  		std::atomic<float>                    puppetFeet{ 0.0f };
  		constexpr float                       kFeetSlack = 0.3f;  // Havok units above the feet still "under" them
  
-@@ -145,62 +148,68 @@ namespace skycraft::Dig
+@@ -145,62 +148,121 @@ namespace skycraft::Dig
  			if ((x1 - x0 + 1) * (y1 - y0 + 1) * (z1 - z0 + 1) > 512) {
  				return;  // something huge (a dragon): not worth it
  			}
@@ -6076,16 +6076,7 @@ index 4ce955a..d546fca 100644
 +								} else {
 +									plane = { { 0, 1, 0 }, -(side[3] + r) };
 +								}
- 							}
--						}
--						if (plane.d > kPlaneReach) {
--							continue;
--						}
--						bool duplicate = false;
--						for (const auto& other : a_out) {
--							if (std::fabs(other.d - plane.d) < 1e-3f && other.n[0] * plane.n[0] + other.n[1] * plane.n[1] + other.n[2] * plane.n[2] > 0.9999f) {
--								duplicate = true;
--								break;
++							}
 +							if (plane.d > kPlaneReach) {
 +								continue;
 +							}
@@ -6099,13 +6090,72 @@ index 4ce955a..d546fca 100644
 +							if (!duplicate) {
 +								a_out.push_back(plane);
  							}
+ 						}
+-						if (plane.d > kPlaneReach) {
++					}
++				}
++			}
++		}
++
++		// Minecraft stands the player on a block as long as any of its 0.6-wide box is over the block's top, but the
++		// capsule planes above only count a block as ground while the capsule's centre is within about its radius of the
++		// block. In the strip between, Minecraft says "standing" and Skyrim says "falling", and Skyrim moves a falling
++		// player slowly: that was the crawl near the edges of blocks. So for the Skyrim-controlled player, each block top
++		// under any part of Minecraft's box becomes a flat plane, whatever the capsule's centre is over.
++		void SupportPlanes(const RE::hkAabb& a_box, std::vector<Plane>& a_out)
++		{
++			constexpr double kHalf = 0.3;      // Minecraft's player: 0.6 wide
++			constexpr double kBelow = 0.02;    // blocks: feet this far into a top still count as on it
++			constexpr double kAbove = 0.30;    // blocks: tops this far under the feet still hold it up
++			alignas(16) float lo[4], hi[4];
++			_mm_store_ps(lo, a_box.min.quad);
++			_mm_store_ps(hi, a_box.max.quad);
++			const double k = BlocksPerHavok();
++			const double mx = (lo[0] + hi[0]) * 0.5 * k, mz = -(lo[1] + hi[1]) * 0.5 * k, fy = lo[2] * k;
++			const int    bx0 = int(std::floor(mx - kHalf)), bx1 = int(std::floor(mx + kHalf));
++			const int    bz0 = int(std::floor(mz - kHalf)), bz1 = int(std::floor(mz + kHalf));
++			for (int by = int(std::floor(fy - kAbove)) - 1; by <= int(std::floor(fy + kBelow)); ++by) {  // -1: a fence reaches up from the block below
++				for (int bz = bz0; bz <= bz1; ++bz) {
++					for (int bx = bx0; bx <= bx1; ++bx) {
++						if (!NpcBlocks::SolidAt(bx, by, bz)) {
+ 							continue;
+ 						}
+-						bool duplicate = false;
+-						for (const auto& other : a_out) {
+-							if (std::fabs(other.d - plane.d) < 1e-3f && other.n[0] * plane.n[0] + other.n[1] * plane.n[1] + other.n[2] * plane.n[2] > 0.9999f) {
+-								duplicate = true;
+-								break;
++						NpcBlocks::BlockBox boxes[NpcBlocks::kMaxBoxes];
++						const int           boxCount = NpcBlocks::BoxesAt(bx, by, bz, boxes);
++						for (int bi = 0; bi < boxCount; ++bi) {
++							const auto&               bb = boxes[bi];
++							const NpcBlocks::BlockBox ab{ { bx + bb.lo[0], by + bb.lo[1], bz + bb.lo[2] }, { bx + bb.hi[0], by + bb.hi[1], bz + bb.hi[2] } };
++							// Same overlap test as Minecraft's own collision (Shapes.collide's epsilon).
++							if (!(mx + kHalf > ab.lo[0] + 1e-7 && mx - kHalf < ab.hi[0] - 1e-7 && mz + kHalf > ab.lo[2] + 1e-7 && mz - kHalf < ab.hi[2] - 1e-7)) {
++								continue;
++							}
++							const double gap = fy - ab.hi[1];  // blocks, feet above the top
++							if (gap < -kBelow || gap > kAbove || NpcBlocks::FaceCovered(ab, 1, 1)) {
++								continue;
++							}
++							const float d = float(gap / k);
++							bool        duplicate = false;
++							for (const auto& other : a_out) {
++								if (std::fabs(other.d - d) < 1e-3f && other.n[2] > 0.9999f) {
++									duplicate = true;
++									break;
++								}
++							}
++							if (!duplicate) {
++								a_out.push_back({ { 0.0f, 0.0f, 1.0f }, d });
+ 							}
 -						}
 -						if (!duplicate) {
 -							a_out.push_back(plane);
  						}
  					}
  				}
-@@ -235,8 +244,9 @@ namespace skycraft::Dig
+@@ -235,9 +297,13 @@ namespace skycraft::Dig
  				static thread_local std::vector<Plane> planes;
  				planes.clear();
  				BlockPlanes(box, planes);
@@ -6115,9 +6165,13 @@ index 4ce955a..d546fca 100644
 +					// The player's body: only the blocks it stands on (Minecraft's own collision does the rest). Skyrim then
 +					// really is standing on them: on the ground, able to jump, no falling pose.
  					std::erase_if(planes, [](const Plane& a_plane) { return a_plane.n[2] < 0.7f; });
++					if (&phantom->collidable == skyPlayer.load(std::memory_order_relaxed)) {
++						SupportPlanes(box, planes);  // Minecraft's box, not just the capsule, decides what it stands on
++					}
  				}
  				if (planes.empty()) {
-@@ -302,6 +312,11 @@ namespace skycraft::Dig
+ 					return;
+@@ -302,6 +368,11 @@ namespace skycraft::Dig
  		puppet.store(a_proxy, std::memory_order_relaxed);
  	}
  
@@ -6130,7 +6184,7 @@ index 4ce955a..d546fca 100644
  	{
  		REL::Relocation<std::uintptr_t> collector{ RE::VTABLE_bhkCharacterPointCollector[0] };
 diff --git a/skse/src/Game.cpp b/skse/src/Game.cpp
-index 3bb4d34..023db82 100644
+index 3bb4d34..5751027 100644
 --- a/skse/src/Game.cpp
 +++ b/skse/src/Game.cpp
 @@ -4,6 +4,8 @@
@@ -6304,7 +6358,7 @@ index 3bb4d34..023db82 100644
  			if (puppet) {
  				EnsureControlsEnabled();
  				Game::NoteFrameStep('P');
-@@ -657,6 +772,15 @@ namespace skycraft
+@@ -657,6 +772,16 @@ namespace skycraft
  			WorldRender::UpdateRagdoll(a_player, haveMc && st.mcInWorld);
  			if (puppet) {
  				NpcBlocks::PushActorsOut(a_player, a_delta);
@@ -6317,10 +6371,11 @@ index 3bb4d34..023db82 100644
 +				Dig::SetSkyrimPlayer(proxy && proxy->shapePhantom ? &proxy->shapePhantom->collidable : nullptr);
 +			} else {
 +				Dig::SetSkyrimPlayer(nullptr);
++				NpcBlocks::SetJumpBoost(false);
  			}
  
  			// Interpolate Minecraft's 20 Hz physics ticks on our own clock (what MC's renderer does
-@@ -976,7 +1100,8 @@ namespace skycraft
+@@ -976,7 +1101,8 @@ namespace skycraft
  
  			// Tell Minecraft where Skyrim's player is and where they're looking.
  			proto::SkyState sky{};
@@ -6330,7 +6385,7 @@ index 3bb4d34..023db82 100644
  			const auto skyMc = SkyToMc(current);
  			sky.worldId = worldId;
  			sky.collisionEpoch = epoch;
-@@ -991,6 +1116,10 @@ namespace skycraft
+@@ -991,6 +1117,10 @@ namespace skycraft
  			if (auto* calendar = RE::Calendar::GetSingleton()) {
  				sky.gameHour = calendar->GetHour();
  			}
@@ -6341,7 +6396,7 @@ index 3bb4d34..023db82 100644
  			link.WriteSkyState(sky);
  
  			settleTimer -= a_delta;
-@@ -1009,7 +1138,8 @@ namespace skycraft
+@@ -1009,7 +1139,8 @@ namespace skycraft
  			const McVec lightCentre = puppet ? McVec{ mc.x, mc.y, mc.z } : skyMc;
  			{
  				Perf::Scope timer(Perf::kLights);
@@ -6351,7 +6406,7 @@ index 3bb4d34..023db82 100644
  			}
  
  			// Blocks dug out of Skyrim's world: its collision around them goes to Minecraft again, and
-@@ -1023,7 +1153,8 @@ namespace skycraft
+@@ -1023,7 +1154,8 @@ namespace skycraft
  			}
  			// Not while the world is still settling after a load (its cells are still being attached).
  			static float digSettled = 0.0f;
@@ -6362,7 +6417,7 @@ index 3bb4d34..023db82 100644
  				Perf::Scope timer(Perf::kDigMeshes);
  				Dig::UpdateMeshes(digSettled > 3.0f ? a_player : nullptr, a_delta, !dugChanged.empty());
 diff --git a/skse/src/Game.h b/skse/src/Game.h
-index 05788b1..fa44d1b 100644
+index 05788b1..f34266c 100644
 --- a/skse/src/Game.h
 +++ b/skse/src/Game.h
 @@ -17,6 +17,20 @@ namespace skycraft
@@ -6450,13 +6505,15 @@ index 05788b1..fa44d1b 100644
  		// For the blocks' contact shadows (any thread): sets a_bit in a_out[x + w*(y + h*z)] for
  		// each solid block of the box at a_origin (Minecraft block coords) of a_size blocks. The
  		// generation changes whenever any section's blocks do.
-@@ -153,6 +199,9 @@ namespace skycraft
+@@ -153,6 +199,11 @@ namespace skycraft
  		std::uint32_t Generation();
  		// Main thread, every frame: NPCs overlapping solid Minecraft blocks are pushed back out.
  		void PushActorsOut(RE::PlayerCharacter* a_player, float a_delta);
 +		// Main thread, every frame in Skyrim's own control mode: the Skyrim player stands on, steps up onto and is stopped by
 +		// Minecraft's blocks (Minecraft's physics doesn't move the player then, and Skyrim's own know nothing of the blocks).
 +		void HoldPlayerUp(RE::PlayerCharacter* a_player);
++		// Main thread: Skyrim's jump matches Minecraft's (1.25 blocks) while true; Skyrim's own again when false.
++		void SetJumpBoost(bool a_on);
  	}
  
  	namespace WorldRender
@@ -6906,7 +6963,7 @@ index 741fcca..8ca0083 100644
  
  namespace skycraft::Launcher
 diff --git a/skse/src/NpcBlocks.cpp b/skse/src/NpcBlocks.cpp
-index 5e25a7d..2c30390 100644
+index 5e25a7d..ca2384b 100644
 --- a/skse/src/NpcBlocks.cpp
 +++ b/skse/src/NpcBlocks.cpp
 @@ -1,4 +1,5 @@
@@ -7164,7 +7221,7 @@ index 5e25a7d..2c30390 100644
  					}
  					if (std::abs(pushX) < 1e-4 && std::abs(pushZ) < 1e-4) {
  						break;
-@@ -250,5 +388,109 @@ namespace skycraft
+@@ -250,5 +388,147 @@ namespace skycraft
  				detours.clear();
  			}
  		}
@@ -7183,6 +7240,33 @@ index 5e25a7d..2c30390 100644
 +			}
 +		}
 +
++		// Skyrim's jump (fJumpHeightMin, 76 units: 1.09 blocks) clears a one-block-high block by a hair, and Minecraft's
++		// stops being blocked by the block's side only while the feet are above its top, so jumping onto one almost never
++		// worked. Minecraft's jump is 1.25 blocks; with Minecraft's blocks around, Skyrim's matches it.
++		void SetJumpBoost(bool a_on)
++		{
++			static RE::Setting* setting = nullptr;
++			static float        original = 0.0f;
++			static bool         looked = false, on = false;
++			if (!looked) {
++				looked = true;
++				if (auto* settings = RE::GameSettingCollection::GetSingleton()) {
++					setting = settings->GetSetting("fJumpHeightMin");
++				}
++				if (setting) {
++					original = setting->data.f;
++					logger::info("Skyrim control: jump height is {:.1f} units (Minecraft's is {:.1f})", original, 1.25 * proto::kUnitsPerBlock);
++				} else {
++					logger::warn("Skyrim control: no fJumpHeightMin setting; jumps stay as Skyrim has them");
++				}
++			}
++			if (!setting || on == a_on) {
++				return;
++			}
++			on = a_on;
++			setting->data.f = a_on ? std::max(original, float(1.25 * proto::kUnitsPerBlock)) : original;
++		}
++
 +		// In Skyrim's own control mode Skyrim moves the player with its own physics, which has no idea Minecraft's blocks are
 +		// there. So every frame the move Skyrim made (from where this held the player last frame to where Skyrim put it) is run
 +		// through Minecraft's own movement collision (BlockMove.h: Entity.collide with its 0.6 step-up, on the exact boxes of
@@ -7196,15 +7280,18 @@ index 5e25a7d..2c30390 100644
 +
 +			if (!a_player || a_player->IsDead()) {
 +				haveLast = false;
++				SetJumpBoost(false);
 +				return;
 +			}
 +			{
 +				std::shared_lock lock(solidsLock);
 +				if (solids.empty()) {
 +					haveLast = false;
++					SetJumpBoost(false);
 +					return;
 +				}
 +			}
++			SetJumpBoost(true);
 +			static bool announced = false;
 +			if (!announced) {
 +				announced = true;
@@ -7261,6 +7348,14 @@ index 5e25a7d..2c30390 100644
 +
 +			if (std::abs(end.x - mc.x) > 1e-4 || std::abs(end.y - mc.y) > 1e-4 || std::abs(end.z - mc.z) > 1e-4) {
 +				a_player->SetPosition(McToSky(end.x, end.y, end.z), true);
++				if (DiagnosticsEnabled()) {
++					static int logged = 0;
++					if (logged < 400) {
++						++logged;
++						logger::info("block collision: skyrim moved ({:.3f} {:.3f} {:.3f}) -> held to ({:.3f} {:.3f} {:.3f}); skyGround {} groundLast {} standing {} state {}", move.x, move.y, move.z, got.x, got.y, got.z,
++							skyGround, onGround, standing, controller ? int(controller->context.currentState) : -1);
++					}
++				}
 +			}
 +			last = end;
 +			if (standing && controller) {
