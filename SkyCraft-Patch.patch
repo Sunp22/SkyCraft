@@ -1183,6 +1183,185 @@ index 92b585a..64fb15a 100644
  [Debug]
  ; Detailed timing, camera, combat and lighting logs in SkyCraft.log (several lines a second), for
  ; reporting problems. 0 = off.
+diff --git a/skse/src/BlockMove.h b/skse/src/BlockMove.h
+new file mode 100644
+index 0000000..6812857
+--- /dev/null
++++ b/skse/src/BlockMove.h
+@@ -0,0 +1,173 @@
++#pragma once
++
++#include "Game.h"
++
++// Minecraft's own movement collision (Entity.collide), for a box moving through the exact collision boxes of the blocks
++// around it (NpcBlocks::BlockBox: absolute Minecraft coordinates, y up). Used to hold the player Skyrim moves in Skyrim's
++// control mode where Minecraft would have held it: walls stop it, floors hold it up, and a block up to kStepHeight high
++// is stepped onto.
++namespace skycraft::BlockMove
++{
++	struct Vec
++	{
++		double x, y, z;
++	};
++
++	struct Aabb
++	{
++		double lo[3], hi[3];
++	};
++
++	// Minecraft's LivingEntity step height.
++	inline constexpr double kStepHeight = 0.6;
++
++	namespace detail
++	{
++		inline constexpr double kEps = 1.0e-7;  // Shapes.collide's epsilon
++
++		inline Aabb Moved(const Aabb& a_box, double a_x, double a_y, double a_z)
++		{
++			return { { a_box.lo[0] + a_x, a_box.lo[1] + a_y, a_box.lo[2] + a_z }, { a_box.hi[0] + a_x, a_box.hi[1] + a_y, a_box.hi[2] + a_z } };
++		}
++
++		inline bool OverlapsOn(const Aabb& a_box, const NpcBlocks::BlockBox& a_b, int a_axis)
++		{
++			return a_box.hi[a_axis] > a_b.lo[a_axis] + kEps && a_box.lo[a_axis] < a_b.hi[a_axis] - kEps;
++		}
++
++		// How far a_box can move along a_axis by a_d before a box stops it (Shapes.collide).
++		inline double CollideAxis(int a_axis, const Aabb& a_box, const std::vector<NpcBlocks::BlockBox>& a_boxes, double a_d)
++		{
++			if (std::abs(a_d) < kEps) {
++				return 0.0;
++			}
++			const int o1 = (a_axis + 1) % 3, o2 = (a_axis + 2) % 3;
++			for (const auto& b : a_boxes) {
++				if (!OverlapsOn(a_box, b, o1) || !OverlapsOn(a_box, b, o2)) {
++					continue;
++				}
++				if (a_d > 0.0 && double(b.lo[a_axis]) >= a_box.hi[a_axis] - kEps) {
++					a_d = std::min(a_d, double(b.lo[a_axis]) - a_box.hi[a_axis]);
++				} else if (a_d < 0.0 && double(b.hi[a_axis]) <= a_box.lo[a_axis] + kEps) {
++					a_d = std::max(a_d, double(b.hi[a_axis]) - a_box.lo[a_axis]);
++				}
++			}
++			return a_d;
++		}
++
++		// Entity.collideBoundingBox: y first, then the longer of x and z.
++		inline Vec CollideBox(const std::vector<NpcBlocks::BlockBox>& a_boxes, Aabb a_box, Vec a_move)
++		{
++			double v[3] = { a_move.x, a_move.y, a_move.z };
++			int    order[3] = { 1, 0, 2 };
++			if (std::abs(v[0]) < std::abs(v[2])) {
++				order[1] = 2;
++				order[2] = 0;
++			}
++			double got[3] = { 0.0, 0.0, 0.0 };
++			for (const int axis : order) {
++				got[axis] = CollideAxis(axis, a_box, a_boxes, v[axis]);
++				for (int i = 0; i < 3; ++i) {
++					if (i == axis) {
++						a_box.lo[i] += got[axis];
++						a_box.hi[i] += got[axis];
++					}
++				}
++			}
++			return { got[0], got[1], got[2] };
++		}
++
++		inline double HorizSqr(const Vec& a_v) { return a_v.x * a_v.x + a_v.z * a_v.z; }
++	}
++
++	// How far the box a_from can really move by a_move (Entity.collide, with its step-up when on the ground).
++	inline Vec Collide(const std::vector<NpcBlocks::BlockBox>& a_boxes, const Aabb& a_from, const Vec& a_move, bool a_onGround)
++	{
++		using namespace detail;
++		const Vec  collided = CollideBox(a_boxes, a_from, a_move);
++		const bool horizontal = a_move.x != collided.x || a_move.z != collided.z;
++		const bool landing = a_move.y != collided.y && a_move.y < 0.0;
++		if (!(horizontal && (a_onGround || landing))) {
++			return collided;
++		}
++		// Up by the step height, then along: the climb Minecraft allows over a low block.
++		Vec up = CollideBox(a_boxes, a_from, { a_move.x, kStepHeight, a_move.z });
++		// The same, going up first (a ceiling can stop the rise short).
++		Aabb       widened = a_from;
++		const auto expand = [&](int a_axis, double a_d) {
++			if (a_d < 0.0) {
++				widened.lo[a_axis] += a_d;
++			} else {
++				widened.hi[a_axis] += a_d;
++			}
++		};
++		expand(0, a_move.x);
++		expand(2, a_move.z);
++		const Vec rise = CollideBox(a_boxes, widened, { 0.0, kStepHeight, 0.0 });
++		if (rise.y < kStepHeight) {
++			const Vec along = CollideBox(a_boxes, Moved(a_from, rise.x, rise.y, rise.z), { a_move.x, 0.0, a_move.z });
++			const Vec both{ along.x + rise.x, along.y + rise.y, along.z + rise.z };
++			if (HorizSqr(both) > HorizSqr(up)) {
++				up = both;
++			}
++		}
++		if (HorizSqr(up) > HorizSqr(collided)) {
++			const Vec down = CollideBox(a_boxes, Moved(a_from, up.x, up.y, up.z), { 0.0, -up.y + a_move.y, 0.0 });
++			return { up.x + down.x, up.y + down.y, up.z + down.z };
++		}
++		return collided;
++	}
++
++	// A box that ended up inside blocks (one placed on it, say): the shortest way out, sideways or up (never down).
++	inline Vec Depenetrate(const std::vector<NpcBlocks::BlockBox>& a_boxes, Aabb a_box)
++	{
++		using namespace detail;
++		constexpr double kDeepest = 1.0e-4;  // shallower than this is rounding, not a block in the way
++		Vec              total{ 0.0, 0.0, 0.0 };
++		for (int pass = 0; pass < 4; ++pass) {
++			bool moved = false;
++			for (const auto& b : a_boxes) {
++				double depth[3];
++				bool   inside = true;
++				for (int i = 0; i < 3; ++i) {
++					depth[i] = std::min<double>(a_box.hi[i], b.hi[i]) - std::max<double>(a_box.lo[i], b.lo[i]);
++					if (depth[i] <= kDeepest) {
++						inside = false;
++					}
++				}
++				if (!inside) {
++					continue;
++				}
++				// Out through: +x, -x, +z, -z, or up through the top.
++				const double options[5] = { double(b.hi[0]) - a_box.lo[0], a_box.hi[0] - double(b.lo[0]), double(b.hi[2]) - a_box.lo[2], a_box.hi[2] - double(b.lo[2]),
++					double(b.hi[1]) - a_box.lo[1] };
++				int          best = 0;
++				for (int i = 1; i < 5; ++i) {
++					if (options[i] < options[best]) {
++						best = i;
++					}
++				}
++				double d[3] = { 0.0, 0.0, 0.0 };
++				switch (best) {
++				case 0: d[0] = options[0]; break;
++				case 1: d[0] = -options[1]; break;
++				case 2: d[2] = options[2]; break;
++				case 3: d[2] = -options[3]; break;
++				default: d[1] = options[4]; break;
++				}
++				for (int i = 0; i < 3; ++i) {
++					a_box.lo[i] += d[i];
++					a_box.hi[i] += d[i];
++				}
++				total.x += d[0];
++				total.y += d[1];
++				total.z += d[2];
++				moved = true;
++			}
++			if (!moved) {
++				break;
++			}
++		}
++		return total;
++	}
++}
 diff --git a/skse/src/Combat.cpp b/skse/src/Combat.cpp
 index 0954b7f..e590a77 100644
 --- a/skse/src/Combat.cpp
