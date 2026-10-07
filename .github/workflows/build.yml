@@ -60,7 +60,7 @@ jobs:
               exit 1
             fi
           }
-          apply_patch SkyCraft-Patch.patch airHeld skse/src/NpcBlocks.cpp
+          apply_patch SkyCraft-Patch.patch SetSkyrimPlayerResting skse/src/Dig.h
 
       # A repo made from "Download ZIP" has no submodule contents. Fetch CommonLibSSE-NG ourselves
       # then (the branch's latest commit, not the exact one the author built with).
@@ -239,6 +239,15 @@ jobs:
             grep -aq "landed on a block by hand" skse/build/RelWithDebInfo/SkyCraft.dll \
               && echo "SkyCraft.dll has the Skyrim-mode landing fix." \
               || { echo "::error::SkyCraft.dll was built without the Skyrim-mode landing fix."; exit 1; }
+          fi
+
+      - name: Check the block-resting support fix made it into the build
+        shell: bash
+        run: |
+          if [ -f SkyCraft-Patch.patch ] || grep -q SetSkyrimPlayerResting skse/src/Dig.h; then
+            grep -aq "resting on a block: support plane added" skse/build/RelWithDebInfo/SkyCraft.dll \
+              && echo "SkyCraft.dll has the block-resting support fix." \
+              || { echo "::error::SkyCraft.dll was built without the block-resting support fix."; exit 1; }
           fi
 
       - name: Upload the mod
