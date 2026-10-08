@@ -60,7 +60,7 @@ jobs:
               exit 1
             fi
           }
-          apply_patch SkyCraft-Patch.patch SkyrimPlayerHalfWidth skse/src/Dig.h
+          apply_patch SkyCraft-Patch.patch jumpLatch skse/src/NpcBlocks.cpp
 
       # A repo made from "Download ZIP" has no submodule contents. Fetch CommonLibSSE-NG ourselves
       # then (the branch's latest commit, not the exact one the author built with).
@@ -272,9 +272,9 @@ jobs:
             grep -aq "back on the ground inside the physics step" skse/build/RelWithDebInfo/SkyCraft.dll \
               && echo "SkyCraft.dll has the in-step ground hold." \
               || { echo "::error::SkyCraft.dll was built without the in-step ground hold."; exit 1; }
-            grep -aq "patch revision 10" skse/build/RelWithDebInfo/SkyCraft.dll \
-              && echo "SkyCraft.dll is patch revision 10." \
-              || { echo "::error::SkyCraft.dll was built without patch revision 10 (is the newest SkyCraft-Patch.patch in the repo?)."; exit 1; }
+            grep -aq "patch revision 11" skse/build/RelWithDebInfo/SkyCraft.dll \
+              && echo "SkyCraft.dll is patch revision 11." \
+              || { echo "::error::SkyCraft.dll was built without patch revision 11 (is the newest SkyCraft-Patch.patch in the repo?)."; exit 1; }
           fi
 
       - name: Check the stand-in persistence made it into the build
