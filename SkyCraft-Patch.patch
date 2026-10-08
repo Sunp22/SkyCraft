@@ -1,5 +1,5 @@
 diff --git a/fabric/src/client/java/dev/skycraft/client/InputBridge.java b/fabric/src/client/java/dev/skycraft/client/InputBridge.java
-index 929e5c461acecf0d3967c514ddf2ede5543aacca..cd5031b37705b85a388fddf35bf065f21813c815 100644
+index 929e5c4..cd5031b 100644
 --- a/fabric/src/client/java/dev/skycraft/client/InputBridge.java
 +++ b/fabric/src/client/java/dev/skycraft/client/InputBridge.java
 @@ -1,6 +1,7 @@
@@ -63,7 +63,7 @@ index 929e5c461acecf0d3967c514ddf2ede5543aacca..cd5031b37705b85a388fddf35bf065f2
  		if (scancode <= 0 || scancode >= KEYS.length) {
  			return;
 diff --git a/fabric/src/client/java/dev/skycraft/client/MirrorWorld.java b/fabric/src/client/java/dev/skycraft/client/MirrorWorld.java
-index dfda99ff6cd94b4f4c9cc1917b48d43cce662656..9db106755401226d8d619058511fae7dbe772a87 100644
+index dfda99f..9db1067 100644
 --- a/fabric/src/client/java/dev/skycraft/client/MirrorWorld.java
 +++ b/fabric/src/client/java/dev/skycraft/client/MirrorWorld.java
 @@ -1,6 +1,18 @@
@@ -296,7 +296,7 @@ index dfda99ff6cd94b4f4c9cc1917b48d43cce662656..9db106755401226d8d619058511fae7d
  		// Couldn't reach a friend's world, or it closed under us: back to our own, and say why.
  		if (minecraft.gui.screen() instanceof net.minecraft.client.gui.screens.DisconnectedScreen && minecraft.level == null) {
 diff --git a/fabric/src/client/java/dev/skycraft/client/SkyClient.java b/fabric/src/client/java/dev/skycraft/client/SkyClient.java
-index 3127e6e451443ce4216cdc377032bb09549196f2..6929eed07afd5996e9d8e5b5cf42eb8ff3cf5346 100644
+index 3127e6e..6929eed 100644
 --- a/fabric/src/client/java/dev/skycraft/client/SkyClient.java
 +++ b/fabric/src/client/java/dev/skycraft/client/SkyClient.java
 @@ -187,7 +187,9 @@ public final class SkyClient {
@@ -417,7 +417,7 @@ index 3127e6e451443ce4216cdc377032bb09549196f2..6929eed07afd5996e9d8e5b5cf42eb8f
  		if ((flags & Proto.MC_IN_WORLD) != 0) {
  			try {
 diff --git a/fabric/src/client/java/dev/skycraft/client/render/WorldExporter.java b/fabric/src/client/java/dev/skycraft/client/render/WorldExporter.java
-index 9f909cef13d2d43c60571c7c7691651629f9d0a4..ea5a230da603dd3010b1d12f2b0f17036ba8285e 100644
+index 9f909ce..ea5a230 100644
 --- a/fabric/src/client/java/dev/skycraft/client/render/WorldExporter.java
 +++ b/fabric/src/client/java/dev/skycraft/client/render/WorldExporter.java
 @@ -67,6 +67,8 @@ public final class WorldExporter {
@@ -502,7 +502,7 @@ index 9f909cef13d2d43c60571c7c7691651629f9d0a4..ea5a230da603dd3010b1d12f2b0f1703
 +	}
  }
 diff --git a/fabric/src/main/java/dev/skycraft/SkyCraft.java b/fabric/src/main/java/dev/skycraft/SkyCraft.java
-index 1670d74dc70862947d76ce25acd6c69efedddc96..8be5e039dbe769e50bd398745a553969e61c8eec 100644
+index 1670d74..8be5e03 100644
 --- a/fabric/src/main/java/dev/skycraft/SkyCraft.java
 +++ b/fabric/src/main/java/dev/skycraft/SkyCraft.java
 @@ -24,6 +24,8 @@ public final class SkyCraft implements ModInitializer {
@@ -528,7 +528,7 @@ index 1670d74dc70862947d76ce25acd6c69efedddc96..8be5e039dbe769e50bd398745a553969
  		rules.set(GameRules.ADVANCE_TIME, false, server);
 diff --git a/fabric/src/main/java/dev/skycraft/combat/AttackSkyrimActorsGoal.java b/fabric/src/main/java/dev/skycraft/combat/AttackSkyrimActorsGoal.java
 new file mode 100644
-index 0000000000000000000000000000000000000000..f7aa8b904abf6d11df009cdd68c24342187f0772
+index 0000000..f7aa8b9
 --- /dev/null
 +++ b/fabric/src/main/java/dev/skycraft/combat/AttackSkyrimActorsGoal.java
 @@ -0,0 +1,153 @@
@@ -687,7 +687,7 @@ index 0000000000000000000000000000000000000000..f7aa8b904abf6d11df009cdd68c24342
 +}
 diff --git a/fabric/src/main/java/dev/skycraft/combat/MobProxies.java b/fabric/src/main/java/dev/skycraft/combat/MobProxies.java
 new file mode 100644
-index 0000000000000000000000000000000000000000..9804d7cfc2bd14003e3bf5a125a4478082d9c48f
+index 0000000..9804d7c
 --- /dev/null
 +++ b/fabric/src/main/java/dev/skycraft/combat/MobProxies.java
 @@ -0,0 +1,191 @@
@@ -884,7 +884,7 @@ index 0000000000000000000000000000000000000000..9804d7cfc2bd14003e3bf5a125a44780
 +}
 diff --git a/fabric/src/main/java/dev/skycraft/combat/NoShove.java b/fabric/src/main/java/dev/skycraft/combat/NoShove.java
 new file mode 100644
-index 0000000000000000000000000000000000000000..8e94f08b44b26c8002aed1c46bcc15b6a6c4ea49
+index 0000000..8e94f08
 --- /dev/null
 +++ b/fabric/src/main/java/dev/skycraft/combat/NoShove.java
 @@ -0,0 +1,26 @@
@@ -916,7 +916,7 @@ index 0000000000000000000000000000000000000000..8e94f08b44b26c8002aed1c46bcc15b6
 +}
 diff --git a/fabric/src/main/java/dev/skycraft/combat/NpcFightsBack.java b/fabric/src/main/java/dev/skycraft/combat/NpcFightsBack.java
 new file mode 100644
-index 0000000000000000000000000000000000000000..77638f0b7519f775ade7b7f1e83b6691d0ed7f43
+index 0000000..77638f0
 --- /dev/null
 +++ b/fabric/src/main/java/dev/skycraft/combat/NpcFightsBack.java
 @@ -0,0 +1,198 @@
@@ -1119,7 +1119,7 @@ index 0000000000000000000000000000000000000000..77638f0b7519f775ade7b7f1e83b6691
 +	}
 +}
 diff --git a/fabric/src/main/java/dev/skycraft/combat/SkyCombat.java b/fabric/src/main/java/dev/skycraft/combat/SkyCombat.java
-index fccb3711f09d3fd3f3ef197c0298218584e87cd1..dbe30630ae8089a3d0958aeeb19505b0cdd65fc1 100644
+index fccb371..dbe3063 100644
 --- a/fabric/src/main/java/dev/skycraft/combat/SkyCombat.java
 +++ b/fabric/src/main/java/dev/skycraft/combat/SkyCombat.java
 @@ -93,6 +93,12 @@ public final class SkyCombat {
@@ -1152,7 +1152,7 @@ index fccb3711f09d3fd3f3ef197c0298218584e87cd1..dbe30630ae8089a3d0958aeeb19505b0
  			proxy.setYRot(a.yaw());
  			proxy.setYHeadRot(a.yaw());
 diff --git a/fabric/src/main/java/dev/skycraft/combat/SkyrimActorEntity.java b/fabric/src/main/java/dev/skycraft/combat/SkyrimActorEntity.java
-index 99b4d27bce8318f354e36e12dc12a0c30de6d7ad..efece216621f5ddba680e2d73881a53bda94e65a 100644
+index 99b4d27..efece21 100644
 --- a/fabric/src/main/java/dev/skycraft/combat/SkyrimActorEntity.java
 +++ b/fabric/src/main/java/dev/skycraft/combat/SkyrimActorEntity.java
 @@ -12,6 +12,7 @@ import net.minecraft.world.entity.EntityDimensions;
@@ -1334,7 +1334,7 @@ index 99b4d27bce8318f354e36e12dc12a0c30de6d7ad..efece216621f5ddba680e2d73881a53b
  
 diff --git a/fabric/src/main/java/dev/skycraft/combat/SkyrimChaseGoal.java b/fabric/src/main/java/dev/skycraft/combat/SkyrimChaseGoal.java
 new file mode 100644
-index 0000000000000000000000000000000000000000..0dacf422e5ef909c8883892d9fe26f6e3c2f97a6
+index 0000000..0dacf42
 --- /dev/null
 +++ b/fabric/src/main/java/dev/skycraft/combat/SkyrimChaseGoal.java
 @@ -0,0 +1,162 @@
@@ -1502,7 +1502,7 @@ index 0000000000000000000000000000000000000000..0dacf422e5ef909c8883892d9fe26f6e
 +}
 diff --git a/fabric/src/main/java/dev/skycraft/combat/SkyrimMobs.java b/fabric/src/main/java/dev/skycraft/combat/SkyrimMobs.java
 new file mode 100644
-index 0000000000000000000000000000000000000000..8c9854c3a012648582ea4c984f2660b34e5a6e69
+index 0000000..8c9854c
 --- /dev/null
 +++ b/fabric/src/main/java/dev/skycraft/combat/SkyrimMobs.java
 @@ -0,0 +1,111 @@
@@ -1619,7 +1619,7 @@ index 0000000000000000000000000000000000000000..8c9854c3a012648582ea4c984f2660b3
 +}
 diff --git a/fabric/src/main/java/dev/skycraft/combat/SkyrimNoticeGoal.java b/fabric/src/main/java/dev/skycraft/combat/SkyrimNoticeGoal.java
 new file mode 100644
-index 0000000000000000000000000000000000000000..4227bc103f2a79696d73819363fa4b367147ed7c
+index 0000000..4227bc1
 --- /dev/null
 +++ b/fabric/src/main/java/dev/skycraft/combat/SkyrimNoticeGoal.java
 @@ -0,0 +1,89 @@
@@ -1714,7 +1714,7 @@ index 0000000000000000000000000000000000000000..4227bc103f2a79696d73819363fa4b36
 +}
 diff --git a/fabric/src/main/java/dev/skycraft/combat/SkyrimPanicGoal.java b/fabric/src/main/java/dev/skycraft/combat/SkyrimPanicGoal.java
 new file mode 100644
-index 0000000000000000000000000000000000000000..415668a27a7566a6d2fd38735282804016f668c9
+index 0000000..415668a
 --- /dev/null
 +++ b/fabric/src/main/java/dev/skycraft/combat/SkyrimPanicGoal.java
 @@ -0,0 +1,151 @@
@@ -1871,7 +1871,7 @@ index 0000000000000000000000000000000000000000..415668a27a7566a6d2fd387352828040
 +}
 diff --git a/fabric/src/main/java/dev/skycraft/combat/SkyrimRoamGoal.java b/fabric/src/main/java/dev/skycraft/combat/SkyrimRoamGoal.java
 new file mode 100644
-index 0000000000000000000000000000000000000000..c0fe73b651a5aca3d431ad0c6ea0baf1679a2ea3
+index 0000000..c0fe73b
 --- /dev/null
 +++ b/fabric/src/main/java/dev/skycraft/combat/SkyrimRoamGoal.java
 @@ -0,0 +1,137 @@
@@ -2014,7 +2014,7 @@ index 0000000000000000000000000000000000000000..c0fe73b651a5aca3d431ad0c6ea0baf1
 +}
 diff --git a/fabric/src/main/java/dev/skycraft/combat/SkyrimSpawner.java b/fabric/src/main/java/dev/skycraft/combat/SkyrimSpawner.java
 new file mode 100644
-index 0000000000000000000000000000000000000000..9f18d6b72a7166de8c1d40ae761b25d835f579a5
+index 0000000..9f18d6b
 --- /dev/null
 +++ b/fabric/src/main/java/dev/skycraft/combat/SkyrimSpawner.java
 @@ -0,0 +1,319 @@
@@ -2339,7 +2339,7 @@ index 0000000000000000000000000000000000000000..9f18d6b72a7166de8c1d40ae761b25d8
 +}
 diff --git a/fabric/src/main/java/dev/skycraft/combat/SkyrimSwings.java b/fabric/src/main/java/dev/skycraft/combat/SkyrimSwings.java
 new file mode 100644
-index 0000000000000000000000000000000000000000..258911ac6bd839314430a5448a482aafc1f02870
+index 0000000..258911a
 --- /dev/null
 +++ b/fabric/src/main/java/dev/skycraft/combat/SkyrimSwings.java
 @@ -0,0 +1,148 @@
@@ -2492,7 +2492,7 @@ index 0000000000000000000000000000000000000000..258911ac6bd839314430a5448a482aaf
 +	}
 +}
 diff --git a/fabric/src/main/java/dev/skycraft/link/Proto.java b/fabric/src/main/java/dev/skycraft/link/Proto.java
-index 26b7fe6e898f5978fa56c7bb05e6f42c9832241e..f4312cf0d2478e4a4d669ca646f96b1c64359506 100644
+index 26b7fe6..f4312cf 100644
 --- a/fabric/src/main/java/dev/skycraft/link/Proto.java
 +++ b/fabric/src/main/java/dev/skycraft/link/Proto.java
 @@ -8,7 +8,7 @@ public final class Proto {
@@ -2602,7 +2602,7 @@ index 26b7fe6e898f5978fa56c7bb05e6f42c9832241e..f4312cf0d2478e4a4d669ca646f96b1c
  	// Overlay
  	public static final long OC_STATE = 0x00;
 diff --git a/fabric/src/main/java/dev/skycraft/link/SkyLink.java b/fabric/src/main/java/dev/skycraft/link/SkyLink.java
-index 6b9b1665cb4292e7488649d16ace1d27186a6842..2de600e9601b09ced8e6f54800ad3e1a3dca843e 100644
+index 6b9b166..2de600e 100644
 --- a/fabric/src/main/java/dev/skycraft/link/SkyLink.java
 +++ b/fabric/src/main/java/dev/skycraft/link/SkyLink.java
 @@ -202,6 +202,8 @@ public final class SkyLink {
@@ -2658,7 +2658,7 @@ index 6b9b1665cb4292e7488649d16ace1d27186a6842..2de600e9601b09ced8e6f54800ad3e1a
  		MemorySegment s = shm;
  		if (s == null) {
 diff --git a/fabric/src/main/java/dev/skycraft/mixin/BlockCollisionsMixin.java b/fabric/src/main/java/dev/skycraft/mixin/BlockCollisionsMixin.java
-index 021abb5bf8c3deced3e8f08d36868d01a7a38819..6a2123d270591755633d06a33a9b6800861a66f1 100644
+index 021abb5..6a2123d 100644
 --- a/fabric/src/main/java/dev/skycraft/mixin/BlockCollisionsMixin.java
 +++ b/fabric/src/main/java/dev/skycraft/mixin/BlockCollisionsMixin.java
 @@ -38,13 +38,13 @@ public abstract class BlockCollisionsMixin {
@@ -2680,7 +2680,7 @@ index 021abb5bf8c3deced3e8f08d36868d01a7a38819..6a2123d270591755633d06a33a9b6800
  }
 diff --git a/fabric/src/main/java/dev/skycraft/mixin/MobCollideMixin.java b/fabric/src/main/java/dev/skycraft/mixin/MobCollideMixin.java
 new file mode 100644
-index 0000000000000000000000000000000000000000..b00dbc6b73d69b83bb0007edb3b0b8a961a55605
+index 0000000..b00dbc6
 --- /dev/null
 +++ b/fabric/src/main/java/dev/skycraft/mixin/MobCollideMixin.java
 @@ -0,0 +1,32 @@
@@ -2718,7 +2718,7 @@ index 0000000000000000000000000000000000000000..b00dbc6b73d69b83bb0007edb3b0b8a9
 +}
 diff --git a/fabric/src/main/java/dev/skycraft/mixin/MobSkyrimFoesMixin.java b/fabric/src/main/java/dev/skycraft/mixin/MobSkyrimFoesMixin.java
 new file mode 100644
-index 0000000000000000000000000000000000000000..9faab7710483adedcb6c7b892c81e881f978b9d1
+index 0000000..9faab77
 --- /dev/null
 +++ b/fabric/src/main/java/dev/skycraft/mixin/MobSkyrimFoesMixin.java
 @@ -0,0 +1,51 @@
@@ -2774,7 +2774,7 @@ index 0000000000000000000000000000000000000000..9faab7710483adedcb6c7b892c81e881
 +	}
 +}
 diff --git a/fabric/src/main/java/dev/skycraft/mixin/ServerExplosionMixin.java b/fabric/src/main/java/dev/skycraft/mixin/ServerExplosionMixin.java
-index be1a22aceff0849f1b1b5b21d0260047e3b023cd..f8a8c6871dccf94c2b1618fe40dbf78f3a635b5f 100644
+index be1a22a..f8a8c68 100644
 --- a/fabric/src/main/java/dev/skycraft/mixin/ServerExplosionMixin.java
 +++ b/fabric/src/main/java/dev/skycraft/mixin/ServerExplosionMixin.java
 @@ -71,6 +71,11 @@ public abstract class ServerExplosionMixin {
@@ -2791,7 +2791,7 @@ index be1a22aceff0849f1b1b5b21d0260047e3b023cd..f8a8c6871dccf94c2b1618fe40dbf78f
  	}
  }
 diff --git a/fabric/src/main/java/dev/skycraft/world/SkyCollision.java b/fabric/src/main/java/dev/skycraft/world/SkyCollision.java
-index 0d32dc8edcd41959e0884022e9ded7bcfd7017c2..43600be2fbb92f60c132d2842e01e24bca44798b 100644
+index 0d32dc8..43600be 100644
 --- a/fabric/src/main/java/dev/skycraft/world/SkyCollision.java
 +++ b/fabric/src/main/java/dev/skycraft/world/SkyCollision.java
 @@ -62,6 +62,18 @@ public final class SkyCollision {
@@ -2815,7 +2815,7 @@ index 0d32dc8edcd41959e0884022e9ded7bcfd7017c2..43600be2fbb92f60c132d2842e01e24b
  	}
 diff --git a/fabric/src/main/java/dev/skycraft/world/SkyMobCollider.java b/fabric/src/main/java/dev/skycraft/world/SkyMobCollider.java
 new file mode 100644
-index 0000000000000000000000000000000000000000..d4b5d5ffcd0dacd66a64f7aaea2a057587f68332
+index 0000000..d4b5d5f
 --- /dev/null
 +++ b/fabric/src/main/java/dev/skycraft/world/SkyMobCollider.java
 @@ -0,0 +1,51 @@
@@ -2872,7 +2872,7 @@ index 0000000000000000000000000000000000000000..d4b5d5ffcd0dacd66a64f7aaea2a0575
 +}
 diff --git a/fabric/src/main/java/dev/skycraft/world/SkyNav.java b/fabric/src/main/java/dev/skycraft/world/SkyNav.java
 new file mode 100644
-index 0000000000000000000000000000000000000000..9b6a8c29e8ac54a14e5e106207a8d0b1f17194af
+index 0000000..9b6a8c2
 --- /dev/null
 +++ b/fabric/src/main/java/dev/skycraft/world/SkyNav.java
 @@ -0,0 +1,275 @@
@@ -3153,7 +3153,7 @@ index 0000000000000000000000000000000000000000..9b6a8c29e8ac54a14e5e106207a8d0b1
 +}
 diff --git a/fabric/src/main/java/dev/skycraft/world/SkyTime.java b/fabric/src/main/java/dev/skycraft/world/SkyTime.java
 new file mode 100644
-index 0000000000000000000000000000000000000000..97100a8a4b51e680ade7f30863e9ed15e18affbf
+index 0000000..97100a8
 --- /dev/null
 +++ b/fabric/src/main/java/dev/skycraft/world/SkyTime.java
 @@ -0,0 +1,102 @@
@@ -3260,7 +3260,7 @@ index 0000000000000000000000000000000000000000..97100a8a4b51e680ade7f30863e9ed15
 +	}
 +}
 diff --git a/fabric/src/main/resources/skycraft.mixins.json b/fabric/src/main/resources/skycraft.mixins.json
-index 5ea8e5b5314e401bee7c3349a12cdc4409c64cd8..ae3cf6e553b158babe3d756dd5f90c6615a610e6 100644
+index 5ea8e5b..ae3cf6e 100644
 --- a/fabric/src/main/resources/skycraft.mixins.json
 +++ b/fabric/src/main/resources/skycraft.mixins.json
 @@ -13,6 +13,8 @@
@@ -3273,7 +3273,7 @@ index 5ea8e5b5314e401bee7c3349a12cdc4409c64cd8..ae3cf6e553b158babe3d756dd5f90c66
      "PressurePlateMixin",
      "ProjectileMixin",
 diff --git a/protocol/skycraft_protocol.h b/protocol/skycraft_protocol.h
-index fce6cf81179d3d30b01e8fafab387669f96ba660..77bf3e0640f3ea26935c09c0d6310c591983241a 100644
+index fce6cf8..77bf3e0 100644
 --- a/protocol/skycraft_protocol.h
 +++ b/protocol/skycraft_protocol.h
 @@ -13,7 +13,7 @@
@@ -3429,7 +3429,7 @@ index fce6cf81179d3d30b01e8fafab387669f96ba660..77bf3e0640f3ea26935c09c0d6310c59
  	{
  		std::int32_t  sx, sy, sz;  // section coords, as in RenSection
 diff --git a/skse/SkyCraft.ini b/skse/SkyCraft.ini
-index 92b585a20c10a51962502169ed3d54422b2140f3..f4b3020d96c030a090c6d41cca97cf42c7f00fcc 100644
+index 92b585a..f4b3020 100644
 --- a/skse/SkyCraft.ini
 +++ b/skse/SkyCraft.ini
 @@ -14,7 +14,69 @@ sLauncher =
@@ -3504,7 +3504,7 @@ index 92b585a20c10a51962502169ed3d54422b2140f3..f4b3020d96c030a090c6d41cca97cf42
 +fSink = 0.0
 diff --git a/skse/src/BlockCrates.cpp b/skse/src/BlockCrates.cpp
 new file mode 100644
-index 0000000000000000000000000000000000000000..331a84c4562049d678e7b7d4f413f50a64a1eb49
+index 0000000..331a84c
 --- /dev/null
 +++ b/skse/src/BlockCrates.cpp
 @@ -0,0 +1,421 @@
@@ -3931,7 +3931,7 @@ index 0000000000000000000000000000000000000000..331a84c4562049d678e7b7d4f413f50a
 +}
 diff --git a/skse/src/BlockMove.h b/skse/src/BlockMove.h
 new file mode 100644
-index 0000000000000000000000000000000000000000..0cbdd074d32cf699acb83fad48a20c0a5f2ce238
+index 0000000..0cbdd07
 --- /dev/null
 +++ b/skse/src/BlockMove.h
 @@ -0,0 +1,158 @@
@@ -4094,7 +4094,7 @@ index 0000000000000000000000000000000000000000..0cbdd074d32cf699acb83fad48a20c0a
 +	}
 +}
 diff --git a/skse/src/Combat.cpp b/skse/src/Combat.cpp
-index 0954b7f09d7e9813078d7a1737b9b4aa48f83976..ca959b901531194777928ab8602193559b8856c4 100644
+index 0954b7f..ca959b9 100644
 --- a/skse/src/Combat.cpp
 +++ b/skse/src/Combat.cpp
 @@ -1,5 +1,7 @@
@@ -6584,7 +6584,7 @@ index 0954b7f09d7e9813078d7a1737b9b4aa48f83976..ca959b901531194777928ab860219355
  	}
  }
 diff --git a/skse/src/Dig.h b/skse/src/Dig.h
-index 9b1d191a50097f806d8ce91ad9432be91686e0ce..f8007c83d86a1866c461395d8cfcfcc131dc52d6 100644
+index 9b1d191..f8007c8 100644
 --- a/skse/src/Dig.h
 +++ b/skse/src/Dig.h
 @@ -48,6 +48,23 @@ namespace skycraft::Dig
@@ -6612,7 +6612,7 @@ index 9b1d191a50097f806d8ce91ad9432be91686e0ce..f8007c83d86a1866c461395d8cfcfcc1
  	// a_changed: blocks were dug this frame.
  	void UpdateMeshes(RE::PlayerCharacter* a_player, float a_delta, bool a_changed);
 diff --git a/skse/src/DigPhysics.cpp b/skse/src/DigPhysics.cpp
-index 4ce955a19911506b1e55d25c30a2a99d34d00ebb..d93328dd6b74cc7916ced17beae2f459a9638ac3 100644
+index 4ce955a..855fdf6 100644
 --- a/skse/src/DigPhysics.cpp
 +++ b/skse/src/DigPhysics.cpp
 @@ -2,6 +2,8 @@
@@ -6646,7 +6646,7 @@ index 4ce955a19911506b1e55d25c30a2a99d34d00ebb..d93328dd6b74cc7916ced17beae2f459
  		std::atomic<float>                    puppetFeet{ 0.0f };
  		constexpr float                       kFeetSlack = 0.3f;  // Havok units above the feet still "under" them
  
-@@ -145,68 +162,193 @@ namespace skycraft::Dig
+@@ -145,68 +162,196 @@ namespace skycraft::Dig
  			if ((x1 - x0 + 1) * (y1 - y0 + 1) * (z1 - z0 + 1) > 512) {
  				return;  // something huge (a dragon): not worth it
  			}
@@ -6839,10 +6839,13 @@ index 4ce955a19911506b1e55d25c30a2a99d34d00ebb..d93328dd6b74cc7916ced17beae2f459
 +			if constexpr (requires { a_controller->wantState; }) {
 +				jumping = jumping || a_controller->wantState == RE::hkpCharacterStateType::kJumping;
 +			}
++			// Upward speed alone is not a jump: walking over blocks has some while on the ground, and that cancelled the support planes.
 +			if constexpr (requires(RE::hkVector4 v) { a_controller->GetLinearVelocityImpl(v); v.quad.m128_f32[2]; }) {
-+				RE::hkVector4 v;
-+				a_controller->GetLinearVelocityImpl(v);
-+				jumping = jumping || v.quad.m128_f32[2] > 0.5f;
++				if (a_controller->context.currentState == RE::hkpCharacterStateType::kInAir) {
++					RE::hkVector4 v;
++					a_controller->GetLinearVelocityImpl(v);
++					jumping = jumping || v.quad.m128_f32[2] > 0.5f;
++				}
 +			}
 +			return jumping;
 +		}
@@ -6885,7 +6888,7 @@ index 4ce955a19911506b1e55d25c30a2a99d34d00ebb..d93328dd6b74cc7916ced17beae2f459
  		struct ProcessConstraintsHook
  		{
  			static void thunk(RE::bhkCharProxyController* a_this, RE::hkpCharacterProxy* a_proxy, const RE::hkArray<RE::hkpRootCdPoint>& a_manifold, RE::hkpSimplexSolverInput& a_input)
-@@ -235,18 +377,57 @@ namespace skycraft::Dig
+@@ -235,18 +380,57 @@ namespace skycraft::Dig
  				static thread_local std::vector<Plane> planes;
  				planes.clear();
  				BlockPlanes(box, planes);
@@ -6945,7 +6948,7 @@ index 4ce955a19911506b1e55d25c30a2a99d34d00ebb..d93328dd6b74cc7916ced17beae2f459
  				for (int i = 0; i < count; ++i) {
  					const auto& p = planes[i];
  					auto&       c = a_input.constraints[a_input.numConstraints++];
-@@ -259,10 +440,10 @@ namespace skycraft::Dig
+@@ -259,10 +443,10 @@ namespace skycraft::Dig
  					}
  					c.plane = RE::hkVector4(p.n[0], p.n[1], p.n[2], w);
  					c.velocity = RE::hkVector4(v[0], v[1], v[2], 0.0f);
@@ -6960,7 +6963,7 @@ index 4ce955a19911506b1e55d25c30a2a99d34d00ebb..d93328dd6b74cc7916ced17beae2f459
  					c.priority = 0;
  				}
  			}
-@@ -302,8 +483,58 @@ namespace skycraft::Dig
+@@ -302,8 +486,58 @@ namespace skycraft::Dig
  		puppet.store(a_proxy, std::memory_order_relaxed);
  	}
  
@@ -7020,7 +7023,7 @@ index 4ce955a19911506b1e55d25c30a2a99d34d00ebb..d93328dd6b74cc7916ced17beae2f459
  		AddCdPointHook::func = collector.write_vfunc(0x1, AddCdPointHook::thunk);
  		REL::Relocation<std::uintptr_t> plain{ RE::VTABLE_hkpAllCdPointCollector[0] };
 diff --git a/skse/src/Game.cpp b/skse/src/Game.cpp
-index 3bb4d3437fb4283fef1bd378689a5c20dea3d310..24cb7d0a422e4c29a3083284760c405e88b5caf7 100644
+index 3bb4d34..24cb7d0 100644
 --- a/skse/src/Game.cpp
 +++ b/skse/src/Game.cpp
 @@ -4,6 +4,14 @@
@@ -7262,7 +7265,7 @@ index 3bb4d3437fb4283fef1bd378689a5c20dea3d310..24cb7d0a422e4c29a3083284760c405e
  				Perf::Scope timer(Perf::kDigMeshes);
  				Dig::UpdateMeshes(digSettled > 3.0f ? a_player : nullptr, a_delta, !dugChanged.empty());
 diff --git a/skse/src/Game.h b/skse/src/Game.h
-index 05788b10ead50ad0d5890111ae7e932c2519d1eb..4588a30fdebd3ef262129e16dadc99608f1f7095 100644
+index 05788b1..4588a30 100644
 --- a/skse/src/Game.h
 +++ b/skse/src/Game.h
 @@ -17,6 +17,20 @@ namespace skycraft
@@ -7363,7 +7366,7 @@ index 05788b10ead50ad0d5890111ae7e932c2519d1eb..4588a30fdebd3ef262129e16dadc9960
  
  	namespace WorldRender
 diff --git a/skse/src/Input.cpp b/skse/src/Input.cpp
-index 092862e649f96dcdbe09ae6b18c9aadfc1d73c69..6b42d974979143a305c352c35379c92cf79e822f 100644
+index 092862e..6b42d97 100644
 --- a/skse/src/Input.cpp
 +++ b/skse/src/Input.cpp
 @@ -1,5 +1,14 @@
@@ -7756,7 +7759,7 @@ index 092862e649f96dcdbe09ae6b18c9aadfc1d73c69..6b42d974979143a305c352c35379c92c
  		{
  			static std::uint16_t savedKey = 0xFFFF;
 diff --git a/skse/src/Launcher.cpp b/skse/src/Launcher.cpp
-index 741fcca3882366440d7bac0d570e8d3c4151623b..8ca00832cb79bb228fad5ec27572d549f6c41a00 100644
+index 741fcca..8ca0083 100644
 --- a/skse/src/Launcher.cpp
 +++ b/skse/src/Launcher.cpp
 @@ -1,5 +1,7 @@
@@ -7808,7 +7811,7 @@ index 741fcca3882366440d7bac0d570e8d3c4151623b..8ca00832cb79bb228fad5ec27572d549
  
  namespace skycraft::Launcher
 diff --git a/skse/src/NpcBlocks.cpp b/skse/src/NpcBlocks.cpp
-index 5e25a7d1efe3bdcea24c6c70b13be2216bcc1112..aa6c68554a40eeed3431985723a64f8d8dc4d651 100644
+index 5e25a7d..e23a293 100644
 --- a/skse/src/NpcBlocks.cpp
 +++ b/skse/src/NpcBlocks.cpp
 @@ -1,4 +1,6 @@
@@ -8067,7 +8070,7 @@ index 5e25a7d1efe3bdcea24c6c70b13be2216bcc1112..aa6c68554a40eeed3431985723a64f8d
  					}
  					if (std::abs(pushX) < 1e-4 && std::abs(pushZ) < 1e-4) {
  						break;
-@@ -250,5 +389,348 @@ namespace skycraft
+@@ -250,5 +389,353 @@ namespace skycraft
  				detours.clear();
  			}
  		}
@@ -8277,7 +8280,10 @@ index 5e25a7d1efe3bdcea24c6c70b13be2216bcc1112..aa6c68554a40eeed3431985723a64f8d
 +			// Latched for a moment so one frame that reads as flat does not hand it back.
 +			static float jumpLatch = 0.0f;
 +			const bool   jumpState = controller && controller->context.currentState == RE::hkpCharacterStateType::kJumping;
-+			const bool   rising = controller && UpSpeed(controller) > 0.5f;
++			// Walking over blocks gives the controller upward speed too (penetration recovery, steps) while it is still on the ground
++			// (state 0): that read as a jump, so the standing hold was dropped for 0.2 s again and again (the bumping, and the
++			// inconsistent jumps). Rising only counts in the air.
++			const bool   rising = controller && controller->context.currentState == RE::hkpCharacterStateType::kInAir && UpSpeed(controller) > 0.5f;
 +			if (jumpState || rising) {
 +				jumpLatch = 0.20f;
 +			} else if (jumpLatch > 0.0f) {
@@ -8296,7 +8302,9 @@ index 5e25a7d1efe3bdcea24c6c70b13be2216bcc1112..aa6c68554a40eeed3431985723a64f8d
 +			// the player is put up onto that top and a little forward, as Minecraft's step-up would on the ground.
 +			static float assistWait = 0.0f;
 +			assistWait -= a_delta;
-+			if (!standing && controller && assistWait <= 0.0f) {
++			// Only while Skyrim has the player off the ground: on the ground Minecraft's own step-up (Collide above) already does it, and
++			// the assist put walking players up 0.4 blocks in a single frame.
++			if (!standing && controller && assistWait <= 0.0f && controller->context.currentState != RE::hkpCharacterStateType::kOnGround) {
 +				bool        known = false;
 +				const float input = MoveInput(known);
 +				if (known && input > 0.05f) {
@@ -8417,7 +8425,7 @@ index 5e25a7d1efe3bdcea24c6c70b13be2216bcc1112..aa6c68554a40eeed3431985723a64f8d
  	}
  }
 diff --git a/skse/src/Overlay.cpp b/skse/src/Overlay.cpp
-index 4a78706dd44a54ccb980c0e612ea114221551b34..ae60836c049f84a65cf5d94fa7b6079873170d31 100644
+index 4a78706..ae60836 100644
 --- a/skse/src/Overlay.cpp
 +++ b/skse/src/Overlay.cpp
 @@ -234,7 +234,8 @@ float4 PSMain(VSOut i) : SV_Target {
@@ -8431,7 +8439,7 @@ index 4a78706dd44a54ccb980c0e612ea114221551b34..ae60836c049f84a65cf5d94fa7b60798
  			}
  			UploadLatestFrame();
 diff --git a/skse/src/WorldRender.cpp b/skse/src/WorldRender.cpp
-index b877ae5aa8bdd2dba3b50e37528c2e082f80d280..22fc725ecff81eb6d2a0c53e9fa134ba986e13ce 100644
+index b877ae5..22fc725 100644
 --- a/skse/src/WorldRender.cpp
 +++ b/skse/src/WorldRender.cpp
 @@ -1100,6 +1100,9 @@ float4 OverlayPS(float4 pos : SV_Position) : SV_Target
@@ -8562,7 +8570,7 @@ index b877ae5aa8bdd2dba3b50e37528c2e082f80d280..22fc725ecff81eb6d2a0c53e9fa134ba
  				logger::info("in-frame block drawing: hooked after Main::RenderWorld");
  			}
 diff --git a/skse/src/main.cpp b/skse/src/main.cpp
-index eb548b44c84d32069978d11d9f98632be85f4628..3b575592235dc1b5ee581661cf773406051c5e27 100644
+index eb548b4..6a5e794 100644
 --- a/skse/src/main.cpp
 +++ b/skse/src/main.cpp
 @@ -21,6 +21,9 @@ namespace
@@ -8579,12 +8587,12 @@ index eb548b44c84d32069978d11d9f98632be85f4628..3b575592235dc1b5ee581661cf773406
  	SetupLog();
  	skycraft::CrashLog::Install();
  	logger::info("SkyCraft {} loading (runtime {})", "0.1.2", a_skse->RuntimeVersion().string());
-+	logger::info("patch revision 12 (collision: standing hold, slide stop, jump off blocks, ledge assist, steadier standing, friction when still; starts in Skyrim mode; stand-ins last as long as their mob, health 1:1)");
++	logger::info("patch revision 13 (walking no longer read as jumping, ledge assist only in the air; collision: standing hold, slide stop, jump off blocks, ledge assist, steadier standing, friction when still; starts in Skyrim mode; stand-ins last as long as their mob, health 1:1)");
  	SKSE::GetMessagingInterface()->RegisterListener(OnMessage);
  	// As early as possible: Minecraft takes about as long to start as Skyrim does to reach its menu.
  	skycraft::Launcher::StartMinecraft();
 diff --git a/tools/fake_skyrim.py b/tools/fake_skyrim.py
-index 240274609c0cebde8e632b12ebdbdea21709bd52..f352a35fd027591a181b2bce264fb83e3fe8cee4 100644
+index 2402746..f352a35 100644
 --- a/tools/fake_skyrim.py
 +++ b/tools/fake_skyrim.py
 @@ -14,7 +14,7 @@ import time
