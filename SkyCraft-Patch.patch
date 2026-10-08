@@ -6093,10 +6093,10 @@ index 0954b7f..01bbed8 100644
  	}
  }
 diff --git a/skse/src/Dig.h b/skse/src/Dig.h
-index 9b1d191..9f84a31 100644
+index 9b1d191..f12c4b2 100644
 --- a/skse/src/Dig.h
 +++ b/skse/src/Dig.h
-@@ -48,6 +48,19 @@ namespace skycraft::Dig
+@@ -48,6 +48,21 @@ namespace skycraft::Dig
  	// drives the player (null otherwise), and its feet (Havok z). Its body only stands on what's
  	// under its feet: anything else (the ground over a hole it's in) would shove it out.
  	void SetPuppet(const RE::hkpCollidable* a_proxy, float a_feetHavokZ);
@@ -6105,6 +6105,8 @@ index 9b1d191..9f84a31 100644
 +	void SetSkyrimPlayer(const RE::hkpCollidable* a_proxy, RE::bhkCharacterController* a_controller = nullptr);
 +	// Minecraft's collision has the Skyrim-controlled player resting on a block's top: Havok's support check must agree.
 +	void SetSkyrimPlayerResting(bool a_resting);
++	// Physics steps since the last call in which Skyrim put the resting player in the air and the plane hook put it back.
++	int TakeSkyrimPlayerFlips();
 +	// What the plane hook last did for the Skyrim-controlled player (for the log): hook calls since the last read, planes added, the nearest
 +	// plane's distance, the proxy's keepDistance, the capsule's bottom in blocks.
 +	void SkyrimPlayerSupportDebug(int& a_calls, int& a_planes, float& a_nearest, float& a_keep, float& a_boxZ, int& a_own, int& a_manifold);
@@ -6117,7 +6119,7 @@ index 9b1d191..9f84a31 100644
  	// a_changed: blocks were dug this frame.
  	void UpdateMeshes(RE::PlayerCharacter* a_player, float a_delta, bool a_changed);
 diff --git a/skse/src/DigPhysics.cpp b/skse/src/DigPhysics.cpp
-index 4ce955a..342a23a 100644
+index 4ce955a..33e7564 100644
 --- a/skse/src/DigPhysics.cpp
 +++ b/skse/src/DigPhysics.cpp
 @@ -2,6 +2,8 @@
@@ -6129,7 +6131,7 @@ index 4ce955a..342a23a 100644
  // Skyrim's NPCs in a dug-up world. Every actor moves with a Havok character proxy: it collects
  // contact points with the world (bhkCharacterPointCollector), turns them into surface planes, and
  // solves its movement against those planes. Two hooks:
-@@ -66,6 +68,19 @@ namespace skycraft::Dig
+@@ -66,6 +68,20 @@ namespace skycraft::Dig
  		std::atomic<int> loggedDropped{ 0 };
  		std::atomic<int> loggedPlanes{ 0 };
  		std::atomic<const RE::hkpCollidable*> puppet{ nullptr };
@@ -6142,6 +6144,7 @@ index 4ce955a..342a23a 100644
 +		std::atomic<float>                    skyPlayerNearest{ 99.0f };   // the nearest of them (Havok units)
 +		std::atomic<float>                    skyPlayerKeep{ 0.0f };       // the proxy's keepDistance
 +		std::atomic<float>                    skyPlayerBoxZ{ 0.0f };       // capsule bottom, blocks
++		std::atomic<int>                      skyPlayerFlips{ 0 };         // steps in which Skyrim had the player in the air on a block and the hook put it back
 +		std::atomic<int>                      skyPlayerCalls{ 0 };         // hook calls for the player since the last read
 +		std::atomic<int>                      skyPlayerOwnPlanes{ 0 };     // planes Skyrim's own callback had already put in
 +		std::atomic<int>                      skyPlayerManifold{ -1 };     // contacts in the proxy's manifold (-1: unknown)
@@ -6149,7 +6152,7 @@ index 4ce955a..342a23a 100644
  		std::atomic<float>                    puppetFeet{ 0.0f };
  		constexpr float                       kFeetSlack = 0.3f;  // Havok units above the feet still "under" them
  
-@@ -145,68 +160,165 @@ namespace skycraft::Dig
+@@ -145,68 +161,172 @@ namespace skycraft::Dig
  			if ((x1 - x0 + 1) * (y1 - y0 + 1) * (z1 - z0 + 1) > 512) {
  				return;  // something huge (a dragon): not worth it
  			}
@@ -6335,6 +6338,12 @@ index 4ce955a..342a23a 100644
 +			if (!a_controller) {
 +				return false;
 +			}
++			static bool probed = false;
++			if (!probed) {
++				probed = true;
++				constexpr bool hasSurfaceInfo = requires { a_controller->surfaceInfo.supportedState = RE::hkpSurfaceInfo::SupportedState::kSupported; };
++				logger::info("dig: this CommonLib {} the controller's surface info (supported state)", hasSurfaceInfo ? "can set" : "cannot reach");
++			}
 +			a_controller->flags.set(RE::CHARACTER_FLAGS::kSupport);
 +			if constexpr (requires { a_controller->surfaceInfo.supportedState = RE::hkpSurfaceInfo::SupportedState::kSupported; }) {
 +				a_controller->surfaceInfo.supportedState = RE::hkpSurfaceInfo::SupportedState::kSupported;
@@ -6342,6 +6351,7 @@ index 4ce955a..342a23a 100644
 +			if (a_controller->context.currentState == RE::hkpCharacterStateType::kInAir) {
 +				a_controller->context.currentState = RE::hkpCharacterStateType::kOnGround;
 +				a_controller->fallTime = 0.0f;
++				skyPlayerFlips.fetch_add(1, std::memory_order_relaxed);
 +				return true;
 +			}
 +			return false;
@@ -6360,7 +6370,7 @@ index 4ce955a..342a23a 100644
  		struct ProcessConstraintsHook
  		{
  			static void thunk(RE::bhkCharProxyController* a_this, RE::hkpCharacterProxy* a_proxy, const RE::hkArray<RE::hkpRootCdPoint>& a_manifold, RE::hkpSimplexSolverInput& a_input)
-@@ -235,15 +347,50 @@ namespace skycraft::Dig
+@@ -235,15 +355,50 @@ namespace skycraft::Dig
  				static thread_local std::vector<Plane> planes;
  				planes.clear();
  				BlockPlanes(box, planes);
@@ -6413,7 +6423,7 @@ index 4ce955a..342a23a 100644
  				if (loggedPlanes.fetch_add(1) < 3) {
  					logger::info("dig: {} Minecraft block planes for an actor (room {}, nearest {:.2f})", count, room, planes[0].d);
  				}
-@@ -302,8 +449,48 @@ namespace skycraft::Dig
+@@ -302,8 +457,53 @@ namespace skycraft::Dig
  		puppet.store(a_proxy, std::memory_order_relaxed);
  	}
  
@@ -6435,6 +6445,11 @@ index 4ce955a..342a23a 100644
 +		a_boxZ = skyPlayerBoxZ.load(std::memory_order_relaxed);
 +		a_own = skyPlayerOwnPlanes.load(std::memory_order_relaxed);
 +		a_manifold = skyPlayerManifold.load(std::memory_order_relaxed);
++	}
++
++	int TakeSkyrimPlayerFlips()
++	{
++		return skyPlayerFlips.exchange(0, std::memory_order_relaxed);
 +	}
 +
 +	void SetSkyrimPlayerResting(bool a_resting)
@@ -7242,7 +7257,7 @@ index 741fcca..8ca0083 100644
  
  namespace skycraft::Launcher
 diff --git a/skse/src/NpcBlocks.cpp b/skse/src/NpcBlocks.cpp
-index 5e25a7d..6eeb196 100644
+index 5e25a7d..af62152 100644
 --- a/skse/src/NpcBlocks.cpp
 +++ b/skse/src/NpcBlocks.cpp
 @@ -1,4 +1,6 @@
@@ -7501,7 +7516,7 @@ index 5e25a7d..6eeb196 100644
  					}
  					if (std::abs(pushX) < 1e-4 && std::abs(pushZ) < 1e-4) {
  						break;
-@@ -250,5 +389,246 @@ namespace skycraft
+@@ -250,5 +389,249 @@ namespace skycraft
  				detours.clear();
  			}
  		}
@@ -7684,7 +7699,10 @@ index 5e25a7d..6eeb196 100644
 +				airTime = (skyGround || !controller) ? 0.0f : airTime + a_delta;
 +			}
 +			if (standing && controller) {
-+				const bool heldThisFrame = controller->context.currentState != RE::hkpCharacterStateType::kOnGround;
++				// Skyrim's step moved the player as if airborne (momentum, slow air control) if the state was in the air when this frame
++				// began, or if the plane hook had to put it back during the step (then it is on the ground by now, but moved like it was in the air).
++				const int  stepFlips = Dig::TakeSkyrimPlayerFlips();
++				const bool heldThisFrame = controller->context.currentState != RE::hkpCharacterStateType::kOnGround || stepFlips > 0;
 +				// It is standing, not falling: no fall to land from, no momentum to carry into the block.
 +				StopFalling(controller);  // (only the vertical speed: zeroing all of it stopped the player walking on a block)
 +				controller->fallStartHeight = float(end.y * proto::kUnitsPerBlock);
