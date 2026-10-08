@@ -7612,7 +7612,7 @@ index 5e25a7d..904af69 100644
 +				const float want = float(1.25 * proto::kUnitsPerBlock / 69.99125);
 +				if (!logged) {
 +					logged = true;
-+					logger::info(\"Skyrim control: jump height in the player's controller is {:.3f} (want {:.3f} for 1.25 blocks)\", now, want);
++					logger::info("Skyrim control: jump height in the player's controller is {:.3f} (want {:.3f} for 1.25 blocks)", now, want);
 +				}
 +				if (a_on) {
 +					if (now > 0.5f && now < 3.0f && now < want - 0.001f) {
