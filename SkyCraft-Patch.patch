@@ -3647,7 +3647,7 @@ index 0000000..0cbdd07
 +	}
 +}
 diff --git a/skse/src/Combat.cpp b/skse/src/Combat.cpp
-index 0954b7f..3f47a47 100644
+index 0954b7f..db1fbdd 100644
 --- a/skse/src/Combat.cpp
 +++ b/skse/src/Combat.cpp
 @@ -1,5 +1,7 @@
@@ -3801,7 +3801,7 @@ index 0954b7f..3f47a47 100644
  				const auto mc = SkyToMc(pos);
  				r.x = static_cast<float>(mc.x);
  				r.y = static_cast<float>(mc.y);
-@@ -240,161 +346,1777 @@ namespace skycraft
+@@ -240,161 +346,1798 @@ namespace skycraft
  				logger::warn("hit pipeline: melee call site doesn't match this game build; using plain damage");
  				return;
  			}
@@ -3893,9 +3893,18 @@ index 0954b7f..3f47a47 100644
 +		// combat with the player and no skill experience; the actor just takes the damage, staggers if it
 +		// was a big one, and bleeds where it was hit.
 +		// Takes health off an actor with no attacker, by whichever call this CommonLib has (they differ between versions).
++		// Set while SkyCraft itself changes a stand-in's health (the sync to the mob's, giving back what Skyrim took): StandInDamageGuard
++		// cut every call on a stand-in to nothing, ours included, so the stand-in's health never followed the mob's.
++		inline int ownHealthChange = 0;
++
 +		template <class T>
 +		void DamageHealth(T* a_actor, float a_damage)
 +		{
++			struct Own
++			{
++				Own() { ++ownHealthChange; }
++				~Own() { --ownHealthChange; }
++			} own;
 +			auto* values = a_actor->AsActorValueOwner();
 +			if constexpr (requires { values->RestoreActorValue(RE::ACTOR_VALUE_MODIFIER::kDamage, RE::ActorValue::kHealth, -a_damage); }) {
 +				values->RestoreActorValue(RE::ACTOR_VALUE_MODIFIER::kDamage, RE::ActorValue::kHealth, -a_damage);
@@ -3922,7 +3931,7 @@ index 0954b7f..3f47a47 100644
 +		{
 +			static void thunk(RE::Actor* a_this, RE::Actor* a_attacker, float a_damage)
 +			{
-+				if (a_this && proxyIds.contains(a_this->GetFormID()) && !a_this->IsDead()) {
++				if (a_this && ownHealthChange == 0 && proxyIds.contains(a_this->GetFormID()) && !a_this->IsDead()) {
 +					// A stand-in's health is its mob's, 1:1, and changes only when the mob's does. Skyrim's blow takes nothing off the stand-in
 +					// (it used to take what left it standing, and the bar then jumped back a frame later); all of it counts as damage to the
 +					// mob (proxyOverkill, see AbsorbProxyDamage), and the stand-in loses exactly what the mob then loses.
@@ -5207,7 +5216,9 @@ index 0954b7f..3f47a47 100644
 +			if (auto* actor = RE::TESForm::LookupByID<RE::Actor>(it->second.formId); actor && !actor->IsDead()) {
 +				ReleaseHunters(actor);
 +				StopProxyCombat(actor);
-+				proxyPool.push_back(it->second.formId);
++				if (std::ranges::find(proxyPool, it->second.formId) == proxyPool.end()) {
++					proxyPool.push_back(it->second.formId);
++				}
 +			} else {
 +				if (actor) {
 +					ReleaseHunters(actor);
@@ -5269,7 +5280,17 @@ index 0954b7f..3f47a47 100644
 +			parkTimer = 0.25f;
 +			auto spot = a_player->GetPosition();
 +			spot.z += 60.0f * static_cast<float>(proto::kUnitsPerBlock);
++			std::unordered_set<RE::FormID> live;
++			for (const auto& entry : mobProxies) {
++				live.insert(entry.second.formId);
++			}
 +			for (auto it = proxyPool.begin(); it != proxyPool.end();) {
++				// A stand-in whose mob lives can be in the pool by mistake (put there twice, one entry left over once it was reused):
++				// parking it switched it off under its mob, which is the stand-in that vanished and came back a moment later.
++				if (live.contains(*it)) {
++					it = proxyPool.erase(it);
++					continue;
++				}
 +				auto* actor = RE::TESForm::LookupByID<RE::Actor>(*it);
 +				if (!actor || actor->IsDead()) {
 +					if (actor) {
@@ -5703,7 +5724,7 @@ index 0954b7f..3f47a47 100644
  		}
  
  		void KillPlayer(RE::PlayerCharacter* a_player, const proto::McEvent& a_ev)
-@@ -580,7 +2302,7 @@ namespace skycraft
+@@ -580,7 +2323,7 @@ namespace skycraft
  			for (auto& handle : lists->highActorHandles) {
  				auto actorPtr = handle.get();
  				auto* actor = actorPtr.get();
@@ -5712,7 +5733,7 @@ index 0954b7f..3f47a47 100644
  					continue;
  				}
  				const auto hazard = HazardAtActor(actor);
-@@ -698,6 +2420,7 @@ namespace skycraft
+@@ -698,6 +2441,7 @@ namespace skycraft
  			RE::NiPoint3 center;
  			float        radius;  // Minecraft blocks
  			float        delay;   // seconds: after the blast's damage has landed
@@ -5720,7 +5741,7 @@ index 0954b7f..3f47a47 100644
  		};
  		std::vector<PendingExplosion> pendingExplosions;
  
-@@ -786,6 +2509,9 @@ namespace skycraft
+@@ -786,6 +2530,9 @@ namespace skycraft
  					continue;
  				}
  				if (auto* actor = ref->As<RE::Actor>()) {
@@ -5730,7 +5751,7 @@ index 0954b7f..3f47a47 100644
  					if (!actor->IsDead()) {
  						if (auto* process = actor->GetActorRuntimeData().currentProcess) {
  							process->KnockExplosion(actor, a_blast.center, 25.0f * falloff * power);
-@@ -830,6 +2556,183 @@ namespace skycraft
+@@ -830,6 +2577,183 @@ namespace skycraft
  			}
  			logger::info("Minecraft explosion (radius {:.1f}): knocked {} people away, threw {} objects", a_blast.radius, people, objects);
  		}
@@ -5914,7 +5935,7 @@ index 0954b7f..3f47a47 100644
  	}
  
  	namespace Combat
-@@ -838,6 +2741,9 @@ namespace skycraft
+@@ -838,6 +2762,9 @@ namespace skycraft
  		{
  			REL::Relocation<std::uintptr_t> vtbl{ RE::VTABLE_PlayerCharacter[0] };
  			HandleHealthDamageHook::func = vtbl.write_vfunc(0x104, HandleHealthDamageHook::thunk);
@@ -5924,7 +5945,7 @@ index 0954b7f..3f47a47 100644
  			if (auto* events = RE::ScriptEventSourceHolder::GetSingleton()) {
  				events->AddEventSink<RE::TESHitEvent>(HitSink::Get());
  			}
-@@ -854,20 +2760,66 @@ namespace skycraft
+@@ -854,20 +2781,66 @@ namespace skycraft
  				}
  				healthPrimed = false;
  				engaged = false;
@@ -5997,7 +6018,7 @@ index 0954b7f..3f47a47 100644
  			SetEssential(a_player, true);
  			WriteActorTable(a_player);
  			engagedTimer -= a_delta;
-@@ -878,29 +2830,11 @@ namespace skycraft
+@@ -878,29 +2851,11 @@ namespace skycraft
  
  			proto::McEvent ev;
  			while (link.PopEvent(ev)) {
@@ -6030,7 +6051,7 @@ index 0954b7f..3f47a47 100644
  			for (auto it = pendingExplosions.begin(); it != pendingExplosions.end();) {
  				it->delay -= a_delta;
  				if (it->delay <= 0.0f) {
-@@ -924,5 +2858,15 @@ namespace skycraft
+@@ -924,5 +2879,15 @@ namespace skycraft
  		}
  
  		bool PlayerEngaged() { return engaged; }
@@ -6047,10 +6068,10 @@ index 0954b7f..3f47a47 100644
  	}
  }
 diff --git a/skse/src/Dig.h b/skse/src/Dig.h
-index 9b1d191..f12c4b2 100644
+index 9b1d191..f8007c8 100644
 --- a/skse/src/Dig.h
 +++ b/skse/src/Dig.h
-@@ -48,6 +48,21 @@ namespace skycraft::Dig
+@@ -48,6 +48,23 @@ namespace skycraft::Dig
  	// drives the player (null otherwise), and its feet (Havok z). Its body only stands on what's
  	// under its feet: anything else (the ground over a hole it's in) would shove it out.
  	void SetPuppet(const RE::hkpCollidable* a_proxy, float a_feetHavokZ);
@@ -6059,6 +6080,8 @@ index 9b1d191..f12c4b2 100644
 +	void SetSkyrimPlayer(const RE::hkpCollidable* a_proxy, RE::bhkCharacterController* a_controller = nullptr);
 +	// Minecraft's collision has the Skyrim-controlled player resting on a block's top: Havok's support check must agree.
 +	void SetSkyrimPlayerResting(bool a_resting);
++	// The Skyrim-controlled player stands on a block with no movement key held: its block planes then have friction (see the plane hook).
++	void SetSkyrimPlayerStill(bool a_still);
 +	// Physics steps since the last call in which Skyrim put the resting player in the air and the plane hook put it back.
 +	int TakeSkyrimPlayerFlips();
 +	// What the plane hook last did for the Skyrim-controlled player (for the log): hook calls since the last read, planes added, the nearest
@@ -6073,7 +6096,7 @@ index 9b1d191..f12c4b2 100644
  	// a_changed: blocks were dug this frame.
  	void UpdateMeshes(RE::PlayerCharacter* a_player, float a_delta, bool a_changed);
 diff --git a/skse/src/DigPhysics.cpp b/skse/src/DigPhysics.cpp
-index 4ce955a..2e9512a 100644
+index 4ce955a..d93328d 100644
 --- a/skse/src/DigPhysics.cpp
 +++ b/skse/src/DigPhysics.cpp
 @@ -2,6 +2,8 @@
@@ -6085,7 +6108,7 @@ index 4ce955a..2e9512a 100644
  // Skyrim's NPCs in a dug-up world. Every actor moves with a Havok character proxy: it collects
  // contact points with the world (bhkCharacterPointCollector), turns them into surface planes, and
  // solves its movement against those planes. Two hooks:
-@@ -66,6 +68,20 @@ namespace skycraft::Dig
+@@ -66,6 +68,21 @@ namespace skycraft::Dig
  		std::atomic<int> loggedDropped{ 0 };
  		std::atomic<int> loggedPlanes{ 0 };
  		std::atomic<const RE::hkpCollidable*> puppet{ nullptr };
@@ -6093,6 +6116,7 @@ index 4ce955a..2e9512a 100644
 +		// collision), so Havok only gives it the planes it stands on.
 +		std::atomic<const RE::hkpCollidable*> skyPlayer{ nullptr };
 +		std::atomic<bool>                     skyPlayerResting{ false };
++		std::atomic<bool>                     skyPlayerStill{ false };
 +		std::atomic<RE::bhkCharacterController*> skyController{ nullptr };  // the Skyrim-controlled player's controller (hook can't trust its own `this`)
 +		std::atomic<int>                      skyPlayerPlaneCount{ 0 };    // planes added to the player's last support/integrate call
 +		std::atomic<float>                    skyPlayerNearest{ 99.0f };   // the nearest of them (Havok units)
@@ -6106,7 +6130,7 @@ index 4ce955a..2e9512a 100644
  		std::atomic<float>                    puppetFeet{ 0.0f };
  		constexpr float                       kFeetSlack = 0.3f;  // Havok units above the feet still "under" them
  
-@@ -145,68 +161,172 @@ namespace skycraft::Dig
+@@ -145,68 +162,193 @@ namespace skycraft::Dig
  			if ((x1 - x0 + 1) * (y1 - y0 + 1) * (z1 - z0 + 1) > 512) {
  				return;  // something huge (a dragon): not worth it
  			}
@@ -6286,6 +6310,27 @@ index 4ce955a..2e9512a 100644
 +		// and the falling pose. The hook runs inside the step (support check, state update, integrate), so putting the ground state
 +		// back here leaves the player on the ground at the END of the step, before anything reads it. Only from the air state, not
 +		// the jump (state 1): the jump has to run.
++		// Skyrim is starting a jump or the player is moving up: nothing may claim the player is supported then (a flat plane, the supported
++		// surface, the ground state put back inside the step), or the jump is cancelled in the very step it starts, before the
++		// main thread ever sees it. That was why jumping off a block did nothing.
++		template <class C>
++		bool JumpStarting(C* a_controller)
++		{
++			if (!a_controller) {
++				return false;
++			}
++			bool jumping = a_controller->context.currentState == RE::hkpCharacterStateType::kJumping;
++			if constexpr (requires { a_controller->wantState; }) {
++				jumping = jumping || a_controller->wantState == RE::hkpCharacterStateType::kJumping;
++			}
++			if constexpr (requires(RE::hkVector4 v) { a_controller->GetLinearVelocityImpl(v); v.quad.m128_f32[2]; }) {
++				RE::hkVector4 v;
++				a_controller->GetLinearVelocityImpl(v);
++				jumping = jumping || v.quad.m128_f32[2] > 0.5f;
++			}
++			return jumping;
++		}
++
 +		template <class C>
 +		bool HoldGround(C* a_controller)
 +		{
@@ -6324,7 +6369,7 @@ index 4ce955a..2e9512a 100644
  		struct ProcessConstraintsHook
  		{
  			static void thunk(RE::bhkCharProxyController* a_this, RE::hkpCharacterProxy* a_proxy, const RE::hkArray<RE::hkpRootCdPoint>& a_manifold, RE::hkpSimplexSolverInput& a_input)
-@@ -235,18 +355,56 @@ namespace skycraft::Dig
+@@ -235,18 +377,57 @@ namespace skycraft::Dig
  				static thread_local std::vector<Plane> planes;
  				planes.clear();
  				BlockPlanes(box, planes);
@@ -6342,7 +6387,8 @@ index 4ce955a..2e9512a 100644
  					return;
  				}
  				std::ranges::sort(planes, {}, &Plane::d);
-+				if (&phantom->collidable == skyPlayer.load(std::memory_order_relaxed) && skyPlayerResting.load(std::memory_order_relaxed)) {
++				if (&phantom->collidable == skyPlayer.load(std::memory_order_relaxed) && skyPlayerResting.load(std::memory_order_relaxed) &&
++				    !JumpStarting(skyController.load(std::memory_order_relaxed))) {
 +					// Minecraft's collision has the player resting on a block's top, to the millimetre. Where the capsule's lowest
 +					// point sits relative to that (its radius, Havok's keepDistance) is not something the planes above can know:
 +					// if they come out a hair too far, Havok's support check says "nothing under it", the player is in the air as far
@@ -6379,11 +6425,11 @@ index 4ce955a..2e9512a 100644
  				}
 +				// The Skyrim-controlled player's planes carry no friction. Skyrim has that player in the air state on a block, where gravity presses
 +				// it into the plane every step, and the proxy's friction then ate its walking speed (it waded through the blocks like mud).
-+				const bool frictionless = &phantom->collidable == skyPlayer.load(std::memory_order_relaxed);
++				const bool frictionless = &phantom->collidable == skyPlayer.load(std::memory_order_relaxed) && !skyPlayerStill.load(std::memory_order_relaxed);
  				for (int i = 0; i < count; ++i) {
  					const auto& p = planes[i];
  					auto&       c = a_input.constraints[a_input.numConstraints++];
-@@ -259,10 +417,10 @@ namespace skycraft::Dig
+@@ -259,10 +440,10 @@ namespace skycraft::Dig
  					}
  					c.plane = RE::hkVector4(p.n[0], p.n[1], p.n[2], w);
  					c.velocity = RE::hkVector4(v[0], v[1], v[2], 0.0f);
@@ -6398,7 +6444,7 @@ index 4ce955a..2e9512a 100644
  					c.priority = 0;
  				}
  			}
-@@ -302,8 +460,53 @@ namespace skycraft::Dig
+@@ -302,8 +483,58 @@ namespace skycraft::Dig
  		puppet.store(a_proxy, std::memory_order_relaxed);
  	}
  
@@ -6430,6 +6476,11 @@ index 4ce955a..2e9512a 100644
 +	void SetSkyrimPlayerResting(bool a_resting)
 +	{
 +		skyPlayerResting.store(a_resting, std::memory_order_relaxed);
++	}
++
++	void SetSkyrimPlayerStill(bool a_still)
++	{
++		skyPlayerStill.store(a_still, std::memory_order_relaxed);
 +	}
 +
 +	double SkyrimPlayerHalfWidth()
@@ -7232,7 +7283,7 @@ index 741fcca..8ca0083 100644
  
  namespace skycraft::Launcher
 diff --git a/skse/src/NpcBlocks.cpp b/skse/src/NpcBlocks.cpp
-index 5e25a7d..38e53bc 100644
+index 5e25a7d..9138eaf 100644
 --- a/skse/src/NpcBlocks.cpp
 +++ b/skse/src/NpcBlocks.cpp
 @@ -1,4 +1,6 @@
@@ -7491,7 +7542,7 @@ index 5e25a7d..38e53bc 100644
  					}
  					if (std::abs(pushX) < 1e-4 && std::abs(pushZ) < 1e-4) {
  						break;
-@@ -250,5 +389,282 @@ namespace skycraft
+@@ -250,5 +389,283 @@ namespace skycraft
  				detours.clear();
  			}
  		}
@@ -7753,6 +7804,7 @@ index 5e25a7d..38e53bc 100644
 +				if (!leaving) {
 +					bool        known = false;
 +					const float input = MoveInput(known);
++					Dig::SetSkyrimPlayerStill(known && input < 0.05f && !leaving);
 +					if (known && input < 0.05f) {
 +						StopMoving(controller);
 +						static int announcedStop = 0;
@@ -7920,7 +7972,7 @@ index b877ae5..22fc725 100644
  				logger::info("in-frame block drawing: hooked after Main::RenderWorld");
  			}
 diff --git a/skse/src/main.cpp b/skse/src/main.cpp
-index eb548b4..2372464 100644
+index eb548b4..0271a65 100644
 --- a/skse/src/main.cpp
 +++ b/skse/src/main.cpp
 @@ -21,6 +21,9 @@ namespace
@@ -7937,7 +7989,7 @@ index eb548b4..2372464 100644
  	SetupLog();
  	skycraft::CrashLog::Install();
  	logger::info("SkyCraft {} loading (runtime {})", "0.1.2", a_skse->RuntimeVersion().string());
-+	logger::info("patch revision 10 (collision: standing hold, slide stop, no friction; starts in Skyrim mode; stand-ins last as long as their mob, health 1:1)");
++	logger::info("patch revision 11 (collision: standing hold, slide stop, jump off blocks, friction when still; starts in Skyrim mode; stand-ins last as long as their mob, health 1:1)");
  	SKSE::GetMessagingInterface()->RegisterListener(OnMessage);
  	// As early as possible: Minecraft takes about as long to start as Skyrim does to reach its menu.
  	skycraft::Launcher::StartMinecraft();
