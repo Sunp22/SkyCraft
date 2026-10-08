@@ -7283,7 +7283,7 @@ index 741fcca..8ca0083 100644
  
  namespace skycraft::Launcher
 diff --git a/skse/src/NpcBlocks.cpp b/skse/src/NpcBlocks.cpp
-index 5e25a7d..9138eaf 100644
+index 5e25a7d..904af69 100644
 --- a/skse/src/NpcBlocks.cpp
 +++ b/skse/src/NpcBlocks.cpp
 @@ -1,4 +1,6 @@
@@ -7542,7 +7542,7 @@ index 5e25a7d..9138eaf 100644
  					}
  					if (std::abs(pushX) < 1e-4 && std::abs(pushZ) < 1e-4) {
  						break;
-@@ -250,5 +389,283 @@ namespace skycraft
+@@ -250,5 +389,317 @@ namespace skycraft
  				detours.clear();
  			}
  		}
@@ -7597,7 +7597,7 @@ index 5e25a7d..9138eaf 100644
 +			}
 +		}
 +
-+		// Skyrim's jump (fJumpHeightMin, 76 units: 1.09 blocks) clears a one-block-high block by a hair, and Minecraft's
++		// The player's own controller keeps a jump height too (Havok units), set when it was made, so changing fJumpHeightMin later may not\n\t\t// reach it. Raised here as well if this CommonLib can see it and it looks like Havok units (about one block); otherwise left alone.\n\t\ttemplate <class C>\n\t\tvoid BoostControllerJump(C* a_controller, bool a_on)\n\t\t{\n\t\t\tstatic bool  logged = false;\n\t\t\tstatic float original = 0.0f;\n\t\t\tif constexpr (requires { a_controller->jumpHeight = 1.0f; }) {\n\t\t\t\tif (!a_controller) {\n\t\t\t\t\treturn;\n\t\t\t\t}\n\t\t\t\tconst float now = a_controller->jumpHeight;\n\t\t\t\tconst float want = float(1.25 * proto::kUnitsPerBlock / 69.99125);\n\t\t\t\tif (!logged) {\n\t\t\t\t\tlogged = true;\n\t\t\t\t\tlogger::info(\"Skyrim control: jump height in the player's controller is {:.3f} (want {:.3f} for 1.25 blocks)\", now, want);\n\t\t\t\t}\n\t\t\t\tif (a_on) {\n\t\t\t\t\tif (now > 0.5f && now < 3.0f && now < want - 0.001f) {\n\t\t\t\t\t\tif (original == 0.0f) {\n\t\t\t\t\t\t\toriginal = now;\n\t\t\t\t\t\t}\n\t\t\t\t\t\ta_controller->jumpHeight = want;\n\t\t\t\t\t}\n\t\t\t\t} else if (original != 0.0f) {\n\t\t\t\t\ta_controller->jumpHeight = original;\n\t\t\t\t\toriginal = 0.0f;\n\t\t\t\t}\n\t\t\t}\n\t\t}\n\n		// Skyrim's jump (fJumpHeightMin, 76 units: 1.09 blocks) clears a one-block-high block by a hair, and Minecraft's
 +		// stops being blocked by the block's side only while the feet are above its top, so jumping onto one almost never
 +		// worked. Minecraft's jump is 1.25 blocks; with Minecraft's blocks around, Skyrim's matches it.
 +		void SetJumpBoost(bool a_on)
@@ -7667,6 +7667,7 @@ index 5e25a7d..9138eaf 100644
 +			const auto*      cell = a_player->GetParentCell();
 +			auto*            controller = a_player->GetCharController();
 +			const bool       skyGround = controller && controller->context.currentState == RE::hkpCharacterStateType::kOnGround;
++			BoostControllerJump(controller, true);
 +
 +			BlockMove::Vec move{ 0, 0, 0 };
 +			if (haveLast && cell == lastCell) {
@@ -7727,9 +7728,42 @@ index 5e25a7d..9138eaf 100644
 +				jumpLatch -= a_delta;
 +			}
 +			const bool leaving = jumpLatch > 0.0f;
-+			const bool resting = !leaving && move.y <= 0.002 && probe > -kProbe + 1e-6;
++			// Skyrim's own step nudges the feet up a few thousandths of a block as it walks (penetration recovery, seams between blocks); at 0.002 that
++			// read as "not resting" and the player went airborne (momentum, no steering) for a frame: the slipperiness. A jump is `leaving`, not this.
++			const bool resting = !leaving && move.y <= 0.03 && probe > -kProbe + 1e-6;
 +
 +			bool standing = (landed && !leaving) || stoodUp || resting;
++
++			// Ledge assist. Skyrim's air control is weak (a standing jump goes straight up), so a jump toward a block rose past its top
++			// but never got over it. Minecraft steps up onto a ledge only when it is on the ground (BlockMove::Collide), and the player is
++			// not. So in the air, with a movement key held and a block face right ahead whose top is within a short step above the feet,
++			// the player is put up onto that top and a little forward, as Minecraft's step-up would on the ground.
++			static float assistWait = 0.0f;
++			assistWait -= a_delta;
++			if (!standing && controller && assistWait <= 0.0f) {
++				bool        known = false;
++				const float input = MoveInput(known);
++				if (known && input > 0.05f) {
++					constexpr double kReach = 0.15, kAirStep = 0.45;
++					const double     heading = a_player->data.angle.z;  // 0 = north, clockwise; Minecraft's x is Skyrim's x, z is -y
++					const BlockMove::Vec want{ std::sin(heading) * kReach, 0.0, -std::cos(heading) * kReach };
++					const BlockMove::Aabb cur{ { end.x - kHalf, end.y, end.z - kHalf }, { end.x + kHalf, end.y + kHeight, end.z + kHalf } };
++					const BlockMove::Vec  flat = BlockMove::Collide(nearby, cur, want, false);
++					if (std::abs(flat.x - want.x) > 1e-6 || std::abs(flat.z - want.z) > 1e-6) {
++						const BlockMove::Vec up = BlockMove::Collide(nearby, cur, want, true, kAirStep);
++						if (up.y > 0.01 && up.HorizSqr() > flat.HorizSqr() + 1e-6) {
++							end = { end.x + up.x, end.y + up.y, end.z + up.z };
++							assistWait = 0.10f;
++							static int announcedAssist = 0;
++							if (announcedAssist < 20) {
++								++announcedAssist;
++								logger::info("Skyrim control: ledge assist put the player up {:.3f} blocks onto a block ahead (state {}, up speed {:.2f}, jumping {})", up.y,
++									int(controller->context.currentState), UpSpeed(controller), leaving);
++							}
++						}
++					}
++				}
++			}
 +			Dig::SetSkyrimPlayerResting(standing);
 +			groundLast = standing || (skyGround && std::abs(got.y - move.y) < 1e-6 && got.y >= -1e-6);
 +
@@ -7989,7 +8023,7 @@ index eb548b4..0271a65 100644
  	SetupLog();
  	skycraft::CrashLog::Install();
  	logger::info("SkyCraft {} loading (runtime {})", "0.1.2", a_skse->RuntimeVersion().string());
-+	logger::info("patch revision 11 (collision: standing hold, slide stop, jump off blocks, friction when still; starts in Skyrim mode; stand-ins last as long as their mob, health 1:1)");
++	logger::info("patch revision 12 (collision: standing hold, slide stop, jump off blocks, ledge assist, steadier standing, friction when still; starts in Skyrim mode; stand-ins last as long as their mob, health 1:1)");
  	SKSE::GetMessagingInterface()->RegisterListener(OnMessage);
  	// As early as possible: Minecraft takes about as long to start as Skyrim does to reach its menu.
  	skycraft::Launcher::StartMinecraft();
