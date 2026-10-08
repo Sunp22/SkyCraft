@@ -272,6 +272,9 @@ jobs:
             grep -aq "back on the ground inside the physics step" skse/build/RelWithDebInfo/SkyCraft.dll \
               && echo "SkyCraft.dll has the in-step ground hold." \
               || { echo "::error::SkyCraft.dll was built without the in-step ground hold."; exit 1; }
+            grep -aq "collision patch revision 9" skse/build/RelWithDebInfo/SkyCraft.dll \
+              && echo "SkyCraft.dll is collision patch revision 9." \
+              || { echo "::error::SkyCraft.dll was built without collision patch revision 9 (is the newest SkyCraft-Patch.patch in the repo?)."; exit 1; }
           fi
 
       - name: Upload the mod
