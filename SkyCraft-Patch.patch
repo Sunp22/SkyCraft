@@ -6612,7 +6612,7 @@ index 9b1d191..f8007c8 100644
  	// a_changed: blocks were dug this frame.
  	void UpdateMeshes(RE::PlayerCharacter* a_player, float a_delta, bool a_changed);
 diff --git a/skse/src/DigPhysics.cpp b/skse/src/DigPhysics.cpp
-index 4ce955a..855fdf6 100644
+index 4ce955a..90524a1 100644
 --- a/skse/src/DigPhysics.cpp
 +++ b/skse/src/DigPhysics.cpp
 @@ -2,6 +2,8 @@
@@ -6646,7 +6646,7 @@ index 4ce955a..855fdf6 100644
  		std::atomic<float>                    puppetFeet{ 0.0f };
  		constexpr float                       kFeetSlack = 0.3f;  // Havok units above the feet still "under" them
  
-@@ -145,68 +162,196 @@ namespace skycraft::Dig
+@@ -145,68 +162,198 @@ namespace skycraft::Dig
  			if ((x1 - x0 + 1) * (y1 - y0 + 1) * (z1 - z0 + 1) > 512) {
  				return;  // something huge (a dragon): not worth it
  			}
@@ -6800,7 +6800,9 @@ index 4ce955a..855fdf6 100644
 +							// exactly on it: a plane at keepDistance (zero gap, no push). A plane with a real gap of 0.05-0.3 blocks, or one the
 +							// capsule has sunk into (a push upward), made Havok's support check say "not supported" or "sliding", and Skyrim
 +							// then moved the player as if in the air: sliding across blocks, never landing.
-+							constexpr double kSnap = 0.10;
++							// 0.16: after a jump the capsule bottom sat 0.15-0.17 above the top in the log, outside the old 0.10, so Havok kept
++							// the real gap, kept pulling the player down (0.01-0.02 a frame, undone by hand every frame) and held it "in the air" for 0.8 s.
++							constexpr double kSnap = 0.16;
 +							const float     d = (gap <= kSnap) ? a_keepDistance : float(gap / k);
 +							bool        duplicate = false;
 +							for (const auto& other : a_out) {
@@ -6888,7 +6890,7 @@ index 4ce955a..855fdf6 100644
  		struct ProcessConstraintsHook
  		{
  			static void thunk(RE::bhkCharProxyController* a_this, RE::hkpCharacterProxy* a_proxy, const RE::hkArray<RE::hkpRootCdPoint>& a_manifold, RE::hkpSimplexSolverInput& a_input)
-@@ -235,18 +380,57 @@ namespace skycraft::Dig
+@@ -235,18 +382,57 @@ namespace skycraft::Dig
  				static thread_local std::vector<Plane> planes;
  				planes.clear();
  				BlockPlanes(box, planes);
@@ -6948,7 +6950,7 @@ index 4ce955a..855fdf6 100644
  				for (int i = 0; i < count; ++i) {
  					const auto& p = planes[i];
  					auto&       c = a_input.constraints[a_input.numConstraints++];
-@@ -259,10 +443,10 @@ namespace skycraft::Dig
+@@ -259,10 +445,10 @@ namespace skycraft::Dig
  					}
  					c.plane = RE::hkVector4(p.n[0], p.n[1], p.n[2], w);
  					c.velocity = RE::hkVector4(v[0], v[1], v[2], 0.0f);
@@ -6963,7 +6965,7 @@ index 4ce955a..855fdf6 100644
  					c.priority = 0;
  				}
  			}
-@@ -302,8 +486,58 @@ namespace skycraft::Dig
+@@ -302,8 +488,58 @@ namespace skycraft::Dig
  		puppet.store(a_proxy, std::memory_order_relaxed);
  	}
  
@@ -7811,7 +7813,7 @@ index 741fcca..8ca0083 100644
  
  namespace skycraft::Launcher
 diff --git a/skse/src/NpcBlocks.cpp b/skse/src/NpcBlocks.cpp
-index 5e25a7d..e23a293 100644
+index 5e25a7d..e0d62e3 100644
 --- a/skse/src/NpcBlocks.cpp
 +++ b/skse/src/NpcBlocks.cpp
 @@ -1,4 +1,6 @@
@@ -8070,7 +8072,7 @@ index 5e25a7d..e23a293 100644
  					}
  					if (std::abs(pushX) < 1e-4 && std::abs(pushZ) < 1e-4) {
  						break;
-@@ -250,5 +389,353 @@ namespace skycraft
+@@ -250,5 +389,366 @@ namespace skycraft
  				detours.clear();
  			}
  		}
@@ -8266,6 +8268,19 @@ index 5e25a7d..e23a293 100644
 +			const BlockMove::Vec out = BlockMove::Depenetrate(nearby, { { end.x - kHalf, end.y, end.z - kHalf }, { end.x + kHalf, end.y + kHeight, end.z + kHalf } });
 +			end = { end.x + out.x, end.y + out.y, end.z + out.z };
 +			const bool stoodUp = out.y > 0.0;
++
++			// Pressed against a wall of blocks on the ground, Skyrim's capsule rode up the real crate beside it (0.03-0.06 blocks a frame
++			// in the log, "standing false" while state 0), so walking along a wall bobbed the player up and down and dropped the standing
++			// hold. A player Skyrim has on the ground is not climbing: an upward move that is not Minecraft's own step-up, made while the
++			// move was held back sideways, is taken back.
++			if (skyGround && !landed && !stoodUp && got.y > 0.002 && (std::abs(got.x - move.x) > 1e-6 || std::abs(got.z - move.z) > 1e-6)) {
++				end.y -= got.y;
++				static int announcedClimb = 0;
++				if (announcedClimb < 5) {
++					++announcedClimb;
++					logger::info("Skyrim control: stopped the player riding up the side of a block ({:.3f} blocks)", got.y);
++				}
++			}
 +
 +			// Resting on a block: a short probe down from where it ends up is stopped at once. Not counted while Skyrim is
 +			// moving it up (a jump): then it is leaving the block, and nothing may hold it.
@@ -8570,7 +8585,7 @@ index b877ae5..22fc725 100644
  				logger::info("in-frame block drawing: hooked after Main::RenderWorld");
  			}
 diff --git a/skse/src/main.cpp b/skse/src/main.cpp
-index eb548b4..6a5e794 100644
+index eb548b4..056f48a 100644
 --- a/skse/src/main.cpp
 +++ b/skse/src/main.cpp
 @@ -21,6 +21,9 @@ namespace
@@ -8587,7 +8602,7 @@ index eb548b4..6a5e794 100644
  	SetupLog();
  	skycraft::CrashLog::Install();
  	logger::info("SkyCraft {} loading (runtime {})", "0.1.2", a_skse->RuntimeVersion().string());
-+	logger::info("patch revision 13 (walking no longer read as jumping, ledge assist only in the air; collision: standing hold, slide stop, jump off blocks, ledge assist, steadier standing, friction when still; starts in Skyrim mode; stand-ins last as long as their mob, health 1:1)");
++	logger::info("patch revision 14 (no riding up block sides, steadier landings; revision 13: walking no longer read as jumping, ledge assist only in the air; collision: standing hold, slide stop, jump off blocks, ledge assist, steadier standing, friction when still; starts in Skyrim mode; stand-ins last as long as their mob, health 1:1)");
  	SKSE::GetMessagingInterface()->RegisterListener(OnMessage);
  	// As early as possible: Minecraft takes about as long to start as Skyrim does to reach its menu.
  	skycraft::Launcher::StartMinecraft();
