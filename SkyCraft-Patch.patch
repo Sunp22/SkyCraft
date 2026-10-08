@@ -7802,7 +7802,7 @@ index 741fcca..8ca0083 100644
  
  namespace skycraft::Launcher
 diff --git a/skse/src/NpcBlocks.cpp b/skse/src/NpcBlocks.cpp
-index 5e25a7d..e0d62e3 100644
+index 5e25a7d..9d34b58 100644
 --- a/skse/src/NpcBlocks.cpp
 +++ b/skse/src/NpcBlocks.cpp
 @@ -1,4 +1,6 @@
@@ -8061,7 +8061,7 @@ index 5e25a7d..e0d62e3 100644
  					}
  					if (std::abs(pushX) < 1e-4 && std::abs(pushZ) < 1e-4) {
  						break;
-@@ -250,5 +389,366 @@ namespace skycraft
+@@ -250,5 +389,374 @@ namespace skycraft
  				detours.clear();
  			}
  		}
@@ -8320,8 +8320,16 @@ index 5e25a7d..e0d62e3 100644
 +					if (std::abs(flat.x - want.x) > 1e-6 || std::abs(flat.z - want.z) > 1e-6) {
 +						const BlockMove::Vec up = BlockMove::Collide(nearby, cur, want, true, kAirStep);
 +						if (up.y > 0.01 && up.HorizSqr() > flat.HorizSqr() + 1e-6) {
-+							end = { end.x + up.x, end.y + up.y, end.z + up.z };
-+							assistWait = 0.10f;
++							// In one frame this was a visible snap (0.2-0.43 blocks in the log). Raised a little each frame instead, straight up;
++							// the forward step is made with the last of the rise, and the assist is asked again on the very next frame.
++							constexpr double kRisePerFrame = 0.12;
++							if (up.y > kRisePerFrame) {
++								end.y += kRisePerFrame;
++								assistWait = 0.0f;
++							} else {
++								end = { end.x + up.x, end.y + up.y, end.z + up.z };
++								assistWait = 0.10f;
++							}
 +							static int announcedAssist = 0;
 +							if (announcedAssist < 20) {
 +								++announcedAssist;
@@ -8574,7 +8582,7 @@ index b877ae5..22fc725 100644
  				logger::info("in-frame block drawing: hooked after Main::RenderWorld");
  			}
 diff --git a/skse/src/main.cpp b/skse/src/main.cpp
-index eb548b4..98a1f0c 100644
+index eb548b4..a17d2b7 100644
 --- a/skse/src/main.cpp
 +++ b/skse/src/main.cpp
 @@ -21,6 +21,9 @@ namespace
@@ -8591,7 +8599,7 @@ index eb548b4..98a1f0c 100644
  	SetupLog();
  	skycraft::CrashLog::Install();
  	logger::info("SkyCraft {} loading (runtime {})", "0.1.2", a_skse->RuntimeVersion().string());
-+	logger::info("patch revision 15 (stand-in health follows the mob by more ways, logs for the stand-in switching off; revision 14: no riding up block sides, steadier landings; revision 13: walking no longer read as jumping, ledge assist only in the air; collision: standing hold, slide stop, jump off blocks, ledge assist, steadier standing, friction when still; starts in Skyrim mode; stand-ins last as long as their mob, health 1:1)");
++	logger::info("patch revision 16 (ledge assist rises over several frames; revision 15: stand-in health follows the mob by more ways, logs for the stand-in switching off; revision 14: no riding up block sides, steadier landings; revision 13: walking no longer read as jumping, ledge assist only in the air; collision: standing hold, slide stop, jump off blocks, ledge assist, steadier standing, friction when still; starts in Skyrim mode; stand-ins last as long as their mob, health 1:1)");
  	SKSE::GetMessagingInterface()->RegisterListener(OnMessage);
  	// As early as possible: Minecraft takes about as long to start as Skyrim does to reach its menu.
  	skycraft::Launcher::StartMinecraft();
