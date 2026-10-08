@@ -272,9 +272,9 @@ jobs:
             grep -aq "back on the ground inside the physics step" skse/build/RelWithDebInfo/SkyCraft.dll \
               && echo "SkyCraft.dll has the in-step ground hold." \
               || { echo "::error::SkyCraft.dll was built without the in-step ground hold."; exit 1; }
-            grep -aq "patch revision 12" skse/build/RelWithDebInfo/SkyCraft.dll \
-              && echo "SkyCraft.dll is patch revision 12." \
-              || { echo "::error::SkyCraft.dll was built without patch revision 12 (is the newest SkyCraft-Patch.patch in the repo?)."; exit 1; }
+            grep -aq "patch revision 13" skse/build/RelWithDebInfo/SkyCraft.dll \
+              && echo "SkyCraft.dll is patch revision 13." \
+              || { echo "::error::SkyCraft.dll was built without patch revision 13 (is the newest SkyCraft-Patch.patch in the repo?)."; exit 1; }
           fi
 
       - name: Check the ledge assist made it into the build
