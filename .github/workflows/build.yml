@@ -266,6 +266,9 @@ jobs:
             grep -aq "held the player on the ground" skse/build/RelWithDebInfo/SkyCraft.dll \
               && echo "SkyCraft.dll has the Skyrim-mode standing fix." \
               || { echo "::error::SkyCraft.dll was built without the Skyrim-mode standing fix."; exit 1; }
+            grep -aq "stopped the player's leftover speed" skse/build/RelWithDebInfo/SkyCraft.dll \
+              && echo "SkyCraft.dll has the Skyrim-mode slide stop." \
+              || { echo "::error::SkyCraft.dll was built without the Skyrim-mode slide stop."; exit 1; }
           fi
 
       - name: Upload the mod
