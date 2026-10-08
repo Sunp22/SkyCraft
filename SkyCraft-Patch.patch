@@ -3428,10 +3428,10 @@ index fce6cf8..77bf3e0 100644
  	{
  		std::int32_t  sx, sy, sz;  // section coords, as in RenSection
 diff --git a/skse/SkyCraft.ini b/skse/SkyCraft.ini
-index 92b585a..5817ce9 100644
+index 92b585a..d588788 100644
 --- a/skse/SkyCraft.ini
 +++ b/skse/SkyCraft.ini
-@@ -14,6 +14,48 @@ sLauncher =
+@@ -14,6 +14,49 @@ sLauncher =
  ; What to pass to your own launcher. For Prism: --launch and the SkyCraft instance's folder name.
  sArguments = --launch SkyCraft
  
@@ -3445,9 +3445,10 @@ index 92b585a..5817ce9 100644
 +; DirectInput scan code (66 or 0x42). Esc, ~, G, H, J, M, O and F9 are already used.
 +sToggleKey = F8
 +
-+; 1: start every session with Skyrim's controls (switch to Minecraft's with the key above). Handy
-+; for playing through Skyrim's scripted opening, then switching over.
-+bStartInSkyrimMode = 0
++; 1 (the default): start every session, and every save you load, with Skyrim's controls (switch to
++; Minecraft's with the key above). Handy for playing through Skyrim's scripted opening, then switching
++; over. 0: start with Minecraft's controls.
++bStartInSkyrimMode = 1
 +
 +; Skyrim's mode: half the width, in blocks, of the box Minecraft's block collision holds your character to.
 +; Minecraft's own player is 0.6 wide (0.3), but Skyrim's body is wider, so at 0.3 your head, shoulders
@@ -6119,7 +6120,7 @@ index 9b1d191..f12c4b2 100644
  	// a_changed: blocks were dug this frame.
  	void UpdateMeshes(RE::PlayerCharacter* a_player, float a_delta, bool a_changed);
 diff --git a/skse/src/DigPhysics.cpp b/skse/src/DigPhysics.cpp
-index 4ce955a..33e7564 100644
+index 4ce955a..2e9512a 100644
 --- a/skse/src/DigPhysics.cpp
 +++ b/skse/src/DigPhysics.cpp
 @@ -2,6 +2,8 @@
@@ -6370,7 +6371,7 @@ index 4ce955a..33e7564 100644
  		struct ProcessConstraintsHook
  		{
  			static void thunk(RE::bhkCharProxyController* a_this, RE::hkpCharacterProxy* a_proxy, const RE::hkArray<RE::hkpRootCdPoint>& a_manifold, RE::hkpSimplexSolverInput& a_input)
-@@ -235,15 +355,50 @@ namespace skycraft::Dig
+@@ -235,18 +355,56 @@ namespace skycraft::Dig
  				static thread_local std::vector<Plane> planes;
  				planes.clear();
  				BlockPlanes(box, planes);
@@ -6423,7 +6424,28 @@ index 4ce955a..33e7564 100644
  				if (loggedPlanes.fetch_add(1) < 3) {
  					logger::info("dig: {} Minecraft block planes for an actor (room {}, nearest {:.2f})", count, room, planes[0].d);
  				}
-@@ -302,8 +457,53 @@ namespace skycraft::Dig
++				// The Skyrim-controlled player's planes carry no friction. Skyrim has that player in the air state on a block, where gravity presses
++				// it into the plane every step, and the proxy's friction then ate its walking speed (it waded through the blocks like mud).
++				const bool frictionless = &phantom->collidable == skyPlayer.load(std::memory_order_relaxed);
+ 				for (int i = 0; i < count; ++i) {
+ 					const auto& p = planes[i];
+ 					auto&       c = a_input.constraints[a_input.numConstraints++];
+@@ -259,10 +417,10 @@ namespace skycraft::Dig
+ 					}
+ 					c.plane = RE::hkVector4(p.n[0], p.n[1], p.n[2], w);
+ 					c.velocity = RE::hkVector4(v[0], v[1], v[2], 0.0f);
+-					c.staticFriction = a_proxy->staticFriction;
+-					c.extraUpStaticFriction = a_proxy->extraUpStaticFriction;
+-					c.extraDownStaticFriction = a_proxy->extraDownStaticFriction;
+-					c.dynamicFriction = a_proxy->dynamicFriction;
++					c.staticFriction = frictionless ? 0.0f : a_proxy->staticFriction;
++					c.extraUpStaticFriction = frictionless ? 0.0f : a_proxy->extraUpStaticFriction;
++					c.extraDownStaticFriction = frictionless ? 0.0f : a_proxy->extraDownStaticFriction;
++					c.dynamicFriction = frictionless ? 0.0f : a_proxy->dynamicFriction;
+ 					c.priority = 0;
+ 				}
+ 			}
+@@ -302,8 +460,53 @@ namespace skycraft::Dig
  		puppet.store(a_proxy, std::memory_order_relaxed);
  	}
  
@@ -6812,7 +6834,7 @@ index 05788b1..4588a30 100644
  
  	namespace WorldRender
 diff --git a/skse/src/Input.cpp b/skse/src/Input.cpp
-index 092862e..e28be18 100644
+index 092862e..6b42d97 100644
 --- a/skse/src/Input.cpp
 +++ b/skse/src/Input.cpp
 @@ -1,5 +1,14 @@
@@ -7179,7 +7201,7 @@ index 092862e..e28be18 100644
 +					resetKey = 0;
 +				}
 +			}
-+			State().skyrimMode = ini.GetBoolValue("Controls", "bStartInSkyrimMode", false);
++			State().skyrimMode = ini.GetBoolValue("Controls", "bStartInSkyrimMode", true);
 +			logger::info("controls switch: {} (scan code {:#x}); starting with {}'s controls", toggleKeyName, toggleKey, State().skyrimMode ? "Skyrim" : "Minecraft");
 +			if (resetKey != 0) {
 +				logger::info("world reset key: {} (scan code {:#x})", resetKeyName, resetKey);
@@ -7912,7 +7934,7 @@ index b877ae5..22fc725 100644
  				logger::info("in-frame block drawing: hooked after Main::RenderWorld");
  			}
 diff --git a/skse/src/main.cpp b/skse/src/main.cpp
-index eb548b4..5858007 100644
+index eb548b4..2dd38b0 100644
 --- a/skse/src/main.cpp
 +++ b/skse/src/main.cpp
 @@ -21,6 +21,9 @@ namespace
@@ -7925,6 +7947,14 @@ index eb548b4..5858007 100644
  		case SKSE::MessagingInterface::kDataLoaded:
  			if (!skycraft::Link::Get().Create()) {
  				logger::error("SkyCraft disabled: could not create shared memory");
+@@ -50,6 +53,7 @@ SKSEPluginLoad(const SKSE::LoadInterface* a_skse)
+ 	SetupLog();
+ 	skycraft::CrashLog::Install();
+ 	logger::info("SkyCraft {} loading (runtime {})", "0.1.2", a_skse->RuntimeVersion().string());
++	logger::info("collision patch revision 9 (standing hold, slide stop on in-step flips, no friction on the player's block planes, starts in Skyrim mode)");
+ 	SKSE::GetMessagingInterface()->RegisterListener(OnMessage);
+ 	// As early as possible: Minecraft takes about as long to start as Skyrim does to reach its menu.
+ 	skycraft::Launcher::StartMinecraft();
 diff --git a/tools/fake_skyrim.py b/tools/fake_skyrim.py
 index 2402746..f352a35 100644
 --- a/tools/fake_skyrim.py
