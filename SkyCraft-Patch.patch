@@ -6093,7 +6093,7 @@ index 0954b7f..01bbed8 100644
  	}
  }
 diff --git a/skse/src/Dig.h b/skse/src/Dig.h
-index 9b1d191..2308348 100644
+index 9b1d191..b5fdd50 100644
 --- a/skse/src/Dig.h
 +++ b/skse/src/Dig.h
 @@ -48,6 +48,19 @@ namespace skycraft::Dig
@@ -6107,7 +6107,7 @@ index 9b1d191..2308348 100644
 +	void SetSkyrimPlayerResting(bool a_resting);
 +	// What the plane hook last did for the Skyrim-controlled player (for the log): hook calls since the last read, planes added, the nearest
 +	// plane's distance, the proxy's keepDistance, the capsule's bottom in blocks.
-+	void SkyrimPlayerSupportDebug(int& a_calls, int& a_planes, float& a_nearest, float& a_keep, float& a_boxZ);
++	void SkyrimPlayerSupportDebug(int& a_calls, int& a_planes, float& a_nearest, float& a_keep, float& a_boxZ, int& a_own, int& a_manifold);
 +	// Half the width, in blocks, of the box Minecraft's block collision holds the Skyrim-controlled player to, and
 +	// that the planes it stands on are worked out from. Minecraft's own player is 0.6 wide (0.3 each side), but
 +	// Skyrim's body (shoulders, arms, a head leaning into a run) is wider than that, so held to 0.3 the model sank
@@ -6117,7 +6117,7 @@ index 9b1d191..2308348 100644
  	// a_changed: blocks were dug this frame.
  	void UpdateMeshes(RE::PlayerCharacter* a_player, float a_delta, bool a_changed);
 diff --git a/skse/src/DigPhysics.cpp b/skse/src/DigPhysics.cpp
-index 4ce955a..416572f 100644
+index 4ce955a..91baedf 100644
 --- a/skse/src/DigPhysics.cpp
 +++ b/skse/src/DigPhysics.cpp
 @@ -2,6 +2,8 @@
@@ -6129,7 +6129,7 @@ index 4ce955a..416572f 100644
  // Skyrim's NPCs in a dug-up world. Every actor moves with a Havok character proxy: it collects
  // contact points with the world (bhkCharacterPointCollector), turns them into surface planes, and
  // solves its movement against those planes. Two hooks:
-@@ -66,6 +68,16 @@ namespace skycraft::Dig
+@@ -66,6 +68,18 @@ namespace skycraft::Dig
  		std::atomic<int> loggedDropped{ 0 };
  		std::atomic<int> loggedPlanes{ 0 };
  		std::atomic<const RE::hkpCollidable*> puppet{ nullptr };
@@ -6142,11 +6142,13 @@ index 4ce955a..416572f 100644
 +		std::atomic<float>                    skyPlayerKeep{ 0.0f };       // the proxy's keepDistance
 +		std::atomic<float>                    skyPlayerBoxZ{ 0.0f };       // capsule bottom, blocks
 +		std::atomic<int>                      skyPlayerCalls{ 0 };         // hook calls for the player since the last read
++		std::atomic<int>                      skyPlayerOwnPlanes{ 0 };     // planes Skyrim's own callback had already put in
++		std::atomic<int>                      skyPlayerManifold{ -1 };     // contacts in the proxy's manifold (-1: unknown)
 +		std::atomic<double>                   skyBodyHalfWidth{ 0.4 };  // Dig::SkyrimPlayerHalfWidth
  		std::atomic<float>                    puppetFeet{ 0.0f };
  		constexpr float                       kFeetSlack = 0.3f;  // Havok units above the feet still "under" them
  
-@@ -145,62 +157,126 @@ namespace skycraft::Dig
+@@ -145,68 +159,142 @@ namespace skycraft::Dig
  			if ((x1 - x0 + 1) * (y1 - y0 + 1) * (z1 - z0 + 1) > 512) {
  				return;  // something huge (a dragon): not worth it
  			}
@@ -6318,7 +6320,23 @@ index 4ce955a..416572f 100644
  						}
  					}
  				}
-@@ -235,15 +311,41 @@ namespace skycraft::Dig
+ 			}
+ 		}
+ 
++		template <class M>
++		int ManifoldSize(const M& a_manifold)
++		{
++			if constexpr (requires { a_manifold.size(); }) {
++				return int(a_manifold.size());
++			} else {
++				return -1;
++			}
++		}
++
+ 		struct ProcessConstraintsHook
+ 		{
+ 			static void thunk(RE::bhkCharProxyController* a_this, RE::hkpCharacterProxy* a_proxy, const RE::hkArray<RE::hkpRootCdPoint>& a_manifold, RE::hkpSimplexSolverInput& a_input)
+@@ -235,15 +323,43 @@ namespace skycraft::Dig
  				static thread_local std::vector<Plane> planes;
  				planes.clear();
  				BlockPlanes(box, planes);
@@ -6358,11 +6376,13 @@ index 4ce955a..416572f 100644
 +					_mm_store_ps(zlo, box.min.quad);
 +					skyPlayerBoxZ.store(zlo[2] * BlocksPerHavok(), std::memory_order_relaxed);
 +					skyPlayerCalls.fetch_add(1, std::memory_order_relaxed);
++					skyPlayerOwnPlanes.store(before, std::memory_order_relaxed);
++					skyPlayerManifold.store(ManifoldSize(a_manifold), std::memory_order_relaxed);
 +				}
  				if (loggedPlanes.fetch_add(1) < 3) {
  					logger::info("dig: {} Minecraft block planes for an actor (room {}, nearest {:.2f})", count, room, planes[0].d);
  				}
-@@ -302,8 +404,45 @@ namespace skycraft::Dig
+@@ -302,8 +418,47 @@ namespace skycraft::Dig
  		puppet.store(a_proxy, std::memory_order_relaxed);
  	}
  
@@ -6374,13 +6394,15 @@ index 4ce955a..416572f 100644
 +		}
 +	}
 +
-+	void SkyrimPlayerSupportDebug(int& a_calls, int& a_planes, float& a_nearest, float& a_keep, float& a_boxZ)
++	void SkyrimPlayerSupportDebug(int& a_calls, int& a_planes, float& a_nearest, float& a_keep, float& a_boxZ, int& a_own, int& a_manifold)
 +	{
 +		a_calls = skyPlayerCalls.exchange(0, std::memory_order_relaxed);
 +		a_planes = skyPlayerPlaneCount.load(std::memory_order_relaxed);
 +		a_nearest = skyPlayerNearest.load(std::memory_order_relaxed);
 +		a_keep = skyPlayerKeep.load(std::memory_order_relaxed);
 +		a_boxZ = skyPlayerBoxZ.load(std::memory_order_relaxed);
++		a_own = skyPlayerOwnPlanes.load(std::memory_order_relaxed);
++		a_manifold = skyPlayerManifold.load(std::memory_order_relaxed);
 +	}
 +
 +	void SetSkyrimPlayerResting(bool a_resting)
@@ -7188,7 +7210,7 @@ index 741fcca..8ca0083 100644
  
  namespace skycraft::Launcher
 diff --git a/skse/src/NpcBlocks.cpp b/skse/src/NpcBlocks.cpp
-index 5e25a7d..66625a2 100644
+index 5e25a7d..6eeb196 100644
 --- a/skse/src/NpcBlocks.cpp
 +++ b/skse/src/NpcBlocks.cpp
 @@ -1,4 +1,6 @@
@@ -7447,7 +7469,7 @@ index 5e25a7d..66625a2 100644
  					}
  					if (std::abs(pushX) < 1e-4 && std::abs(pushZ) < 1e-4) {
  						break;
-@@ -250,5 +389,197 @@ namespace skycraft
+@@ -250,5 +389,246 @@ namespace skycraft
  				detours.clear();
  			}
  		}
@@ -7463,6 +7485,30 @@ index 5e25a7d..66625a2 100644
 +					v.quad.m128_f32[2] = 0.0f;
 +					a_controller->SetLinearVelocityImpl(v);
 +				}
++			}
++		}
++
++		// How hard the player is pushing the movement keys/stick, 0..1 (if this CommonLib can read it). `a_known` is false if it can't.
++		template <class P = RE::PlayerControls>
++		float MoveInput(bool& a_known)
++		{
++			a_known = false;
++			if constexpr (requires(P* p) { p->data.moveInputVec.x; p->data.moveInputVec.y; P::GetSingleton(); }) {
++				if (const auto* controls = P::GetSingleton()) {
++					a_known = true;
++					const float x = controls->data.moveInputVec.x, y = controls->data.moveInputVec.y;
++					return std::sqrt(x * x + y * y);
++				}
++			}
++			return 0.0f;
++		}
++
++		// Takes ALL the speed off a character controller (sideways too).
++		template <class C>
++		void StopMoving(C* a_controller)
++		{
++			if constexpr (requires(C* c) { c->SetLinearVelocityImpl(RE::hkVector4(0.0f, 0.0f, 0.0f, 0.0f)); }) {
++				a_controller->SetLinearVelocityImpl(RE::hkVector4(0.0f, 0.0f, 0.0f, 0.0f));
 +			}
 +		}
 +
@@ -7606,6 +7652,7 @@ index 5e25a7d..66625a2 100644
 +				airTime = (skyGround || !controller) ? 0.0f : airTime + a_delta;
 +			}
 +			if (standing && controller) {
++				const bool heldThisFrame = controller->context.currentState != RE::hkpCharacterStateType::kOnGround;
 +				// It is standing, not falling: no fall to land from, no momentum to carry into the block.
 +				StopFalling(controller);  // (only the vertical speed: zeroing all of it stopped the player walking on a block)
 +				controller->fallStartHeight = float(end.y * proto::kUnitsPerBlock);
@@ -7623,11 +7670,11 @@ index 5e25a7d..66625a2 100644
 +					if (announcedHold < 40 && (announcedHold < 3 || holdLogGap <= 0.0f)) {
 +						++announcedHold;
 +						holdLogGap = 0.5f;
-+						int   calls = 0, planeCount = 0;
++						int   calls = 0, planeCount = 0, ownPlanes = 0, manifold = 0;
 +						float nearest = 0, keep = 0, boxZ = 0;
-+						Dig::SkyrimPlayerSupportDebug(calls, planeCount, nearest, keep, boxZ);
-+						logger::info("Skyrim control: held the player on the ground (Skyrim had it in the air, {:.2f} s) on a block; state was {}, resting {}, feet {:.3f}, capsule bottom {:.3f}; plane hook: {} calls, {} planes, nearest {:.3f}, keepDistance {:.3f}",
-+							airTime, int(controller->context.currentState), resting, end.y, boxZ, calls, planeCount, nearest, keep);
++						Dig::SkyrimPlayerSupportDebug(calls, planeCount, nearest, keep, boxZ, ownPlanes, manifold);
++						logger::info("Skyrim control: held the player on the ground (Skyrim had it in the air, {:.2f} s) on a block; state was {}, resting {}, feet {:.3f}, capsule bottom {:.3f}; plane hook: {} calls, {} planes (Skyrim's own {}, manifold {}), nearest {:.3f}, keepDistance {:.3f}",
++							airTime, int(controller->context.currentState), resting, end.y, boxZ, calls, planeCount, ownPlanes, manifold, nearest, keep);
 +					}
 +					controller->context.currentState = RE::hkpCharacterStateType::kOnGround;
 +					if (airTime >= 0.10f) {
@@ -7640,6 +7687,30 @@ index 5e25a7d..66625a2 100644
 +						}
 +					}
 +				}
++				// Skyrim keeps putting the player back in the air (state 2) every step even though it is resting on a block, and an
++				// airborne player keeps its sideways speed: after a jump onto a block it slid across the top, and on to the next block, with
++				// nothing to stop it. With no movement key held the player stands still, as it would on the ground.
++				static bool wasAirborne = false;
++				const bool  flipped = controller->context.currentState != RE::hkpCharacterStateType::kOnGround || heldThisFrame;
++				if (flipped || wasAirborne) {
++					bool        known = false;
++					const float input = MoveInput(known);
++					if (known && input < 0.05f) {
++						StopMoving(controller);
++						static int announcedStop = 0;
++						if (announcedStop < 5) {
++							++announcedStop;
++							logger::info("Skyrim control: no movement key held on a block; stopped the player's leftover speed (slide)");
++						}
++					} else if (!known) {
++						static bool announcedUnknown = false;
++						if (!announcedUnknown) {
++							announcedUnknown = true;
++							logger::warn("Skyrim control: this build can't read the movement keys; the leftover speed on a block isn't stopped");
++						}
++					}
++				}
++				wasAirborne = flipped;
 +				airTime = 0.0f;
 +			}
 +		}
