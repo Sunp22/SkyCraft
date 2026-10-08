@@ -6093,10 +6093,10 @@ index 0954b7f..01bbed8 100644
  	}
  }
 diff --git a/skse/src/Dig.h b/skse/src/Dig.h
-index 9b1d191..3867c86 100644
+index 9b1d191..2308348 100644
 --- a/skse/src/Dig.h
 +++ b/skse/src/Dig.h
-@@ -48,6 +48,16 @@ namespace skycraft::Dig
+@@ -48,6 +48,19 @@ namespace skycraft::Dig
  	// drives the player (null otherwise), and its feet (Havok z). Its body only stands on what's
  	// under its feet: anything else (the ground over a hole it's in) would shove it out.
  	void SetPuppet(const RE::hkpCollidable* a_proxy, float a_feetHavokZ);
@@ -6105,6 +6105,9 @@ index 9b1d191..3867c86 100644
 +	void SetSkyrimPlayer(const RE::hkpCollidable* a_proxy);
 +	// Minecraft's collision has the Skyrim-controlled player resting on a block's top: Havok's support check must agree.
 +	void SetSkyrimPlayerResting(bool a_resting);
++	// What the plane hook last did for the Skyrim-controlled player (for the log): hook calls since the last read, planes added, the nearest
++	// plane's distance, the proxy's keepDistance, the capsule's bottom in blocks.
++	void SkyrimPlayerSupportDebug(int& a_calls, int& a_planes, float& a_nearest, float& a_keep, float& a_boxZ);
 +	// Half the width, in blocks, of the box Minecraft's block collision holds the Skyrim-controlled player to, and
 +	// that the planes it stands on are worked out from. Minecraft's own player is 0.6 wide (0.3 each side), but
 +	// Skyrim's body (shoulders, arms, a head leaning into a run) is wider than that, so held to 0.3 the model sank
@@ -6114,7 +6117,7 @@ index 9b1d191..3867c86 100644
  	// a_changed: blocks were dug this frame.
  	void UpdateMeshes(RE::PlayerCharacter* a_player, float a_delta, bool a_changed);
 diff --git a/skse/src/DigPhysics.cpp b/skse/src/DigPhysics.cpp
-index 4ce955a..8dcca73 100644
+index 4ce955a..416572f 100644
 --- a/skse/src/DigPhysics.cpp
 +++ b/skse/src/DigPhysics.cpp
 @@ -2,6 +2,8 @@
@@ -6126,7 +6129,7 @@ index 4ce955a..8dcca73 100644
  // Skyrim's NPCs in a dug-up world. Every actor moves with a Havok character proxy: it collects
  // contact points with the world (bhkCharacterPointCollector), turns them into surface planes, and
  // solves its movement against those planes. Two hooks:
-@@ -66,6 +68,11 @@ namespace skycraft::Dig
+@@ -66,6 +68,16 @@ namespace skycraft::Dig
  		std::atomic<int> loggedDropped{ 0 };
  		std::atomic<int> loggedPlanes{ 0 };
  		std::atomic<const RE::hkpCollidable*> puppet{ nullptr };
@@ -6134,11 +6137,16 @@ index 4ce955a..8dcca73 100644
 +		// collision), so Havok only gives it the planes it stands on.
 +		std::atomic<const RE::hkpCollidable*> skyPlayer{ nullptr };
 +		std::atomic<bool>                     skyPlayerResting{ false };
++		std::atomic<int>                      skyPlayerPlaneCount{ 0 };    // planes added to the player's last support/integrate call
++		std::atomic<float>                    skyPlayerNearest{ 99.0f };   // the nearest of them (Havok units)
++		std::atomic<float>                    skyPlayerKeep{ 0.0f };       // the proxy's keepDistance
++		std::atomic<float>                    skyPlayerBoxZ{ 0.0f };       // capsule bottom, blocks
++		std::atomic<int>                      skyPlayerCalls{ 0 };         // hook calls for the player since the last read
 +		std::atomic<double>                   skyBodyHalfWidth{ 0.4 };  // Dig::SkyrimPlayerHalfWidth
  		std::atomic<float>                    puppetFeet{ 0.0f };
  		constexpr float                       kFeetSlack = 0.3f;  // Havok units above the feet still "under" them
  
-@@ -145,62 +152,121 @@ namespace skycraft::Dig
+@@ -145,62 +157,126 @@ namespace skycraft::Dig
  			if ((x1 - x0 + 1) * (y1 - y0 + 1) * (z1 - z0 + 1) > 512) {
  				return;  // something huge (a dragon): not worth it
  			}
@@ -6252,7 +6260,7 @@ index 4ce955a..8dcca73 100644
 +		// block. In the strip between, Minecraft says "standing" and Skyrim says "falling", and Skyrim moves a falling
 +		// player slowly: that was the crawl near the edges of blocks. So for the Skyrim-controlled player, each block top
 +		// under any part of Minecraft's box becomes a flat plane, whatever the capsule's centre is over.
-+		void SupportPlanes(const RE::hkAabb& a_box, std::vector<Plane>& a_out)
++		void SupportPlanes(const RE::hkAabb& a_box, float a_keepDistance, std::vector<Plane>& a_out)
 +		{
 +			const double     kHalf = Dig::SkyrimPlayerHalfWidth();  // the box NpcBlocks::HoldPlayerUp holds the player to
 +			constexpr double kBelow = 0.02;    // blocks: feet this far into a top still count as on it
@@ -6288,7 +6296,12 @@ index 4ce955a..8dcca73 100644
 +							if (gap < -kBelow || gap > kAbove || NpcBlocks::FaceCovered(ab, 1, 1)) {
 +								continue;
 +							}
-+							const float d = float(gap / k);
++							// Minecraft's collision already keeps the player out of the block, so anywhere within kSnap of a top counts as resting
++							// exactly on it: a plane at keepDistance (zero gap, no push). A plane with a real gap of 0.05-0.3 blocks, or one the
++							// capsule has sunk into (a push upward), made Havok's support check say "not supported" or "sliding", and Skyrim
++							// then moved the player as if in the air: sliding across blocks, never landing.
++							constexpr double kSnap = 0.10;
++							const float     d = (gap <= kSnap) ? a_keepDistance : float(gap / k);
 +							bool        duplicate = false;
 +							for (const auto& other : a_out) {
 +								if (std::fabs(other.d - d) < 1e-3f && other.n[2] > 0.9999f) {
@@ -6305,7 +6318,7 @@ index 4ce955a..8dcca73 100644
  						}
  					}
  				}
-@@ -235,14 +301,31 @@ namespace skycraft::Dig
+@@ -235,15 +311,41 @@ namespace skycraft::Dig
  				static thread_local std::vector<Plane> planes;
  				planes.clear();
  				BlockPlanes(box, planes);
@@ -6316,7 +6329,7 @@ index 4ce955a..8dcca73 100644
 +					// really is standing on them: on the ground, able to jump, no falling pose.
  					std::erase_if(planes, [](const Plane& a_plane) { return a_plane.n[2] < 0.7f; });
 +					if (&phantom->collidable == skyPlayer.load(std::memory_order_relaxed)) {
-+						SupportPlanes(box, planes);  // Minecraft's box, not just the capsule, decides what it stands on
++						SupportPlanes(box, a_proxy->keepDistance, planes);  // Minecraft's box, not just the capsule, decides what it stands on
 +					}
  				}
  				if (planes.empty()) {
@@ -6337,9 +6350,19 @@ index 4ce955a..8dcca73 100644
 +					}
 +				}
  				const int count = std::min<int>(room, static_cast<int>(planes.size()));
++				if (&phantom->collidable == skyPlayer.load(std::memory_order_relaxed)) {
++					skyPlayerPlaneCount.store(count, std::memory_order_relaxed);
++					skyPlayerNearest.store(planes[0].d, std::memory_order_relaxed);
++					skyPlayerKeep.store(a_proxy->keepDistance, std::memory_order_relaxed);
++					alignas(16) float zlo[4];
++					_mm_store_ps(zlo, box.min.quad);
++					skyPlayerBoxZ.store(zlo[2] * BlocksPerHavok(), std::memory_order_relaxed);
++					skyPlayerCalls.fetch_add(1, std::memory_order_relaxed);
++				}
  				if (loggedPlanes.fetch_add(1) < 3) {
  					logger::info("dig: {} Minecraft block planes for an actor (room {}, nearest {:.2f})", count, room, planes[0].d);
-@@ -302,8 +385,36 @@ namespace skycraft::Dig
+ 				}
+@@ -302,8 +404,45 @@ namespace skycraft::Dig
  		puppet.store(a_proxy, std::memory_order_relaxed);
  	}
  
@@ -6349,6 +6372,15 @@ index 4ce955a..8dcca73 100644
 +		if (!a_proxy) {
 +			skyPlayerResting.store(false, std::memory_order_relaxed);
 +		}
++	}
++
++	void SkyrimPlayerSupportDebug(int& a_calls, int& a_planes, float& a_nearest, float& a_keep, float& a_boxZ)
++	{
++		a_calls = skyPlayerCalls.exchange(0, std::memory_order_relaxed);
++		a_planes = skyPlayerPlaneCount.load(std::memory_order_relaxed);
++		a_nearest = skyPlayerNearest.load(std::memory_order_relaxed);
++		a_keep = skyPlayerKeep.load(std::memory_order_relaxed);
++		a_boxZ = skyPlayerBoxZ.load(std::memory_order_relaxed);
 +	}
 +
 +	void SetSkyrimPlayerResting(bool a_resting)
@@ -7156,7 +7188,7 @@ index 741fcca..8ca0083 100644
  
  namespace skycraft::Launcher
 diff --git a/skse/src/NpcBlocks.cpp b/skse/src/NpcBlocks.cpp
-index 5e25a7d..afd5ebc 100644
+index 5e25a7d..66625a2 100644
 --- a/skse/src/NpcBlocks.cpp
 +++ b/skse/src/NpcBlocks.cpp
 @@ -1,4 +1,6 @@
@@ -7415,7 +7447,7 @@ index 5e25a7d..afd5ebc 100644
  					}
  					if (std::abs(pushX) < 1e-4 && std::abs(pushZ) < 1e-4) {
  						break;
-@@ -250,5 +389,190 @@ namespace skycraft
+@@ -250,5 +389,197 @@ namespace skycraft
  				detours.clear();
  			}
  		}
@@ -7585,12 +7617,19 @@ index 5e25a7d..afd5ebc 100644
 +					// the jump pose, so the ground state is put back at once, every frame it is needed, not after a wait: waiting
 +					// left the player in the air for most frames, and each forced landing replayed the landing animation (arms out).
 +					// The landing animation is only played for a real fall or jump (in the air for a while), not for a flicker.
-+					controller->context.currentState = RE::hkpCharacterStateType::kOnGround;
-+					static int announcedHold = 0;
-+					if (announcedHold < 5) {
++					static int   announcedHold = 0;
++					static float holdLogGap = 0.0f;
++					holdLogGap -= a_delta;
++					if (announcedHold < 40 && (announcedHold < 3 || holdLogGap <= 0.0f)) {
 +						++announcedHold;
-+						logger::info("Skyrim control: held the player on the ground (Skyrim had it in the air, {:.2f} s) on a block", airTime);
++						holdLogGap = 0.5f;
++						int   calls = 0, planeCount = 0;
++						float nearest = 0, keep = 0, boxZ = 0;
++						Dig::SkyrimPlayerSupportDebug(calls, planeCount, nearest, keep, boxZ);
++						logger::info("Skyrim control: held the player on the ground (Skyrim had it in the air, {:.2f} s) on a block; state was {}, resting {}, feet {:.3f}, capsule bottom {:.3f}; plane hook: {} calls, {} planes, nearest {:.3f}, keepDistance {:.3f}",
++							airTime, int(controller->context.currentState), resting, end.y, boxZ, calls, planeCount, nearest, keep);
 +					}
++					controller->context.currentState = RE::hkpCharacterStateType::kOnGround;
 +					if (airTime >= 0.10f) {
 +						a_player->NotifyAnimationGraph("JumpLand");
 +						a_player->NotifyAnimationGraph("JumpLandEnd");
