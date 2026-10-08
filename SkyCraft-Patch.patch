@@ -7542,7 +7542,7 @@ index 5e25a7d..904af69 100644
  					}
  					if (std::abs(pushX) < 1e-4 && std::abs(pushZ) < 1e-4) {
  						break;
-@@ -250,5 +389,317 @@ namespace skycraft
+@@ -250,5 +389,348 @@ namespace skycraft
  				detours.clear();
  			}
  		}
@@ -7597,7 +7597,38 @@ index 5e25a7d..904af69 100644
 +			}
 +		}
 +
-+		// The player's own controller keeps a jump height too (Havok units), set when it was made, so changing fJumpHeightMin later may not\n\t\t// reach it. Raised here as well if this CommonLib can see it and it looks like Havok units (about one block); otherwise left alone.\n\t\ttemplate <class C>\n\t\tvoid BoostControllerJump(C* a_controller, bool a_on)\n\t\t{\n\t\t\tstatic bool  logged = false;\n\t\t\tstatic float original = 0.0f;\n\t\t\tif constexpr (requires { a_controller->jumpHeight = 1.0f; }) {\n\t\t\t\tif (!a_controller) {\n\t\t\t\t\treturn;\n\t\t\t\t}\n\t\t\t\tconst float now = a_controller->jumpHeight;\n\t\t\t\tconst float want = float(1.25 * proto::kUnitsPerBlock / 69.99125);\n\t\t\t\tif (!logged) {\n\t\t\t\t\tlogged = true;\n\t\t\t\t\tlogger::info(\"Skyrim control: jump height in the player's controller is {:.3f} (want {:.3f} for 1.25 blocks)\", now, want);\n\t\t\t\t}\n\t\t\t\tif (a_on) {\n\t\t\t\t\tif (now > 0.5f && now < 3.0f && now < want - 0.001f) {\n\t\t\t\t\t\tif (original == 0.0f) {\n\t\t\t\t\t\t\toriginal = now;\n\t\t\t\t\t\t}\n\t\t\t\t\t\ta_controller->jumpHeight = want;\n\t\t\t\t\t}\n\t\t\t\t} else if (original != 0.0f) {\n\t\t\t\t\ta_controller->jumpHeight = original;\n\t\t\t\t\toriginal = 0.0f;\n\t\t\t\t}\n\t\t\t}\n\t\t}\n\n		// Skyrim's jump (fJumpHeightMin, 76 units: 1.09 blocks) clears a one-block-high block by a hair, and Minecraft's
++		// The player's own controller keeps a jump height too (Havok units), set when it was made, so changing fJumpHeightMin later may not
++		// reach it. Raised here as well if this CommonLib can see it and it looks like Havok units (about one block); otherwise left alone.
++		template <class C>
++		void BoostControllerJump(C* a_controller, bool a_on)
++		{
++			static bool  logged = false;
++			static float original = 0.0f;
++			if constexpr (requires { a_controller->jumpHeight = 1.0f; }) {
++				if (!a_controller) {
++					return;
++				}
++				const float now = a_controller->jumpHeight;
++				const float want = float(1.25 * proto::kUnitsPerBlock / 69.99125);
++				if (!logged) {
++					logged = true;
++					logger::info(\"Skyrim control: jump height in the player's controller is {:.3f} (want {:.3f} for 1.25 blocks)\", now, want);
++				}
++				if (a_on) {
++					if (now > 0.5f && now < 3.0f && now < want - 0.001f) {
++						if (original == 0.0f) {
++							original = now;
++						}
++						a_controller->jumpHeight = want;
++					}
++				} else if (original != 0.0f) {
++					a_controller->jumpHeight = original;
++					original = 0.0f;
++				}
++			}
++		}
++
++		// Skyrim's jump (fJumpHeightMin, 76 units: 1.09 blocks) clears a one-block-high block by a hair, and Minecraft's
 +		// stops being blocked by the block's side only while the feet are above its top, so jumping onto one almost never
 +		// worked. Minecraft's jump is 1.25 blocks; with Minecraft's blocks around, Skyrim's matches it.
 +		void SetJumpBoost(bool a_on)
