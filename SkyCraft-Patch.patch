@@ -7232,7 +7232,7 @@ index 741fcca..8ca0083 100644
  
  namespace skycraft::Launcher
 diff --git a/skse/src/NpcBlocks.cpp b/skse/src/NpcBlocks.cpp
-index 5e25a7d..af62152 100644
+index 5e25a7d..38e53bc 100644
 --- a/skse/src/NpcBlocks.cpp
 +++ b/skse/src/NpcBlocks.cpp
 @@ -1,4 +1,6 @@
@@ -7491,7 +7491,7 @@ index 5e25a7d..af62152 100644
  					}
  					if (std::abs(pushX) < 1e-4 && std::abs(pushZ) < 1e-4) {
  						break;
-@@ -250,5 +389,249 @@ namespace skycraft
+@@ -250,5 +389,282 @@ namespace skycraft
  				detours.clear();
  			}
  		}
@@ -7508,6 +7508,18 @@ index 5e25a7d..af62152 100644
 +					a_controller->SetLinearVelocityImpl(v);
 +				}
 +			}
++		}
++
++		// How fast the character controller is moving up, in Havok metres per second (0 if this CommonLib can't read it).
++		template <class C, class V = RE::hkVector4>
++		float UpSpeed(C* a_controller)
++		{
++			if constexpr (requires(V v) { a_controller->GetLinearVelocityImpl(v); v.quad.m128_f32[2]; }) {
++				V v;
++				a_controller->GetLinearVelocityImpl(v);
++				return v.quad.m128_f32[2];
++			}
++			return 0.0f;
 +		}
 +
 +		// How hard the player is pushing the movement keys/stick, 0..1 (if this CommonLib can read it). `a_known` is false if it can't.
@@ -7652,9 +7664,21 @@ index 5e25a7d..af62152 100644
 +			// player flickered between standing and falling. Anything within 0.1 above a top counts as standing on it.
 +			constexpr double      kProbe = 0.10;
 +			const double          probe = BlockMove::ClipAxis(nearby, endBox, 1, -kProbe);
-+			const bool            resting = move.y <= 0.002 && probe > -kProbe + 1e-6;
++			// A jump off a block: Skyrim has the player in the jump state, or moving up. Holding it "on the ground" then (forcing the
++			// ground state back, killing the climb, the support plane) cancelled the jump, so jumping while on a block did nothing.
++			// Latched for a moment so one frame that reads as flat does not hand it back.
++			static float jumpLatch = 0.0f;
++			const bool   jumpState = controller && controller->context.currentState == RE::hkpCharacterStateType::kJumping;
++			const bool   rising = controller && UpSpeed(controller) > 0.5f;
++			if (jumpState || rising) {
++				jumpLatch = 0.20f;
++			} else if (jumpLatch > 0.0f) {
++				jumpLatch -= a_delta;
++			}
++			const bool leaving = jumpLatch > 0.0f;
++			const bool resting = !leaving && move.y <= 0.002 && probe > -kProbe + 1e-6;
 +
-+			bool standing = landed || stoodUp || resting;
++			bool standing = (landed && !leaving) || stoodUp || resting;
 +			Dig::SetSkyrimPlayerResting(standing);
 +			groundLast = standing || (skyGround && std::abs(got.y - move.y) < 1e-6 && got.y >= -1e-6);
 +
@@ -7673,6 +7697,13 @@ index 5e25a7d..af62152 100644
 +			if (!standing) {
 +				airTime = (skyGround || !controller) ? 0.0f : airTime + a_delta;
 +			}
++			if (leaving && DiagnosticsEnabled()) {
++				static int loggedJump = 0;
++				if (loggedJump < 20 && (jumpState || rising)) {
++					++loggedJump;
++					logger::info("Skyrim control: jump off a block left alone (state {}, up speed {:.2f}, move.y {:.3f}, resting probe {:.3f})", int(controller->context.currentState), UpSpeed(controller), move.y, probe);
++				}
++			}
 +			if (standing && controller) {
 +				// Skyrim's step moved the player as if airborne (momentum, slow air control) if the state was in the air when this frame
 +				// began, or if the plane hook had to put it back during the step (then it is on the ground by now, but moved like it was in the air).
@@ -7683,7 +7714,7 @@ index 5e25a7d..af62152 100644
 +				controller->fallStartHeight = float(end.y * proto::kUnitsPerBlock);
 +				controller->fallTime = 0.0f;
 +				controller->flags.set(RE::CHARACTER_FLAGS::kSupport);
-+				if (controller->context.currentState != RE::hkpCharacterStateType::kOnGround) {
++				if (!leaving && controller->context.currentState != RE::hkpCharacterStateType::kOnGround) {
 +					// Minecraft has it standing on a block but Skyrim's own physics still says it is in the air (its support check
 +					// does not always agree with Minecraft's, e.g. at a block's edge). Skyrim moves an airborne player slowly and in
 +					// the jump pose, so the ground state is put back at once, every frame it is needed, not after a wait: waiting
@@ -7717,7 +7748,9 @@ index 5e25a7d..af62152 100644
 +				// nothing to stop it. With no movement key held the player stands still, as it would on the ground.
 +				static bool wasAirborne = false;
 +				const bool  flipped = controller->context.currentState != RE::hkpCharacterStateType::kOnGround || heldThisFrame;
-+				if (flipped || wasAirborne) {
++				// Every frame it stands on a block with no key held (not only after a flip): the planes carry no friction, so nothing
++				// else brings it to rest, and it slid. Never during a jump.
++				if (!leaving) {
 +					bool        known = false;
 +					const float input = MoveInput(known);
 +					if (known && input < 0.05f) {
