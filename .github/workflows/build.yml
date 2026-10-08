@@ -272,9 +272,18 @@ jobs:
             grep -aq "back on the ground inside the physics step" skse/build/RelWithDebInfo/SkyCraft.dll \
               && echo "SkyCraft.dll has the in-step ground hold." \
               || { echo "::error::SkyCraft.dll was built without the in-step ground hold."; exit 1; }
-            grep -aq "collision patch revision 9" skse/build/RelWithDebInfo/SkyCraft.dll \
-              && echo "SkyCraft.dll is collision patch revision 9." \
-              || { echo "::error::SkyCraft.dll was built without collision patch revision 9 (is the newest SkyCraft-Patch.patch in the repo?)."; exit 1; }
+            grep -aq "patch revision 10" skse/build/RelWithDebInfo/SkyCraft.dll \
+              && echo "SkyCraft.dll is patch revision 10." \
+              || { echo "::error::SkyCraft.dll was built without patch revision 10 (is the newest SkyCraft-Patch.patch in the repo?)."; exit 1; }
+          fi
+
+      - name: Check the stand-in persistence made it into the build
+        shell: bash
+        run: |
+          if [ -f SkyCraft-Patch.patch ] || grep -q "switched off while its mob lives" skse/src/Combat.cpp; then
+            grep -aq "had been switched off while its mob lives" skse/build/RelWithDebInfo/SkyCraft.dll \
+              && echo "SkyCraft.dll has the stand-in persistence." \
+              || { echo "::error::SkyCraft.dll was built without the stand-in persistence."; exit 1; }
           fi
 
       - name: Upload the mod
