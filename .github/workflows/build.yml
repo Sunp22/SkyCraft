@@ -272,9 +272,18 @@ jobs:
             grep -aq "back on the ground inside the physics step" skse/build/RelWithDebInfo/SkyCraft.dll \
               && echo "SkyCraft.dll has the in-step ground hold." \
               || { echo "::error::SkyCraft.dll was built without the in-step ground hold."; exit 1; }
-            grep -aq "patch revision 11" skse/build/RelWithDebInfo/SkyCraft.dll \
-              && echo "SkyCraft.dll is patch revision 11." \
-              || { echo "::error::SkyCraft.dll was built without patch revision 11 (is the newest SkyCraft-Patch.patch in the repo?)."; exit 1; }
+            grep -aq "patch revision 12" skse/build/RelWithDebInfo/SkyCraft.dll \
+              && echo "SkyCraft.dll is patch revision 12." \
+              || { echo "::error::SkyCraft.dll was built without patch revision 12 (is the newest SkyCraft-Patch.patch in the repo?)."; exit 1; }
+          fi
+
+      - name: Check the ledge assist made it into the build
+        shell: bash
+        run: |
+          if [ -f SkyCraft-Patch.patch ] || grep -q BoostControllerJump skse/src/NpcBlocks.cpp; then
+            grep -aq "ledge assist put the player up" skse/build/RelWithDebInfo/SkyCraft.dll \
+              && echo "SkyCraft.dll has the Skyrim-mode ledge assist." \
+              || { echo "::error::SkyCraft.dll was built without the Skyrim-mode ledge assist."; exit 1; }
           fi
 
       - name: Check the stand-in persistence made it into the build
