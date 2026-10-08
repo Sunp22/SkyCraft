@@ -3429,10 +3429,10 @@ index fce6cf81179d3d30b01e8fafab387669f96ba660..77bf3e0640f3ea26935c09c0d6310c59
  	{
  		std::int32_t  sx, sy, sz;  // section coords, as in RenSection
 diff --git a/skse/SkyCraft.ini b/skse/SkyCraft.ini
-index 92b585a20c10a51962502169ed3d54422b2140f3..81872efce03ff9cbf230b17d34167da5a1b28eda 100644
+index 92b585a20c10a51962502169ed3d54422b2140f3..f4b3020d96c030a090c6d41cca97cf42c7f00fcc 100644
 --- a/skse/SkyCraft.ini
 +++ b/skse/SkyCraft.ini
-@@ -14,7 +14,63 @@ sLauncher =
+@@ -14,7 +14,69 @@ sLauncher =
  ; What to pass to your own launcher. For Prism: --launch and the SkyCraft instance's folder name.
  sArguments = --launch SkyCraft
  
@@ -3491,17 +3491,23 @@ index 92b585a20c10a51962502169ed3d54422b2140f3..81872efce03ff9cbf230b17d34167da5
 +bBlockCrates = 1
 +
 +; The base form of the crate: hex, as the console shows it (click a crate, read its base ID). Each is scaled to one block
-+; (its widest side), its top set on the block's top. SkyCraft.log says what size it measured.
++; (its narrower side, plus fOverlap), its top set on the block's top. SkyCraft.log says what size it measured.
 +sBaseForm = 0x0007A617
 +
-+; How many blocks around you (1-6) get crates.
-+iRange = 3
++; How many blocks around you (1-8) get crates.
++iRange = 5
++
++; How much wider than a block each crate is (0.05 = 5%), so neighbours overlap and there is no seam to catch your feet on.
++fOverlap = 0.05
++
++; Blocks to set the crates' tops below the top of their block (negative: above), to tune how the ground feels.
++fSink = 0.0
 diff --git a/skse/src/BlockCrates.cpp b/skse/src/BlockCrates.cpp
 new file mode 100644
-index 0000000000000000000000000000000000000000..a490ef4291e7311805aa874e7eb9014df025c91a
+index 0000000000000000000000000000000000000000..331a84c4562049d678e7b7d4f413f50a64a1eb49
 --- /dev/null
 +++ b/skse/src/BlockCrates.cpp
-@@ -0,0 +1,407 @@
+@@ -0,0 +1,421 @@
 +#include "Game.h"
 +
 +#include <SimpleIni.h>
@@ -3529,7 +3535,9 @@ index 0000000000000000000000000000000000000000..a490ef4291e7311805aa874e7eb9014d
 +		{
 +			bool        on{ true };
 +			RE::FormID  base{ 0x0007A617 };
-+			int         range{ 3 };
++			int         range{ 5 };
++			float       overlap{ 0.05f };  // how much wider than a block (a fraction) so neighbouring crates overlap and leave no seam
++			float       sink{ 0.0f };      // blocks to set the crates' tops below the block's top
 +		};
 +
 +		const CrateCfg& CratesCfg()
@@ -3541,7 +3549,9 @@ index 0000000000000000000000000000000000000000..a490ef4291e7311805aa874e7eb9014d
 +				CrateCfg s;
 +				s.on = ini.GetBoolValue("Crates", "bBlockCrates", true);
 +				s.base = static_cast<RE::FormID>(std::strtoul(ini.GetValue("Crates", "sBaseForm", "0x0007A617"), nullptr, 0));
-+				s.range = static_cast<int>(std::clamp<long>(ini.GetLongValue("Crates", "iRange", 3), 1, 6));
++				s.range = static_cast<int>(std::clamp<long>(ini.GetLongValue("Crates", "iRange", 5), 1, 8));
++				s.overlap = static_cast<float>(std::clamp(ini.GetDoubleValue("Crates", "fOverlap", 0.05), 0.0, 0.3));
++				s.sink = static_cast<float>(std::clamp(ini.GetDoubleValue("Crates", "fSink", 0.0), -0.2, 0.2));
 +				return s;
 +			}();
 +			return settings;
@@ -3551,6 +3561,7 @@ index 0000000000000000000000000000000000000000..a490ef4291e7311805aa874e7eb9014d
 +		{
 +			RE::FormID    id{ 0 };
 +			std::uint64_t key{ 0 };
++			int           x{ 0 }, y{ 0 }, z{ 0 };  // the block it stands on
 +			bool          used{ false };    // standing on a block now (else it waits to be recycled)
 +			bool          hidden{ false };  // its geometry has been hidden
 +		};
@@ -3558,9 +3569,10 @@ index 0000000000000000000000000000000000000000..a490ef4291e7311805aa874e7eb9014d
 +		std::vector<Crate> crates;
 +		bool               failed = false;  // no usable base form: nothing is tried again
 +		float              sincePass = 1.0f;
++		float              emptyFor = 0.0f;  // seconds with no block around (a section being sent again looks like that for a moment)
 +
-+		constexpr std::size_t kMaxCrates = 160;
-+		constexpr int         kMaxMadePerPass = 8;
++		constexpr std::size_t kMaxCrates = 450;
++		constexpr int         kMaxMadePerPass = 20;
 +		const char*           kStaleFile = "Data/SKSE/Plugins/SkyCraft-crates.txt";
 +
 +		std::uint64_t BlockKey(int a_x, int a_y, int a_z)
@@ -3776,8 +3788,8 @@ index 0000000000000000000000000000000000000000..a490ef4291e7311805aa874e7eb9014d
 +				PutAwayStale(cfg.base);
 +				float w = 0, d = 0, h = 0;
 +				if (BoundsOf(base, w, d, h, centreX, centreY, top)) {
-+					// One uniform scale (a reference can't be scaled any other way): its footprint fits one block, and its top is set at the block's top.
-+					scale = static_cast<float>(proto::kUnitsPerBlock) / std::max(w, d);
++					// One uniform scale (a reference can't be scaled any other way): its narrower side is a block plus a little, so neighbours overlap and leave no seam; its top is set at the block's top.
++					scale = static_cast<float>(proto::kUnitsPerBlock) * (1.0f + cfg.overlap) / std::min(w, d);
 +					logger::info("Block crates: '{}' ({:08X}, form type {}) is {:.1f} x {:.1f} x {:.1f} units; scaled by {:.3f} it is {:.2f} x {:.2f} x {:.2f} blocks",
 +						base->GetName(), base->GetFormID(), int(base->GetFormType()), w, d, h, scale, w * scale / proto::kUnitsPerBlock, d * scale / proto::kUnitsPerBlock,
 +						h * scale / proto::kUnitsPerBlock);
@@ -3826,11 +3838,23 @@ index 0000000000000000000000000000000000000000..a490ef4291e7311805aa874e7eb9014d
 +				wanted.resize(kMaxCrates);
 +			}
 +
-+			// Crates that left the cell the player is in (a door, fast travel) can't be moved to it: they are put away and made again.
++			// No block around at all: a section being sent again looks like that for a moment, and every crate must not go with it.
++			if (wanted.empty()) {
++				emptyFor += 0.1f;
++				if (emptyFor < 1.0f) {
++					return;
++				}
++			} else {
++				emptyFor = 0.0f;
++			}
++
++			// Crates that left the cell the player is in (a door, fast travel) can't be moved to it, and crates whose block has gone (dug,
++			// or no longer a whole cube) would be a wall nobody can see: both are put away. Crates for blocks that are still there but
++			// out of range stay where they are (they are still real ground) until one is needed for a nearer block.
 +			bool changed = false;
 +			for (auto& crate : crates) {
 +				auto* ref = RE::TESForm::LookupByID<RE::TESObjectREFR>(crate.id);
-+				if (!ref || ref->GetParentCell() != a_player->GetParentCell()) {
++				if (!ref || ref->GetParentCell() != a_player->GetParentCell() || !FullCube(crate.x, crate.y, crate.z)) {
 +					DeleteRef(ref);
 +					crate.id = 0;
 +					changed = true;
@@ -3844,7 +3868,8 @@ index 0000000000000000000000000000000000000000..a490ef4291e7311805aa874e7eb9014d
 +			}
 +			std::unordered_set<std::uint64_t> have;
 +			for (auto& crate : crates) {
-+				crate.used = crate.used && wantedKeys.contains(crate.key);
++				// (A crate out of range keeps its block's key and coordinates: it stays, and is still checked above, until a nearer block needs it.)
++				crate.used = wantedKeys.contains(crate.key);
 +				if (crate.used) {
 +					have.insert(crate.key);
 +				}
@@ -3856,16 +3881,14 @@ index 0000000000000000000000000000000000000000..a490ef4291e7311805aa874e7eb9014d
 +				if (have.contains(w.key)) {
 +					continue;
 +				}
-+				// A crate no block needs any more, or a new one.
++				// A crate no nearby block needs, or a new one.
 +				while (slot < crates.size() && crates[slot].used) {
 +					++slot;
 +				}
-+				Crate* crate = nullptr;
++				Crate*             crate = nullptr;
 +				RE::TESObjectREFR* ref = nullptr;
-+				if (slot < crates.size()) {
-+					crate = &crates[slot];
-+					ref = RE::TESForm::LookupByID<RE::TESObjectREFR>(crate->id);
-+				} else if (made < kMaxMadePerPass && crates.size() < kMaxCrates) {
++				if (made < kMaxMadePerPass && crates.size() < kMaxCrates) {
++					// New ones first while there is room: a crate left standing on a block out of range is still ground, so it is not taken.
 +					ref = SpawnRef(a_player, base);
 +					if (!ref) {
 +						failed = true;
@@ -3875,30 +3898,27 @@ index 0000000000000000000000000000000000000000..a490ef4291e7311805aa874e7eb9014d
 +					++made;
 +					SetRefScale(ref, scale);
 +					BlockActivation(ref);
-+					crates.push_back({ ref->GetFormID(), 0, false, false });
++					crates.push_back({ ref->GetFormID() });
 +					crate = &crates.back();
++				} else if (slot < crates.size()) {
++					crate = &crates[slot];
++					ref = RE::TESForm::LookupByID<RE::TESObjectREFR>(crate->id);
 +				}
 +				if (!crate || !ref) {
 +					continue;
 +				}
-+				RE::NiPoint3 pos = McToSky(double(w.x) + 0.5, double(w.y) + 1.0, double(w.z) + 0.5);
++				RE::NiPoint3 pos = McToSky(double(w.x) + 0.5, double(w.y) + 1.0 - double(cfg.sink), double(w.z) + 0.5);
 +				pos.x -= centreX * scale;
 +				pos.y -= centreY * scale;
 +				pos.z -= top * scale;
 +				PlaceRef(ref, pos);
 +				crate->key = w.key;
++				crate->x = w.x;
++				crate->y = w.y;
++				crate->z = w.z;
 +				crate->used = true;
 +				changed = true;
 +			}
-+			// What no block needs now is put away: a crate left standing where a block was dug would be a wall nobody can see.
-+			for (auto& crate : crates) {
-+				if (!crate.used) {
-+					DeleteRef(RE::TESForm::LookupByID<RE::TESObjectREFR>(crate.id));
-+					crate.id = 0;
-+					changed = true;
-+				}
-+			}
-+			std::erase_if(crates, [](const Crate& a_crate) { return a_crate.id == 0; });
 +			if (changed) {
 +				WriteStaleFile();
 +				static int logged = 0;
