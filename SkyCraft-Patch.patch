@@ -4099,7 +4099,7 @@ index 0000000..0cbdd07
 +	}
 +}
 diff --git a/skse/src/Combat.cpp b/skse/src/Combat.cpp
-index 0954b7f..ba9ee43 100644
+index 0954b7f..2e5f4ad 100644
 --- a/skse/src/Combat.cpp
 +++ b/skse/src/Combat.cpp
 @@ -1,5 +1,7 @@
@@ -4134,7 +4134,62 @@ index 0954b7f..ba9ee43 100644
  		// ---- what hit the player (main thread) -------------------------------------------------
  		struct RecentHit
  		{
-@@ -49,6 +68,27 @@ namespace skycraft
+@@ -37,6 +56,54 @@ namespace skycraft
+ 		bool  engaged = false;
+ 		float engagedTimer = 0.0f;
+ 
++		// Diagnostics: the engine's own events (3D loaded or unloaded, cell attach or detach, combat, death) for a mob's stand-in, written to
++		// the log in order with everything else, so what happens just before a stand-in is found switched off shows. Logs only; changes nothing.
++		template <class E>
++		class StandInEventLog final : public RE::BSTEventSink<E>
++		{
++		public:
++			static StandInEventLog* Get(const char* a_name)
++			{
++				static StandInEventLog sink;
++				sink.name = a_name;
++				return &sink;
++			}
++
++			RE::BSEventNotifyControl ProcessEvent(const E* a_event, RE::BSTEventSource<E>*) override
++			{
++				if (!a_event) {
++					return RE::BSEventNotifyControl::kContinue;
++				}
++				RE::FormID id = 0;
++				if constexpr (requires { a_event->formID; }) {
++					id = static_cast<RE::FormID>(a_event->formID);
++				} else if constexpr (requires { a_event->reference.get(); }) {
++					id = a_event->reference.get() ? a_event->reference.get()->GetFormID() : 0;
++				} else if constexpr (requires { a_event->actor.get(); }) {
++					id = a_event->actor.get() ? a_event->actor.get()->GetFormID() : 0;
++				} else if constexpr (requires { a_event->actorDying.get(); }) {
++					id = a_event->actorDying.get() ? a_event->actorDying.get()->GetFormID() : 0;
++				}
++				int detail = -1;
++				if constexpr (requires { static_cast<int>(a_event->loaded); }) {
++					detail = static_cast<int>(a_event->loaded);
++				} else if constexpr (requires { static_cast<int>(a_event->action); }) {
++					detail = static_cast<int>(a_event->action);
++				} else if constexpr (requires { static_cast<int>(a_event->newState); }) {
++					detail = static_cast<int>(a_event->newState);
++				} else if constexpr (requires { static_cast<int>(a_event->dead); }) {
++					detail = static_cast<int>(a_event->dead);
++				}
++				static int logged = 0;
++				if (id != 0 && proxyIds.contains(id) && logged++ < 300) {
++					logger::info("Engine event on stand-in ({:08X}): {} ({})", id, name, detail);
++				}
++				return RE::BSEventNotifyControl::kContinue;
++			}
++
++			const char* name{ "" };
++		};
++
+ 		class HitSink final : public RE::BSTEventSink<RE::TESHitEvent>
+ 		{
+ 		public:
+@@ -49,6 +116,27 @@ namespace skycraft
  			RE::BSEventNotifyControl ProcessEvent(const RE::TESHitEvent* a_event, RE::BSTEventSource<RE::TESHitEvent>*) override
  			{
  				auto* player = RE::PlayerCharacter::GetSingleton();
@@ -4162,7 +4217,7 @@ index 0954b7f..ba9ee43 100644
  				if (!a_event || !player || a_event->target.get() != player || !State().puppeting) {
  					return RE::BSEventNotifyControl::kContinue;
  				}
-@@ -168,6 +208,53 @@ namespace skycraft
+@@ -168,6 +256,53 @@ namespace skycraft
  			}
  		}
  
@@ -4216,7 +4271,7 @@ index 0954b7f..ba9ee43 100644
  		void WriteActorTable(RE::PlayerCharacter* a_player)
  		{
  			static std::vector<proto::ActorRecord> records;
-@@ -181,7 +268,7 @@ namespace skycraft
+@@ -181,7 +316,7 @@ namespace skycraft
  			for (auto& handle : lists->highActorHandles) {
  				auto actorPtr = handle.get();
  				auto* actor = actorPtr.get();
@@ -4225,7 +4280,7 @@ index 0954b7f..ba9ee43 100644
  					continue;
  				}
  				const auto pos = actor->GetPosition();
-@@ -191,7 +278,26 @@ namespace skycraft
+@@ -191,7 +326,26 @@ namespace skycraft
  				proto::ActorRecord r{};
  				r.formId = actor->GetFormID();
  				r.flags = (actor->IsHostileToActor(a_player) ? proto::kActorHostile : 0u) | (actor->IsDead() ? proto::kActorDead : 0u) |
@@ -4253,7 +4308,7 @@ index 0954b7f..ba9ee43 100644
  				const auto mc = SkyToMc(pos);
  				r.x = static_cast<float>(mc.x);
  				r.y = static_cast<float>(mc.y);
-@@ -240,161 +346,1884 @@ namespace skycraft
+@@ -240,161 +394,1884 @@ namespace skycraft
  				logger::warn("hit pipeline: melee call site doesn't match this game build; using plain damage");
  				return;
  			}
@@ -6262,7 +6317,7 @@ index 0954b7f..ba9ee43 100644
  		}
  
  		void KillPlayer(RE::PlayerCharacter* a_player, const proto::McEvent& a_ev)
-@@ -580,7 +2409,7 @@ namespace skycraft
+@@ -580,7 +2457,7 @@ namespace skycraft
  			for (auto& handle : lists->highActorHandles) {
  				auto actorPtr = handle.get();
  				auto* actor = actorPtr.get();
@@ -6271,7 +6326,7 @@ index 0954b7f..ba9ee43 100644
  					continue;
  				}
  				const auto hazard = HazardAtActor(actor);
-@@ -698,6 +2527,7 @@ namespace skycraft
+@@ -698,6 +2575,7 @@ namespace skycraft
  			RE::NiPoint3 center;
  			float        radius;  // Minecraft blocks
  			float        delay;   // seconds: after the blast's damage has landed
@@ -6279,7 +6334,7 @@ index 0954b7f..ba9ee43 100644
  		};
  		std::vector<PendingExplosion> pendingExplosions;
  
-@@ -786,6 +2616,9 @@ namespace skycraft
+@@ -786,6 +2664,9 @@ namespace skycraft
  					continue;
  				}
  				if (auto* actor = ref->As<RE::Actor>()) {
@@ -6289,7 +6344,7 @@ index 0954b7f..ba9ee43 100644
  					if (!actor->IsDead()) {
  						if (auto* process = actor->GetActorRuntimeData().currentProcess) {
  							process->KnockExplosion(actor, a_blast.center, 25.0f * falloff * power);
-@@ -830,6 +2663,183 @@ namespace skycraft
+@@ -830,6 +2711,183 @@ namespace skycraft
  			}
  			logger::info("Minecraft explosion (radius {:.1f}): knocked {} people away, threw {} objects", a_blast.radius, people, objects);
  		}
@@ -6473,7 +6528,7 @@ index 0954b7f..ba9ee43 100644
  	}
  
  	namespace Combat
-@@ -838,6 +2848,9 @@ namespace skycraft
+@@ -838,8 +2896,15 @@ namespace skycraft
  		{
  			REL::Relocation<std::uintptr_t> vtbl{ RE::VTABLE_PlayerCharacter[0] };
  			HandleHealthDamageHook::func = vtbl.write_vfunc(0x104, HandleHealthDamageHook::thunk);
@@ -6482,8 +6537,14 @@ index 0954b7f..ba9ee43 100644
 +			logger::info("Stand-in damage guard installed: Skyrim's hits can no longer knock a mob's stand-in down");
  			if (auto* events = RE::ScriptEventSourceHolder::GetSingleton()) {
  				events->AddEventSink<RE::TESHitEvent>(HitSink::Get());
++				events->AddEventSink<RE::TESObjectLoadedEvent>(StandInEventLog<RE::TESObjectLoadedEvent>::Get("3D loaded (1) / unloaded (0)"));
++				events->AddEventSink<RE::TESCellAttachDetachEvent>(StandInEventLog<RE::TESCellAttachDetachEvent>::Get("cell attach / detach"));
++				events->AddEventSink<RE::TESCombatEvent>(StandInEventLog<RE::TESCombatEvent>::Get("combat state"));
++				events->AddEventSink<RE::TESDeathEvent>(StandInEventLog<RE::TESDeathEvent>::Get("death"));
  			}
-@@ -854,20 +2867,66 @@ namespace skycraft
+ 			ResolveHitPipeline();
+ 			logger::info("combat hooks installed");
+@@ -854,20 +2919,66 @@ namespace skycraft
  				}
  				healthPrimed = false;
  				engaged = false;
@@ -6556,7 +6617,7 @@ index 0954b7f..ba9ee43 100644
  			SetEssential(a_player, true);
  			WriteActorTable(a_player);
  			engagedTimer -= a_delta;
-@@ -878,29 +2937,11 @@ namespace skycraft
+@@ -878,29 +2989,11 @@ namespace skycraft
  
  			proto::McEvent ev;
  			while (link.PopEvent(ev)) {
@@ -6589,7 +6650,7 @@ index 0954b7f..ba9ee43 100644
  			for (auto it = pendingExplosions.begin(); it != pendingExplosions.end();) {
  				it->delay -= a_delta;
  				if (it->delay <= 0.0f) {
-@@ -924,5 +2965,15 @@ namespace skycraft
+@@ -924,5 +3017,15 @@ namespace skycraft
  		}
  
  		bool PlayerEngaged() { return engaged; }
