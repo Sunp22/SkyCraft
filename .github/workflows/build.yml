@@ -272,9 +272,9 @@ jobs:
             grep -aq "back on the ground inside the physics step" skse/build/RelWithDebInfo/SkyCraft.dll \
               && echo "SkyCraft.dll has the in-step ground hold." \
               || { echo "::error::SkyCraft.dll was built without the in-step ground hold."; exit 1; }
-            grep -aq "patch revision 16" skse/build/RelWithDebInfo/SkyCraft.dll \
-              && echo "SkyCraft.dll is patch revision 16." \
-              || { echo "::error::SkyCraft.dll was built without patch revision 16 (is the newest SkyCraft-Patch.patch in the repo?)."; exit 1; }
+            grep -aq "patch revision 17" skse/build/RelWithDebInfo/SkyCraft.dll \
+              && echo "SkyCraft.dll is patch revision 17." \
+              || { echo "::error::SkyCraft.dll was built without patch revision 17 (is the newest SkyCraft-Patch.patch in the repo?)."; exit 1; }
           fi
 
       - name: Check the ledge assist made it into the build
@@ -293,6 +293,15 @@ jobs:
             grep -aq "had been switched off while its mob lives" skse/build/RelWithDebInfo/SkyCraft.dll \
               && echo "SkyCraft.dll has the stand-in persistence." \
               || { echo "::error::SkyCraft.dll was built without the stand-in persistence."; exit 1; }
+          fi
+
+      - name: Check the crate edge-contact filter made it into the build
+        shell: bash
+        run: |
+          if [ -f SkyCraft-Patch.patch ] || grep -q DropCrateContact skse/src/DigPhysics.cpp; then
+            grep -aq "crate side and edge contacts ignored" skse/build/RelWithDebInfo/SkyCraft.dll \
+              && echo "SkyCraft.dll has the crate edge-contact filter." \
+              || { echo "::error::SkyCraft.dll was built without the crate edge-contact filter."; exit 1; }
           fi
 
       - name: Upload the mod
