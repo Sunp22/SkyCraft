@@ -144,6 +144,7 @@ jobs:
       - name: Check the controls switch and world reset made it into the build
         shell: bash
         run: |
+          grep -aq "jumping by hand" skse/build/RelWithDebInfo/SkyCraft.dll || { echo "::error::SkyCraft.dll was built without the jump fallback."; exit 1; }
           if [ -f SkyCraft-Patch.patch ] || grep -q sToggleKey skse/src/Input.cpp; then
             grep -aq sToggleKey skse/build/RelWithDebInfo/SkyCraft.dll \
               && echo "SkyCraft.dll has the controls switch." \
@@ -272,9 +273,9 @@ jobs:
             grep -aq "back on the ground inside the physics step" skse/build/RelWithDebInfo/SkyCraft.dll \
               && echo "SkyCraft.dll has the in-step ground hold." \
               || { echo "::error::SkyCraft.dll was built without the in-step ground hold."; exit 1; }
-            grep -aq "patch revision 17" skse/build/RelWithDebInfo/SkyCraft.dll \
-              && echo "SkyCraft.dll is patch revision 17." \
-              || { echo "::error::SkyCraft.dll was built without patch revision 17 (is the newest SkyCraft-Patch.patch in the repo?)."; exit 1; }
+            grep -aq "patch revision 18" skse/build/RelWithDebInfo/SkyCraft.dll \
+              && echo "SkyCraft.dll is patch revision 18." \
+              || { echo "::error::SkyCraft.dll was built without patch revision 18 (is the newest SkyCraft-Patch.patch in the repo?)."; exit 1; }
           fi
 
       - name: Check the ledge assist made it into the build
