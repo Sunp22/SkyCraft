@@ -3504,10 +3504,10 @@ index 92b585a..f4b3020 100644
 +fSink = 0.0
 diff --git a/skse/src/BlockCrates.cpp b/skse/src/BlockCrates.cpp
 new file mode 100644
-index 0000000..331a84c
+index 0000000..2b5b996
 --- /dev/null
 +++ b/skse/src/BlockCrates.cpp
-@@ -0,0 +1,421 @@
+@@ -0,0 +1,426 @@
 +#include "Game.h"
 +
 +#include <SimpleIni.h>
@@ -3751,6 +3751,11 @@ index 0000000..331a84c
 +
 +	namespace BlockCrates
 +	{
++		RE::FormID BaseForm()
++		{
++			return CratesCfg().base;
++		}
++
 +		void Release()
 +		{
 +			if (crates.empty()) {
@@ -6601,7 +6606,7 @@ index 9b1d191..f8007c8 100644
  	// a_changed: blocks were dug this frame.
  	void UpdateMeshes(RE::PlayerCharacter* a_player, float a_delta, bool a_changed);
 diff --git a/skse/src/DigPhysics.cpp b/skse/src/DigPhysics.cpp
-index 4ce955a..90524a1 100644
+index 4ce955a..9382a10 100644
 --- a/skse/src/DigPhysics.cpp
 +++ b/skse/src/DigPhysics.cpp
 @@ -2,6 +2,8 @@
@@ -6613,7 +6618,22 @@ index 4ce955a..90524a1 100644
  // Skyrim's NPCs in a dug-up world. Every actor moves with a Havok character proxy: it collects
  // contact points with the world (bhkCharacterPointCollector), turns them into surface planes, and
  // solves its movement against those planes. Two hooks:
-@@ -66,6 +68,21 @@ namespace skycraft::Dig
+@@ -15,6 +17,14 @@
+ // may add up to userPlanes planes. Skyrim's own surface planes (0x140BA04D0): the contact normal,
+ // distance minus keepDistance (+0xA8), the proxy's frictions, and a push out of penetration at
+ // penetrationRecoverySpeed (+0xDC).
++namespace skycraft
++{
++	namespace BlockCrates
++	{
++		RE::FormID BaseForm();  // BlockCrates.cpp
++	}
++}
++
+ namespace skycraft::Dig
+ {
+ 	namespace
+@@ -66,6 +76,21 @@ namespace skycraft::Dig
  		std::atomic<int> loggedDropped{ 0 };
  		std::atomic<int> loggedPlanes{ 0 };
  		std::atomic<const RE::hkpCollidable*> puppet{ nullptr };
@@ -6635,7 +6655,82 @@ index 4ce955a..90524a1 100644
  		std::atomic<float>                    puppetFeet{ 0.0f };
  		constexpr float                       kFeetSlack = 0.3f;  // Havok units above the feet still "under" them
  
-@@ -145,68 +162,198 @@ namespace skycraft::Dig
+@@ -83,6 +108,55 @@ namespace skycraft::Dig
+ 			return p[2] > puppetFeet.load(std::memory_order_relaxed) + kFeetSlack;
+ 		}
+ 
++		// The Skyrim-controlled player is held against Minecraft's blocks by NpcBlocks::HoldPlayerUp (a box wider than the capsule), so
++		// the real crates under the blocks only have to be flat ground. Their sides, and the rim of their tops (tilted normals; the
++		// strip beyond a block's open edge where Minecraft still has the player standing), pushed the capsule about, read as sliding or
++		// "not supported" (no jump at an edge), and bumped at every corner. Those contacts are dropped; SupportPlanes covers the strip.
++		bool DropCrateContact(const RE::hkpCdPoint& a_point)
++		{
++			const auto* sp = skyPlayer.load(std::memory_order_relaxed);
++			if (!sp) {
++				return false;
++			}
++			const auto* rootA = Root(a_point.cdBodyA);
++			const auto* rootB = Root(a_point.cdBodyB);
++			if (rootA != sp && rootB != sp) {
++				return false;
++			}
++			const RE::hkpCollidable* world = rootA == sp ? rootB : rootA;
++			auto*                    ref = world ? RE::TESHavokUtilities::FindCollidableRef(*world) : nullptr;
++			auto*                    base = ref ? ref->GetBaseObject() : nullptr;
++			if (!base || base->GetFormID() != BlockCrates::BaseForm()) {
++				return false;
++			}
++			alignas(16) float p[4], n[4];
++			_mm_store_ps(p, a_point.contact.position.quad);
++			_mm_store_ps(n, a_point.contact.separatingNormal.quad);
++			const float sign = world == rootB ? 1.0f : -1.0f;
++			bool        drop = n[2] * sign < 0.95f;  // a side, or the rounded rim of a top
++			if (!drop) {
++				const float k = BlocksPerHavok();
++				const float mx = p[0] * k, my = p[2] * k, mz = -p[1] * k;
++				const int   bx = int(std::floor(mx)), by = int(std::floor(my - 0.05f)), bz = int(std::floor(mz));
++				constexpr float kEdge = 0.12f;
++				if (!NpcBlocks::SolidAt(bx, by, bz)) {
++					drop = true;  // over the crate's overhang
++				} else {
++					const float fx = mx - float(bx), fz = mz - float(bz);
++					// Near an edge that has no solid block beside it at this height: the top does not go on there.
++					drop = (fx < kEdge && !NpcBlocks::SolidAt(bx - 1, by, bz)) || (fx > 1.0f - kEdge && !NpcBlocks::SolidAt(bx + 1, by, bz)) ||
++					       (fz < kEdge && !NpcBlocks::SolidAt(bx, by, bz - 1)) || (fz > 1.0f - kEdge && !NpcBlocks::SolidAt(bx, by, bz + 1));
++				}
++			}
++			if (drop) {
++				static std::atomic<int> logged{ 0 };
++				if (logged.fetch_add(1) == 0) {
++					logger::info("Skyrim control: crate side and edge contacts ignored for the player (blocks hold it, not the crates' rims)");
++				}
++			}
++			return drop;
++		}
++
+ 		struct AddCdPointHook
+ 		{
+ 			static void thunk(RE::bhkCharacterPointCollector* a_this, const RE::hkpCdPoint& a_point)
+@@ -94,7 +168,7 @@ namespace skycraft::Dig
+ 					}
+ 					return;
+ 				}
+-				if (AboveThePuppetsFeet(a_point)) {
++				if (AboveThePuppetsFeet(a_point) || DropCrateContact(a_point)) {
+ 					return;
+ 				}
+ 				func(a_this, a_point);
+@@ -113,6 +187,9 @@ namespace skycraft::Dig
+ 				if (Any() && OnDugGround(a_point)) {
+ 					return;
+ 				}
++				if (DropCrateContact(a_point)) {
++					return;
++				}
+ 				func(a_this, a_point);
+ 			}
+ 			static inline REL::Relocation<decltype(thunk)> func;
+@@ -145,68 +222,198 @@ namespace skycraft::Dig
  			if ((x1 - x0 + 1) * (y1 - y0 + 1) * (z1 - z0 + 1) > 512) {
  				return;  // something huge (a dragon): not worth it
  			}
@@ -6879,7 +6974,7 @@ index 4ce955a..90524a1 100644
  		struct ProcessConstraintsHook
  		{
  			static void thunk(RE::bhkCharProxyController* a_this, RE::hkpCharacterProxy* a_proxy, const RE::hkArray<RE::hkpRootCdPoint>& a_manifold, RE::hkpSimplexSolverInput& a_input)
-@@ -235,18 +382,57 @@ namespace skycraft::Dig
+@@ -235,18 +442,57 @@ namespace skycraft::Dig
  				static thread_local std::vector<Plane> planes;
  				planes.clear();
  				BlockPlanes(box, planes);
@@ -6939,7 +7034,7 @@ index 4ce955a..90524a1 100644
  				for (int i = 0; i < count; ++i) {
  					const auto& p = planes[i];
  					auto&       c = a_input.constraints[a_input.numConstraints++];
-@@ -259,10 +445,10 @@ namespace skycraft::Dig
+@@ -259,10 +505,10 @@ namespace skycraft::Dig
  					}
  					c.plane = RE::hkVector4(p.n[0], p.n[1], p.n[2], w);
  					c.velocity = RE::hkVector4(v[0], v[1], v[2], 0.0f);
@@ -6954,7 +7049,7 @@ index 4ce955a..90524a1 100644
  					c.priority = 0;
  				}
  			}
-@@ -302,8 +488,58 @@ namespace skycraft::Dig
+@@ -302,8 +548,58 @@ namespace skycraft::Dig
  		puppet.store(a_proxy, std::memory_order_relaxed);
  	}
  
@@ -8582,7 +8677,7 @@ index b877ae5..22fc725 100644
  				logger::info("in-frame block drawing: hooked after Main::RenderWorld");
  			}
 diff --git a/skse/src/main.cpp b/skse/src/main.cpp
-index eb548b4..a17d2b7 100644
+index eb548b4..eb4f7bf 100644
 --- a/skse/src/main.cpp
 +++ b/skse/src/main.cpp
 @@ -21,6 +21,9 @@ namespace
@@ -8599,7 +8694,7 @@ index eb548b4..a17d2b7 100644
  	SetupLog();
  	skycraft::CrashLog::Install();
  	logger::info("SkyCraft {} loading (runtime {})", "0.1.2", a_skse->RuntimeVersion().string());
-+	logger::info("patch revision 16 (ledge assist rises over several frames; revision 15: stand-in health follows the mob by more ways, logs for the stand-in switching off; revision 14: no riding up block sides, steadier landings; revision 13: walking no longer read as jumping, ledge assist only in the air; collision: standing hold, slide stop, jump off blocks, ledge assist, steadier standing, friction when still; starts in Skyrim mode; stand-ins last as long as their mob, health 1:1)");
++	logger::info("patch revision 17 (crate sides and rim contacts no longer reach the player: edges, seams and corners; revision 16: ledge assist rises over several frames; revision 15: stand-in health follows the mob by more ways, logs for the stand-in switching off; revision 14: no riding up block sides, steadier landings; revision 13: walking no longer read as jumping, ledge assist only in the air; collision: standing hold, slide stop, jump off blocks, ledge assist, steadier standing, friction when still; starts in Skyrim mode; stand-ins last as long as their mob, health 1:1)");
  	SKSE::GetMessagingInterface()->RegisterListener(OnMessage);
  	// As early as possible: Minecraft takes about as long to start as Skyrim does to reach its menu.
  	skycraft::Launcher::StartMinecraft();
