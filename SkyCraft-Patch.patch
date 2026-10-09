@@ -4099,7 +4099,7 @@ index 0000000..0cbdd07
 +	}
 +}
 diff --git a/skse/src/Combat.cpp b/skse/src/Combat.cpp
-index 0954b7f..f564d09 100644
+index 0954b7f..abeae4e 100644
 --- a/skse/src/Combat.cpp
 +++ b/skse/src/Combat.cpp
 @@ -1,5 +1,7 @@
@@ -4253,7 +4253,7 @@ index 0954b7f..f564d09 100644
  				const auto mc = SkyToMc(pos);
  				r.x = static_cast<float>(mc.x);
  				r.y = static_cast<float>(mc.y);
-@@ -240,161 +346,1856 @@ namespace skycraft
+@@ -240,161 +346,1887 @@ namespace skycraft
  				logger::warn("hit pipeline: melee call site doesn't match this game build; using plain damage");
  				return;
  			}
@@ -4916,6 +4916,7 @@ index 0954b7f..f564d09 100644
 +			float         mcHealth{ 0.0f };       // the mob's health and max health (kEvMobVitals); mcMax 0: not told yet
 +			float         mcMax{ 0.0f };
 +			int           hideFrames{ 0 };        // frames the stand-in has been hidden every frame (its body can load in after the actor exists)
++			bool          recovering{ false };    // switched back on while its mob lives (something switched it off): it reloads at the mob, not up in the air, so lock-on is only lost for the moment its 3D loads
 +			float         warm{ 0.0f };           // seconds left of its warm-up: a new (or switched-on) actor is kept parked high above the player, hidden, while whatever it plays when it first loads plays out unseen
 +			float         velY{ 0.0f };           // the mob's vertical speed in Skyrim units per second, worked out from its reported positions
 +		};
@@ -6133,13 +6134,36 @@ index 0954b7f..f564d09 100644
 +								std::ranges::any_of(deadProxies, [&](const DeadProxy& d) { return d.formId == proxy.formId; }));
 +						}
 +					}
++					{
++						// What the stand-in looked like when it was found off: the clue to what switched it off.
++						static int loggedWhy = 0;
++						if (loggedWhy++ < 40) {
++							int life = -1;
++							if constexpr (requires { actor->AsActorState()->actorState1.lifeState; }) {
++								life = static_cast<int>(actor->AsActorState()->actorState1.lifeState);
++							} else if constexpr (requires { actor->AsActorState()->actorState2.lifeState; }) {
++								life = static_cast<int>(actor->AsActorState()->actorState2.lifeState);
++							}
++							logger::info("Stand-in ({:08X}) found off: health {:.1f} (last {:.1f}, mob's {:.1f}/{:.1f}), life state {}, in combat {}, warm {:.1f}, hit by the player {} s ago",
++								proxy.formId, actor->AsActorValueOwner()->GetActorValue(RE::ActorValue::kHealth), proxy.lastHealth, proxy.mcHealth, proxy.mcMax, life,
++								actor->IsInCombat(), proxy.warm, proxyPlayerHitAge.contains(proxy.formId) ? proxyPlayerHitAge[proxy.formId] : -1.0f);
++						}
++					}
 +					FadeProxy(actor, true);
 +					if constexpr (requires { actor->Enable(false); }) {
 +						actor->Enable(false);
 +					}
 +					reloaded = true;
-+					proxy.warm = std::max(proxy.warm, 1.5f);
++					// Back on at once, and straight at its mob: it is only a stand-in that something put away, not a new one, so there is no spawn
++					// to sit out up in the air (that cost lock-on a second and a half after every hit). Its body is hidden from the moment it loads.
++					if (proxy.mcMax > 0.0f) {
++						proxy.recovering = true;
++						proxy.warm = std::max(proxy.warm, 0.2f);
++					} else {
++						proxy.warm = std::max(proxy.warm, 1.5f);
++					}
 +					proxy.placed = false;
++					proxy.hideFrames = 0;
 +					static int switchedBack = 0;
 +					if (switchedBack++ < 20) {
 +						logger::info("Stand-in ({:08X}) of mob {} had been switched off while its mob lives; switched back on", proxy.formId, it->first);
@@ -6155,7 +6179,14 @@ index 0954b7f..f564d09 100644
 +				}
 +				SyncProxyHealth(actor, proxy);  // every frame, so the health is the mob's at all times, not only when Minecraft reports it
 +				WatchProxy(actor, proxy, State().skyrimMode);
-+				if (proxy.warm > 0.0f) {
++				if (proxy.warm > 0.0f && proxy.recovering) {
++					proxy.warm -= a_delta;
++					FollowProxy(actor, proxy, a_delta);  // at the mob all along, hidden
++					StripSpawnEffects(actor);
++					if (proxy.warm <= 0.0f) {
++						proxy.recovering = false;
++					}
++				} else if (proxy.warm > 0.0f) {
 +					proxy.warm -= a_delta;
 +					const auto spot = WarmSpot(a_player);
 +					actor->SetPosition(spot, true);
@@ -6234,7 +6265,7 @@ index 0954b7f..f564d09 100644
  		}
  
  		void KillPlayer(RE::PlayerCharacter* a_player, const proto::McEvent& a_ev)
-@@ -580,7 +2381,7 @@ namespace skycraft
+@@ -580,7 +2412,7 @@ namespace skycraft
  			for (auto& handle : lists->highActorHandles) {
  				auto actorPtr = handle.get();
  				auto* actor = actorPtr.get();
@@ -6243,7 +6274,7 @@ index 0954b7f..f564d09 100644
  					continue;
  				}
  				const auto hazard = HazardAtActor(actor);
-@@ -698,6 +2499,7 @@ namespace skycraft
+@@ -698,6 +2530,7 @@ namespace skycraft
  			RE::NiPoint3 center;
  			float        radius;  // Minecraft blocks
  			float        delay;   // seconds: after the blast's damage has landed
@@ -6251,7 +6282,7 @@ index 0954b7f..f564d09 100644
  		};
  		std::vector<PendingExplosion> pendingExplosions;
  
-@@ -786,6 +2588,9 @@ namespace skycraft
+@@ -786,6 +2619,9 @@ namespace skycraft
  					continue;
  				}
  				if (auto* actor = ref->As<RE::Actor>()) {
@@ -6261,7 +6292,7 @@ index 0954b7f..f564d09 100644
  					if (!actor->IsDead()) {
  						if (auto* process = actor->GetActorRuntimeData().currentProcess) {
  							process->KnockExplosion(actor, a_blast.center, 25.0f * falloff * power);
-@@ -830,6 +2635,183 @@ namespace skycraft
+@@ -830,6 +2666,183 @@ namespace skycraft
  			}
  			logger::info("Minecraft explosion (radius {:.1f}): knocked {} people away, threw {} objects", a_blast.radius, people, objects);
  		}
@@ -6445,7 +6476,7 @@ index 0954b7f..f564d09 100644
  	}
  
  	namespace Combat
-@@ -838,6 +2820,9 @@ namespace skycraft
+@@ -838,6 +2851,9 @@ namespace skycraft
  		{
  			REL::Relocation<std::uintptr_t> vtbl{ RE::VTABLE_PlayerCharacter[0] };
  			HandleHealthDamageHook::func = vtbl.write_vfunc(0x104, HandleHealthDamageHook::thunk);
@@ -6455,7 +6486,7 @@ index 0954b7f..f564d09 100644
  			if (auto* events = RE::ScriptEventSourceHolder::GetSingleton()) {
  				events->AddEventSink<RE::TESHitEvent>(HitSink::Get());
  			}
-@@ -854,20 +2839,66 @@ namespace skycraft
+@@ -854,20 +2870,66 @@ namespace skycraft
  				}
  				healthPrimed = false;
  				engaged = false;
@@ -6528,7 +6559,7 @@ index 0954b7f..f564d09 100644
  			SetEssential(a_player, true);
  			WriteActorTable(a_player);
  			engagedTimer -= a_delta;
-@@ -878,29 +2909,11 @@ namespace skycraft
+@@ -878,29 +2940,11 @@ namespace skycraft
  
  			proto::McEvent ev;
  			while (link.PopEvent(ev)) {
@@ -6561,7 +6592,7 @@ index 0954b7f..f564d09 100644
  			for (auto it = pendingExplosions.begin(); it != pendingExplosions.end();) {
  				it->delay -= a_delta;
  				if (it->delay <= 0.0f) {
-@@ -924,5 +2937,15 @@ namespace skycraft
+@@ -924,5 +2968,15 @@ namespace skycraft
  		}
  
  		bool PlayerEngaged() { return engaged; }
