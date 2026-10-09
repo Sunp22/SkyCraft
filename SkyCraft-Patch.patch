@@ -4099,7 +4099,7 @@ index 0000000..0cbdd07
 +	}
 +}
 diff --git a/skse/src/Combat.cpp b/skse/src/Combat.cpp
-index 0954b7f..2e5f4ad 100644
+index 0954b7f..cb23e20 100644
 --- a/skse/src/Combat.cpp
 +++ b/skse/src/Combat.cpp
 @@ -1,5 +1,7 @@
@@ -4308,7 +4308,7 @@ index 0954b7f..2e5f4ad 100644
  				const auto mc = SkyToMc(pos);
  				r.x = static_cast<float>(mc.x);
  				r.y = static_cast<float>(mc.y);
-@@ -240,161 +394,1884 @@ namespace skycraft
+@@ -240,161 +394,1878 @@ namespace skycraft
  				logger::warn("hit pipeline: melee call site doesn't match this game build; using plain damage");
  				return;
  			}
@@ -5259,15 +5259,9 @@ index 0954b7f..2e5f4ad 100644
 +					logger::warn("This CommonLib has no way to switch a stand-in's AI off; they keep their own (and may growl)");
 +				}
 +			}
-+			// It is only ever in a fight with Skyrim's NPCs. If it has turned on the player (it growls, and shows its
-+			// health bar), it is taken out of that fight; the NPCs keep fighting it and Minecraft's mob keeps fighting the player.
-+			if (a_actor->IsInCombat()) {
-+				if (auto* player = RE::PlayerCharacter::GetSingleton(); player && a_actor->GetActorRuntimeData().currentCombatTarget.get().get() == player) {
-+					if constexpr (requires { a_actor->StopCombat(); }) {
-+						a_actor->StopCombat();
-+					}
-+				}
-+			}
++			// (It used to be taken out of any fight it had with the player here, on every report from Minecraft. The engine log showed a
++			// stand-in the player hit going into combat and being switched off 6 ms later, which is when this ran; with its AI off it can't
++			// attack anyway, so it is left alone. Pooled stand-ins are still taken out of combat when they are put away.)
 +			HideProxy(a_actor);
 +		}
 +
@@ -6317,7 +6311,7 @@ index 0954b7f..2e5f4ad 100644
  		}
  
  		void KillPlayer(RE::PlayerCharacter* a_player, const proto::McEvent& a_ev)
-@@ -580,7 +2457,7 @@ namespace skycraft
+@@ -580,7 +2451,7 @@ namespace skycraft
  			for (auto& handle : lists->highActorHandles) {
  				auto actorPtr = handle.get();
  				auto* actor = actorPtr.get();
@@ -6326,7 +6320,7 @@ index 0954b7f..2e5f4ad 100644
  					continue;
  				}
  				const auto hazard = HazardAtActor(actor);
-@@ -698,6 +2575,7 @@ namespace skycraft
+@@ -698,6 +2569,7 @@ namespace skycraft
  			RE::NiPoint3 center;
  			float        radius;  // Minecraft blocks
  			float        delay;   // seconds: after the blast's damage has landed
@@ -6334,7 +6328,7 @@ index 0954b7f..2e5f4ad 100644
  		};
  		std::vector<PendingExplosion> pendingExplosions;
  
-@@ -786,6 +2664,9 @@ namespace skycraft
+@@ -786,6 +2658,9 @@ namespace skycraft
  					continue;
  				}
  				if (auto* actor = ref->As<RE::Actor>()) {
@@ -6344,7 +6338,7 @@ index 0954b7f..2e5f4ad 100644
  					if (!actor->IsDead()) {
  						if (auto* process = actor->GetActorRuntimeData().currentProcess) {
  							process->KnockExplosion(actor, a_blast.center, 25.0f * falloff * power);
-@@ -830,6 +2711,183 @@ namespace skycraft
+@@ -830,6 +2705,183 @@ namespace skycraft
  			}
  			logger::info("Minecraft explosion (radius {:.1f}): knocked {} people away, threw {} objects", a_blast.radius, people, objects);
  		}
@@ -6528,7 +6522,7 @@ index 0954b7f..2e5f4ad 100644
  	}
  
  	namespace Combat
-@@ -838,8 +2896,15 @@ namespace skycraft
+@@ -838,8 +2890,15 @@ namespace skycraft
  		{
  			REL::Relocation<std::uintptr_t> vtbl{ RE::VTABLE_PlayerCharacter[0] };
  			HandleHealthDamageHook::func = vtbl.write_vfunc(0x104, HandleHealthDamageHook::thunk);
@@ -6544,7 +6538,7 @@ index 0954b7f..2e5f4ad 100644
  			}
  			ResolveHitPipeline();
  			logger::info("combat hooks installed");
-@@ -854,20 +2919,66 @@ namespace skycraft
+@@ -854,20 +2913,66 @@ namespace skycraft
  				}
  				healthPrimed = false;
  				engaged = false;
@@ -6617,7 +6611,7 @@ index 0954b7f..2e5f4ad 100644
  			SetEssential(a_player, true);
  			WriteActorTable(a_player);
  			engagedTimer -= a_delta;
-@@ -878,29 +2989,11 @@ namespace skycraft
+@@ -878,29 +2983,11 @@ namespace skycraft
  
  			proto::McEvent ev;
  			while (link.PopEvent(ev)) {
@@ -6650,7 +6644,7 @@ index 0954b7f..2e5f4ad 100644
  			for (auto it = pendingExplosions.begin(); it != pendingExplosions.end();) {
  				it->delay -= a_delta;
  				if (it->delay <= 0.0f) {
-@@ -924,5 +3017,15 @@ namespace skycraft
+@@ -924,5 +3011,15 @@ namespace skycraft
  		}
  
  		bool PlayerEngaged() { return engaged; }
