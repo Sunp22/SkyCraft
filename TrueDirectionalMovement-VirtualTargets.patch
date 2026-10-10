@@ -1,8 +1,19 @@
 diff --git a/src/DirectionalMovementHandler.cpp b/src/DirectionalMovementHandler.cpp
-index c7629e1..e368a67 100644
+index c7629e1..5213f95 100644
 --- a/src/DirectionalMovementHandler.cpp
 +++ b/src/DirectionalMovementHandler.cpp
-@@ -235,9 +235,12 @@ void DirectionalMovementHandler::Update()
+@@ -4,6 +4,10 @@
+ #include "Offsets.h"
+ #include "Hooks.h"
+ 
++#include <algorithm>
++#include <cstring>
++#include <string>
++
+ #include <Psapi.h>
+ #include <DbgHelp.h>
+ #pragma comment(lib, "dbghelp.lib")
+@@ -235,9 +239,12 @@ void DirectionalMovementHandler::Update()
  	}
  
  	if (IsFreeCamera()) {
@@ -16,7 +27,7 @@ index c7629e1..e368a67 100644
  			if (Settings::glob_directionalMovement) {
  				Settings::glob_directionalMovement->value = 0;
  			}
-@@ -1103,14 +1106,16 @@ void DirectionalMovementHandler::SetDesiredAngleToTarget(RE::PlayerCharacter* a_
+@@ -1103,14 +1110,16 @@ void DirectionalMovementHandler::SetDesiredAngleToTarget(RE::PlayerCharacter* a_
  
  	auto target = a_target.get();
  
@@ -35,7 +46,7 @@ index c7629e1..e368a67 100644
  
  	RE::NiPoint2 directionToTarget = RE::NiPoint2(-(targetPos.x - playerPos.x), targetPos.y - playerPos.y);
  	directionToTarget.Unitize();
-@@ -1285,12 +1290,13 @@ void DirectionalMovementHandler::UpdateRotationLockedCam()
+@@ -1285,12 +1294,13 @@ void DirectionalMovementHandler::UpdateRotationLockedCam()
  		return;
  	}
  
@@ -52,7 +63,7 @@ index c7629e1..e368a67 100644
  	auto playerCharacter = RE::PlayerCharacter::GetSingleton();
  	if (!playerCharacter) {
  		return;
-@@ -1487,6 +1493,33 @@ bool DirectionalMovementHandler::ToggleTargetLock(bool bEnable, bool bPressedMan
+@@ -1487,6 +1497,33 @@ bool DirectionalMovementHandler::ToggleTargetLock(bool bEnable, bool bPressedMan
  			actor = FindTarget(bPressedManually ? TargetLockSelectionMode::kCombined : TargetLockSelectionMode::kClosest);
  		}
  
@@ -86,7 +97,7 @@ index c7629e1..e368a67 100644
  		if (actor) 
  		{
  			SetTarget(actor);
-@@ -1510,6 +1543,7 @@ bool DirectionalMovementHandler::ToggleTargetLock(bool bEnable, bool bPressedMan
+@@ -1510,6 +1547,7 @@ bool DirectionalMovementHandler::ToggleTargetLock(bool bEnable, bool bPressedMan
  
  	if (!bEnable || HasTargetLocked())
  	{
@@ -94,7 +105,7 @@ index c7629e1..e368a67 100644
  		SetTarget(RE::ActorHandle());
  
  		// Set graph variable
-@@ -1569,12 +1603,16 @@ RE::NiPoint3 DirectionalMovementHandler::GetTargetPosition() const
+@@ -1569,12 +1607,16 @@ RE::NiPoint3 DirectionalMovementHandler::GetTargetPosition() const
  		return _target.get()->GetLookingAtLocation();
  	}
  
@@ -112,7 +123,7 @@ index c7629e1..e368a67 100644
  	{
  		ToggleTargetLock(false);
  	}
-@@ -1631,6 +1669,10 @@ bool DirectionalMovementHandler::CheckCurrentTarget(RE::ActorHandle a_target, bo
+@@ -1631,6 +1673,10 @@ bool DirectionalMovementHandler::CheckCurrentTarget(RE::ActorHandle a_target, bo
  		return false;
  	}
  
@@ -123,7 +134,7 @@ index c7629e1..e368a67 100644
  	auto actorState = target->AsActorState();
  	auto currentProcess = target->GetActorRuntimeData().currentProcess;
  	if (!currentProcess || !currentProcess->InHighProcess() ||
-@@ -1687,7 +1729,7 @@ void DirectionalMovementHandler::UpdateTargetLock()
+@@ -1687,7 +1733,7 @@ void DirectionalMovementHandler::UpdateTargetLock()
  			ToggleTargetLock(false);
  		}
  
@@ -132,7 +143,7 @@ index c7629e1..e368a67 100644
  		{
  			ToggleTargetLock(false);
  		}
-@@ -1712,6 +1754,9 @@ bool DirectionalMovementHandler::IsActorValidTarget(RE::ActorPtr a_actor, bool a
+@@ -1712,6 +1758,9 @@ bool DirectionalMovementHandler::IsActorValidTarget(RE::ActorPtr a_actor, bool a
  	if (a_actor->formType != RE::FormType::ActorCharacter)
  		return false;
  
@@ -142,7 +153,7 @@ index c7629e1..e368a67 100644
  	if (a_actor->IsDead())
  		return false;
  
-@@ -1841,6 +1886,11 @@ void DirectionalMovementHandler::SwitchTarget(Direction a_direction)
+@@ -1841,6 +1890,11 @@ void DirectionalMovementHandler::SwitchTarget(Direction a_direction)
  		return;  // too soon
  	}
  
@@ -154,19 +165,19 @@ index c7629e1..e368a67 100644
  	//RE::ActorHandle actor = GetClosestTarget(FindTargetsByDirection(a_direction), _target);
  
  	if (SwitchTargetPoint(a_direction)) {
-@@ -2200,6 +2250,11 @@ bool DirectionalMovementHandler::SetDesiredAngleToMagnetismTarget()
+@@ -2200,6 +2254,11 @@ bool DirectionalMovementHandler::SetDesiredAngleToMagnetismTarget()
  
  void DirectionalMovementHandler::SetTarget(RE::ActorHandle a_target)
  {
 +	if (a_target && _virtualTargetId != 0) {
-+		_virtualTargetId = 0;  // an actor is locked on to instead (TrueHUD is told about it below)
-+		_virtualBarActor = RE::ActorHandle();
++		_virtualTargetId = 0;  // an actor is locked on to instead
++		UpdateVirtualTargetBar();  // (its bar goes)
 +	}
 +
  	if (_target == a_target) {
  		return;
  	}
-@@ -2231,6 +2286,263 @@ void DirectionalMovementHandler::SetTarget(RE::ActorHandle a_target)
+@@ -2231,6 +2290,411 @@ void DirectionalMovementHandler::SetTarget(RE::ActorHandle a_target)
  	}
  }
  
@@ -316,35 +327,183 @@ index c7629e1..e368a67 100644
 +	UpdateVirtualTargetBar();  // TrueHUD's name and health bar: the stand-in's while locked on, none once it isn't
 +}
 +
-+// The virtual target may name an actor that stands for it (SkyCraft's stand-in for a mob, which carries the mob's name and has
-+// its health). TrueHUD is made to show that actor's bar as it does for a locked-on NPC. The actor can be gone for a moment
-+// (switched off and back on), so this follows it every frame: the bar goes with it and comes back with it.
++// The name and health bar of the virtual target locked on to. There is no actor, so TrueHUD cannot give it one; it is drawn
++// straight into Skyrim's HUD with ActionScript's drawing calls, above the target, as a bar and a name like an NPC's. All of it
++// happens on the UI thread, and a HUD that is not there (or does not answer) just means no bar.
++namespace
++{
++	constexpr double kVirtualBarWidth = 130.0;   // stage units, for a 720 high stage; the clip is scaled to the real one
++	constexpr double kVirtualBarHeight = 9.0;
++
++	struct VirtualBarUi
++	{
++		const void*  movie = nullptr;
++		RE::GFxValue container;
++		RE::GFxValue fill;
++		RE::GFxValue text;
++		std::string  shownName;
++		bool         ready = false;
++	};
++	VirtualBarUi* virtualBarUi = nullptr;  // never freed: its movie may be gone by then
++
++	void DrawBarRect(RE::GFxValue& a_clip, double a_x0, double a_y0, double a_x1, double a_y1, double a_color, double a_alpha)
++	{
++		RE::GFxValue a[2];
++		a[0].SetNumber(a_color);
++		a[1].SetNumber(a_alpha);
++		a_clip.Invoke("beginFill", nullptr, a, 2);
++		RE::GFxValue p[2];
++		const double xs[5] = { a_x0, a_x1, a_x1, a_x0, a_x0 };
++		const double ys[5] = { a_y0, a_y0, a_y1, a_y1, a_y0 };
++		for (int i = 0; i < 5; ++i) {
++			p[0].SetNumber(xs[i]);
++			p[1].SetNumber(ys[i]);
++			a_clip.Invoke(i == 0 ? "moveTo" : "lineTo", nullptr, p, 2);
++		}
++		a_clip.Invoke("endFill", nullptr, nullptr, 0);
++	}
++
++	std::string EscapeHtml(const std::string& a_text)
++	{
++		std::string out;
++		for (const char c : a_text) {
++			switch (c) {
++			case '&': out += "&amp;"; break;
++			case '<': out += "&lt;"; break;
++			case '>': out += "&gt;"; break;
++			default: out += c; break;
++			}
++		}
++		return out;
++	}
++}
++
 +void DirectionalMovementHandler::UpdateVirtualTargetBar()
 +{
-+	RE::ActorHandle wanted;
++	bool          show = false;
++	std::string   name;
++	float         health = -1.0f;
++	RE::NiPoint3  position;
 +	if (_virtualTargetId != 0 && AreVirtualTargetsFresh()) {
-+		RE::FormID formId = 0;
-+		{
-+			std::lock_guard<std::mutex> lock(_virtualTargetsMutex);
-+			if (const auto it = _virtualTargets.find(_virtualTargetId); it != _virtualTargets.end()) {
-+				formId = it->second.actorFormId;
-+			}
-+		}
-+		if (formId != 0) {
-+			if (auto* actor = RE::TESForm::LookupByID<RE::Actor>(formId); actor && !actor->IsDisabled() && actor->Is3DLoaded()) {
-+				wanted = actor->GetHandle();
-+			}
++		std::lock_guard<std::mutex> lock(_virtualTargetsMutex);
++		if (const auto it = _virtualTargets.find(_virtualTargetId); it != _virtualTargets.end()) {
++			show = true;
++			name.assign(it->second.name, strnlen(it->second.name, sizeof(it->second.name)));
++			health = it->second.health;
++			position = RE::NiPoint3(it->second.x, it->second.y, it->second.z);
 +		}
 +	}
 +
-+	if (wanted == _virtualBarActor) {
++	static bool shownLast = false;
++	if (!show && !shownLast) {
++		return;  // nothing was shown, nothing is
++	}
++	shownLast = show;
++
++	const auto* tasks = SKSE::GetTaskInterface();
++	if (!tasks) {
 +		return;
 +	}
++	tasks->AddUITask([show, name, health, position]() {
++		auto* ui = RE::UI::GetSingleton();
++		auto  hud = ui ? ui->GetMenu(RE::HUDMenu::MENU_NAME) : RE::GPtr<RE::IMenu>();
++		if (!hud || !hud->uiMovie) {
++			return;
++		}
++		RE::GFxMovieView* movie = hud->uiMovie.get();
++		if (!virtualBarUi || virtualBarUi->movie != movie) {
++			virtualBarUi = new VirtualBarUi();
++			virtualBarUi->movie = movie;
++		}
++		VirtualBarUi& bar = *virtualBarUi;
 +
-+	_virtualBarActor = wanted;
-+	if (APIs::TrueHUD) {
-+		APIs::TrueHUD->SetTarget(SKSE::GetPluginHandle(), wanted);
-+	}
++		if (!bar.ready) {
++			if (!show) {
++				return;
++			}
++			RE::GFxValue root;
++			if (!movie->GetVariable(&root, "_root") || !root.IsObject()) {
++				return;
++			}
++			RE::GFxValue depth;
++			root.Invoke("getNextHighestDepth", &depth, nullptr, 0);
++			RE::GFxValue args[6];
++			args[0].SetString("tdm_virtualTargetBar");
++			args[1].SetNumber(depth.IsNumber() ? depth.GetNumber() : 9000.0);
++			root.Invoke("createEmptyMovieClip", &bar.container, args, 2);
++			if (!bar.container.IsObject()) {
++				return;
++			}
++			RE::GFxValue back;
++			args[0].SetString("back");
++			args[1].SetNumber(1);
++			bar.container.Invoke("createEmptyMovieClip", &back, args, 2);
++			DrawBarRect(back, -kVirtualBarWidth * 0.5, 0.0, kVirtualBarWidth * 0.5, kVirtualBarHeight, 0x000000, 60.0);
++			args[0].SetString("fill");
++			args[1].SetNumber(2);
++			bar.container.Invoke("createEmptyMovieClip", &bar.fill, args, 2);
++			args[0].SetString("name");
++			args[1].SetNumber(3);
++			args[2].SetNumber(-kVirtualBarWidth);
++			args[3].SetNumber(-26.0);
++			args[4].SetNumber(kVirtualBarWidth * 2.0);
++			args[5].SetNumber(24.0);
++			bar.container.Invoke("createTextField", &bar.text, args, 6);
++			RE::GFxValue flag;
++			flag.SetBoolean(true);
++			bar.text.SetMember("html", flag);
++			flag.SetBoolean(false);
++			bar.text.SetMember("selectable", flag);
++			bar.ready = true;
++		}
++
++		RE::GFxValue::DisplayInfo info;
++		if (!show) {
++			info.SetVisible(false);
++			bar.container.SetDisplayInfo(info);
++			return;
++		}
++
++		float nx = 0.0f, ny = 0.0f, depthZ = 0.0f;
++		RE::NiCamera::WorldPtToScreenPt3((float(*)[4])g_worldToCamMatrix, *g_viewPort, position, nx, ny, depthZ, 1e-5f);
++		if (depthZ < 0.0f) {  // behind the camera
++			info.SetVisible(false);
++			bar.container.SetDisplayInfo(info);
++			return;
++		}
++		ny = 1.0f - ny;  // Flash's y goes down
++
++		const RE::GRectF rect = movie->GetVisibleFrameRect();
++		const float      stageWidth = rect.right - rect.left;
++		const float      stageHeight = rect.bottom - rect.top;
++		const double     scale = stageHeight / 720.0 * 100.0;
++		const float      half = static_cast<float>(kVirtualBarWidth * 0.5 * scale / 100.0);
++		float            x = rect.left + stageWidth * nx;
++		float            y = rect.top + stageHeight * ny - stageHeight * 0.10f;  // above the target
++		x = std::clamp(x, rect.left + half, rect.right - half);
++		y = std::clamp(y, rect.top + stageHeight * 0.06f, rect.bottom - stageHeight * 0.06f);
++
++		bar.fill.Invoke("clear", nullptr, nullptr, 0);
++		if (health >= 0.0f) {
++			const double fraction = std::clamp(static_cast<double>(health), 0.0, 1.0);
++			if (fraction > 0.0) {
++				DrawBarRect(bar.fill, -kVirtualBarWidth * 0.5, 0.0, -kVirtualBarWidth * 0.5 + kVirtualBarWidth * fraction, kVirtualBarHeight, 0xB02020, 100.0);
++			}
++		}
++
++		if (name != bar.shownName) {
++			bar.shownName = name;
++			const std::string html = "<font face=\"$EverywhereFont\" size=\"18\" color=\"#FFFFFF\"><p align=\"center\">" + EscapeHtml(name) + "</p></font>";
++			RE::GFxValue text;
++			text.SetString(html.c_str());
++			bar.text.SetMember("htmlText", text);
++		}
++
++		info.SetVisible(true);
++		info.SetPosition(x, y);
++		info.SetScale(scale, scale);
++		bar.container.SetDisplayInfo(info);
++	});
 +}
 +
 +void DirectionalMovementHandler::SwitchVirtualTarget(Direction a_direction)
@@ -430,7 +589,7 @@ index c7629e1..e368a67 100644
  void DirectionalMovementHandler::SetSoftTarget(RE::ActorHandle a_softTarget)
  {
  	if (a_softTarget == _softTarget) {
-@@ -2667,12 +2979,15 @@ void DirectionalMovementHandler::LookAtTarget(RE::ActorHandle a_target)
+@@ -2667,12 +3131,15 @@ void DirectionalMovementHandler::LookAtTarget(RE::ActorHandle a_target)
  		return;
  	}
  
@@ -449,7 +608,7 @@ index c7629e1..e368a67 100644
  	auto playerCharacter = RE::PlayerCharacter::GetSingleton();
  	auto playerCamera = RE::PlayerCamera::GetSingleton();
  	RE::ThirdPersonState* thirdPersonState = nullptr;
-@@ -2941,6 +3256,11 @@ void DirectionalMovementHandler::OnPreLoadGame()
+@@ -2941,6 +3408,11 @@ void DirectionalMovementHandler::OnPreLoadGame()
  	_bJustDodged_Legacy = false;
  	_attackState = AttackState::kNone;
  	_target = RE::ActorHandle();
@@ -462,7 +621,7 @@ index c7629e1..e368a67 100644
  	_dialogueSpeaker = RE::ObjectRefHandle();
  	_playerIsNPC = false;
 diff --git a/src/DirectionalMovementHandler.h b/src/DirectionalMovementHandler.h
-index a1c94b6..d2a7ba9 100644
+index a1c94b6..da307d8 100644
 --- a/src/DirectionalMovementHandler.h
 +++ b/src/DirectionalMovementHandler.h
 @@ -3,6 +3,10 @@
@@ -513,12 +672,11 @@ index a1c94b6..d2a7ba9 100644
  
  	bool IsTargetLockBehindTarget() const { return HasTargetLocked() && _moveCameraBehindTarget && !_isBehind; }
  
-@@ -359,6 +377,12 @@ private:
+@@ -359,6 +377,11 @@ private:
  	float _controlledYawRotationSpeedMultiplier = 0;
  
  	RE::ActorHandle _target;
 +	std::atomic<std::int64_t> _virtualTargetsStamp{ 0 };  // when the virtual targets were last handed over (steady clock, ms): they are only good for a second
-+	RE::ActorHandle _virtualBarActor;  // the actor TrueHUD is showing the bar of for the virtual target locked on to
 +	std::atomic<std::uint32_t> _virtualTargetId{ 0 };  // the virtual target locked on to, if there is one (then _target is empty)
 +	std::unordered_map<std::uint32_t, TDM_API::VirtualTarget> _virtualTargets;
 +	std::unordered_set<RE::FormID> _ignoredActors;
@@ -586,7 +744,7 @@ index e8333da..284f9bd 100644
  		// Mark directional movement control as required by True Directional Movement for API requests
  		void SetNeedsDirectionalMovementControl(bool a_needsControl) noexcept;
 diff --git a/src/TrueDirectionalMovementAPI.h b/src/TrueDirectionalMovementAPI.h
-index 15db4d2..885db70 100644
+index 15db4d2..5555ec4 100644
 --- a/src/TrueDirectionalMovementAPI.h
 +++ b/src/TrueDirectionalMovementAPI.h
 @@ -19,7 +19,8 @@
@@ -599,7 +757,7 @@ index 15db4d2..885db70 100644
  	};
  
  	// Error types that may be returned by the True Directional Movement API
-@@ -215,6 +216,45 @@
+@@ -215,6 +216,46 @@
  		virtual PluginHandle GetDisableTargetLockOwner() const noexcept = 0;
  	};
  
@@ -609,7 +767,8 @@ index 15db4d2..885db70 100644
 +	{
 +		uint32_t id;  // not 0; stays the same for as long as the target exists
 +		float    x, y, z;  // world position, in Skyrim's units
-+		uint32_t actorFormId;  // optional (0: none): an actor that stands for the target, for TrueHUD's name and health bar while it is locked on to
++		float    health;  // 0..1 of its full health, or less than 0 if not known: the bar shown for it while it is locked on to
++		char     name[32];  // its name (zero-ended), shown above that bar; empty for none
 +	};
 +
 +	class IVTDM6 : public IVTDM5
