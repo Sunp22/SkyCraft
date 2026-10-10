@@ -4,6 +4,11 @@
 # is already in the source; the patch adds world reset, show world, mobs, mob roaming, roaming on rough
 # ground, chat input, mob life, mob combat, mob polish and mob hit effects, stand-in cleanup, no mobs in settlements, lock-on on the mob's body, stand-in damage guard and 1:1 stand-in health, and a body-width block collision for Skyrim mode) is in the root of the repo, it is applied
 # before building, and skipped if the source already has it.
+# A second job ("tdm-patch") builds True Directional Movement from its own source with
+# TrueDirectionalMovement-VirtualTargets.patch (also in the root of the repo) applied, so TDM can lock on to Minecraft's mobs, and
+# uploads it as its own optional zip: TrueDirectionalMovement.dll for SKSE\\Plugins, to be installed over TDM's, the way TDM's
+# Improved Camera patch is. SkyCraft works without it (lock-on then goes by the stand-ins' actors). If the patch isn't in the repo
+# the job does nothing.
 # Run it from the repo's Actions tab ("Build SkyCraft" -> Run workflow), or it runs on every push.
 #
 # The first run takes a long time (vcpkg compiles the C++ dependencies, Gradle fetches Minecraft);
@@ -312,5 +317,120 @@ jobs:
           path: |
             dist/SkyCraft-*.zip
             dist/skycraft-fabric-*.jar
+          if-no-files-found: error
+          retention-days: 30
+
+  # True Directional Movement with virtual targets (see TrueDirectionalMovement-VirtualTargets.patch). Built from TDM's own
+  # source, the way TDM's own workflow does it, and packed as a small mod that goes over TDM's DLL.
+  tdm-patch:
+    runs-on: windows-2022  # TDM's preset uses the "Visual Studio 17 2022" generator
+    timeout-minutes: 90
+    env:
+      # TDM's source, and the revision of it the patch is made for. If TDM changes and the patch stops applying, put the
+      # commit the patch was made for here (the job says so when it can't apply it).
+      TDM_REPO: ersh1/TrueDirectionalMovement
+      TDM_REF: master
+      VCPKG_COMMIT_ID: cd61e1e26a038e82d6550a3ebbe0fbbfe7da78e3  # the one TDM's own workflow uses
+
+    steps:
+      - name: Keep line endings as they are
+        run: git config --global core.autocrlf false
+
+      - name: Check out SkyCraft (for the patch)
+        uses: actions/checkout@v5
+        with:
+          path: skycraft
+
+      - name: Look for TrueDirectionalMovement-VirtualTargets.patch
+        id: have
+        shell: bash
+        run: |
+          if [ -f skycraft/TrueDirectionalMovement-VirtualTargets.patch ]; then
+            echo "have=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "have=false" >> "$GITHUB_OUTPUT"
+            echo "No TrueDirectionalMovement-VirtualTargets.patch in the repo; nothing to build."
+          fi
+
+      - name: Check out True Directional Movement (with its CommonLibSSE-NG submodule)
+        if: steps.have.outputs.have == 'true'
+        uses: actions/checkout@v5
+        with:
+          repository: ${{ env.TDM_REPO }}
+          ref: ${{ env.TDM_REF }}
+          path: tdm
+          submodules: recursive
+
+      - name: Apply the virtual targets patch
+        if: steps.have.outputs.have == 'true'
+        shell: bash
+        working-directory: tdm
+        run: |
+          patch=../skycraft/TrueDirectionalMovement-VirtualTargets.patch
+          if grep -q SetVirtualTargets src/DirectionalMovementHandler.cpp; then
+            echo "TDM's source already has virtual targets; nothing to apply."
+          elif git apply --check "$patch"; then
+            git apply "$patch"
+            echo "Applied the patch to TDM $(git rev-parse --short HEAD)."
+          else
+            echo "::error::TrueDirectionalMovement-VirtualTargets.patch doesn't apply to TDM $(git rev-parse --short HEAD). TDM has probably changed since the patch was made; set TDM_REF in the workflow to the commit it was made for, or have the patch redone."
+            exit 1
+          fi
+
+      - name: Set up vcpkg (installs no packages itself)
+        if: steps.have.outputs.have == 'true'
+        uses: lukka/run-vcpkg@v11
+        with:
+          vcpkgDirectory: ${{ runner.workspace }}/b/vcpkg
+          vcpkgGitCommitId: ${{ env.VCPKG_COMMIT_ID }}
+          vcpkgJsonGlob: tdm/vcpkg.json
+
+      # TDM's preset turns every warning into an error (/WX); here they stay warnings, so a harmless one can't stop the build.
+      - name: Configure True Directional Movement
+        if: steps.have.outputs.have == 'true'
+        working-directory: tdm
+        shell: pwsh
+        run: |
+          cmake --preset github-actions "-DCMAKE_CXX_FLAGS=/EHsc /MP /W4"
+          if ($LASTEXITCODE) { throw "CMake couldn't configure True Directional Movement" }
+
+      - name: Build True Directional Movement
+        if: steps.have.outputs.have == 'true'
+        working-directory: tdm
+        shell: pwsh
+        run: |
+          cmake --build build --config Release
+          if ($LASTEXITCODE) { throw "True Directional Movement didn't build" }
+
+      - name: Pack the mod
+        if: steps.have.outputs.have == 'true'
+        shell: pwsh
+        run: |
+          $dll = "tdm\build\src\Release\TrueDirectionalMovement.dll"
+          if (-not (Test-Path $dll)) { throw "$dll wasn't built" }
+          $stage = "tdm-pack"
+          New-Item -ItemType Directory -Force "$stage\SKSE\Plugins" | Out-Null
+          Copy-Item $dll "$stage\SKSE\Plugins\TrueDirectionalMovement.dll"
+          Copy-Item tdm\COPYING "$stage\COPYING"
+          Copy-Item tdm\EXCEPTIONS "$stage\EXCEPTIONS"
+          Copy-Item skycraft\TrueDirectionalMovement-VirtualTargets.patch "$stage\TrueDirectionalMovement-VirtualTargets.patch"
+          @"
+          True Directional Movement with virtual targets (for SkyCraft)
+
+          Install over True Directional Movement (it needs TDM's other files); this DLL replaces TDM's.
+          It is TDM $(git -C tdm rev-parse --short HEAD) with TrueDirectionalMovement-VirtualTargets.patch applied, which lets a mod hand
+          TDM things to lock on to that aren't actors (SkyCraft hands it Minecraft's mobs). Nothing else changes.
+          True Directional Movement is by Ersh, GPL-3.0 with its modding exception (COPYING, EXCEPTIONS). The source is
+          https://github.com/ersh1/TrueDirectionalMovement plus the patch included here.
+          "@ | Set-Content "$stage\README.txt"
+          New-Item -ItemType Directory -Force dist-tdm | Out-Null
+          Compress-Archive -Path "$stage\*" -DestinationPath "dist-tdm\SkyCraft-TDM-VirtualTargets-patch.zip"
+
+      - name: Upload the patch mod
+        if: steps.have.outputs.have == 'true'
+        uses: actions/upload-artifact@v4
+        with:
+          name: SkyCraft-TDM-VirtualTargets-patch
+          path: dist-tdm/SkyCraft-TDM-VirtualTargets-patch.zip
           if-no-files-found: error
           retention-days: 30
