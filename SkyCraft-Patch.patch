@@ -4099,18 +4099,18 @@ index 0000000..0cbdd07
 +	}
 +}
 diff --git a/skse/src/Combat.cpp b/skse/src/Combat.cpp
-index 0954b7f..cb23e20 100644
+index 0954b7f..be58ddb 100644
 --- a/skse/src/Combat.cpp
 +++ b/skse/src/Combat.cpp
-@@ -1,5 +1,7 @@
+@@ -1,4 +1,7 @@
  #include "Game.h"
- 
-+#include <cctype>
++#include "TrueDirectionalMovementAPI.h"
 +
++#include <cctype>
+ 
  namespace skycraft
  {
- 	namespace
-@@ -9,6 +11,23 @@ namespace skycraft
+@@ -9,6 +12,23 @@ namespace skycraft
  		constexpr float kHitMemorySeconds = 0.35f;   // how long a hit event can explain a health drop
  		constexpr float kDotFlushSeconds = 0.5f;     // magic/other damage is batched (Minecraft i-frames)
  
@@ -4134,7 +4134,7 @@ index 0954b7f..cb23e20 100644
  		// ---- what hit the player (main thread) -------------------------------------------------
  		struct RecentHit
  		{
-@@ -37,6 +56,54 @@ namespace skycraft
+@@ -37,6 +57,54 @@ namespace skycraft
  		bool  engaged = false;
  		float engagedTimer = 0.0f;
  
@@ -4189,7 +4189,7 @@ index 0954b7f..cb23e20 100644
  		class HitSink final : public RE::BSTEventSink<RE::TESHitEvent>
  		{
  		public:
-@@ -49,6 +116,27 @@ namespace skycraft
+@@ -49,6 +117,27 @@ namespace skycraft
  			RE::BSEventNotifyControl ProcessEvent(const RE::TESHitEvent* a_event, RE::BSTEventSource<RE::TESHitEvent>*) override
  			{
  				auto* player = RE::PlayerCharacter::GetSingleton();
@@ -4217,7 +4217,7 @@ index 0954b7f..cb23e20 100644
  				if (!a_event || !player || a_event->target.get() != player || !State().puppeting) {
  					return RE::BSEventNotifyControl::kContinue;
  				}
-@@ -168,6 +256,53 @@ namespace skycraft
+@@ -168,6 +257,53 @@ namespace skycraft
  			}
  		}
  
@@ -4271,7 +4271,7 @@ index 0954b7f..cb23e20 100644
  		void WriteActorTable(RE::PlayerCharacter* a_player)
  		{
  			static std::vector<proto::ActorRecord> records;
-@@ -181,7 +316,7 @@ namespace skycraft
+@@ -181,7 +317,7 @@ namespace skycraft
  			for (auto& handle : lists->highActorHandles) {
  				auto actorPtr = handle.get();
  				auto* actor = actorPtr.get();
@@ -4280,7 +4280,7 @@ index 0954b7f..cb23e20 100644
  					continue;
  				}
  				const auto pos = actor->GetPosition();
-@@ -191,7 +326,26 @@ namespace skycraft
+@@ -191,7 +327,26 @@ namespace skycraft
  				proto::ActorRecord r{};
  				r.formId = actor->GetFormID();
  				r.flags = (actor->IsHostileToActor(a_player) ? proto::kActorHostile : 0u) | (actor->IsDead() ? proto::kActorDead : 0u) |
@@ -4308,13 +4308,29 @@ index 0954b7f..cb23e20 100644
  				const auto mc = SkyToMc(pos);
  				r.x = static_cast<float>(mc.x);
  				r.y = static_cast<float>(mc.y);
-@@ -240,161 +394,1878 @@ namespace skycraft
- 				logger::warn("hit pipeline: melee call site doesn't match this game build; using plain damage");
+@@ -230,171 +385,1957 @@ namespace skycraft
+ 				logger::info("hit pipeline: not on AE; using plain damage");
  				return;
  			}
--			processHit = reinterpret_cast<ProcessHitFn*>(target);
--			hitDataCtor = reinterpret_cast<HitDataCtorFn*>(REL::ID(43995).address());
--			logger::info("hit pipeline: Minecraft hits go through Skyrim's hit processing");
+-			// Only trust the address if the engine's own melee code really calls it.
+-			const auto  site = REL::ID(38627).address() + 0x4A8;
+-			const auto* code = reinterpret_cast<const std::uint8_t*>(site);
+-			const auto  target = REL::ID(38586).address();
+-			std::int32_t rel = 0;
+-			std::memcpy(&rel, code + 1, 4);
+-			if (code[0] != 0xE8 || site + 5 + rel != target) {
+-				logger::warn("hit pipeline: melee call site doesn't match this game build; using plain damage");
+-				return;
++			// Only trust the address if the engine's own melee code really calls it.
++			const auto  site = REL::ID(38627).address() + 0x4A8;
++			const auto* code = reinterpret_cast<const std::uint8_t*>(site);
++			const auto  target = REL::ID(38586).address();
++			std::int32_t rel = 0;
++			std::memcpy(&rel, code + 1, 4);
++			if (code[0] != 0xE8 || site + 5 + rel != target) {
++				logger::warn("hit pipeline: melee call site doesn't match this game build; using plain damage");
++				return;
++			}
 +			processHit = reinterpret_cast<ProcessHitFn*>(target);
 +			hitDataCtor = reinterpret_cast<HitDataCtorFn*>(REL::ID(43995).address());
 +			logger::info("hit pipeline: Minecraft hits go through Skyrim's hit processing");
@@ -4973,6 +4989,8 @@ index 0954b7f..cb23e20 100644
 +			int           hideFrames{ 0 };        // frames the stand-in has been hidden every frame (its body can load in after the actor exists)
 +			float         warm{ 0.0f };           // seconds left of its warm-up: a new (or switched-on) actor is kept parked high above the player, hidden, while whatever it plays when it first loads plays out unseen
 +			float         velY{ 0.0f };           // the mob's vertical speed in Skyrim units per second, worked out from its reported positions
++			RE::NiPoint3  lockPos{};              // where the mob is taken to be for lock-on (smoothed; see PublishLockTargets)
++			bool          lockPlaced{ false };
 +		};
 +		// A stand-in is a skeever, and a skeever's head is a hand's breadth off the ground. Anything that puts something over an
 +		// actor's head (lock-on and target-HUD mods draw the name there) would put it there, a zombie's chest deep. So the stand-in is
@@ -5853,31 +5871,11 @@ index 0954b7f..cb23e20 100644
 +				}
 +				++it;
 +			}
- 		}
- 
--		// A vanilla weapon standing in for the Minecraft one: its impact set gives the blood
--		// spray and impact sound, its type the skill and sounds.
--		RE::TESObjectWEAP* StandInWeapon(std::uint32_t a_weapon)
++		}
++
 +		// A mob reported by Minecraft: make or move its stand-in. a_ev.formId = the mob's id, a/b/c = its position.
 +		void MobProxyEvent(RE::PlayerCharacter* a_player, const proto::McEvent& a_ev)
- 		{
--			RE::FormID id = 0;
--			switch (a_weapon) {
--			case proto::kWeaponBlade:
--				id = 0x00012EB7;  // Iron Sword
--				break;
--			case proto::kWeaponAxe:
--				id = 0x00013790;  // Iron War Axe
--				break;
--			case proto::kWeaponPierce:
--				id = 0x0001397E;  // Iron Dagger
--				break;
--			case proto::kWeaponArrow:
--				id = 0x00013985;  // Hunting Bow
--				break;
--			default:
--				id = 0x00013982;  // Iron Mace (fists, tools, blunt things)
--				break;
++		{
 +			const auto mobId = static_cast<std::int32_t>(a_ev.formId);
 +			if ((a_ev.flags & proto::kMobProxyGone) != 0) {
 +				mobNames.erase(mobId);
@@ -5960,29 +5958,38 @@ index 0954b7f..cb23e20 100644
 +					it->second.named = name->second;
 +				}
  			}
--			return RE::TESForm::LookupByID<RE::TESObjectWEAP>(id);
+-			processHit = reinterpret_cast<ProcessHitFn*>(target);
+-			hitDataCtor = reinterpret_cast<HitDataCtorFn*>(REL::ID(43995).address());
+-			logger::info("hit pipeline: Minecraft hits go through Skyrim's hit processing");
  		}
  
--		// The Skyrim skill a Minecraft hit trains: swords, maces and tools One-Handed; axes and
--		// tridents/spears in hand Two-Handed; arrows and anything thrown Archery; fists nothing.
--		RE::ActorValue HitSkill(const proto::McEvent& a_ev)
+-		// A vanilla weapon standing in for the Minecraft one: its impact set gives the blood
+-		// spray and impact sound, its type the skill and sounds.
+-		RE::TESObjectWEAP* StandInWeapon(std::uint32_t a_weapon)
 +		// A mob's health, eye height and velocity, from Minecraft (kEvMobVitals).
 +		void MobVitalsEvent(const proto::McEvent& a_ev)
  		{
--			if (a_ev.flags & proto::kHitProjectile) {
--				return RE::ActorValue::kArchery;
+-			RE::FormID id = 0;
+-			switch (a_weapon) {
+-			case proto::kWeaponBlade:
+-				id = 0x00012EB7;  // Iron Sword
+-				break;
+-			case proto::kWeaponAxe:
+-				id = 0x00013790;  // Iron War Axe
+-				break;
+-			case proto::kWeaponPierce:
+-				id = 0x0001397E;  // Iron Dagger
+-				break;
+-			case proto::kWeaponArrow:
+-				id = 0x00013985;  // Hunting Bow
+-				break;
+-			default:
+-				id = 0x00013982;  // Iron Mace (fists, tools, blunt things)
+-				break;
 +			const auto it = mobProxies.find(static_cast<std::int32_t>(a_ev.formId));
 +			if (it == mobProxies.end()) {
 +				return;
- 			}
--			switch (a_ev.weapon) {
--			case proto::kWeaponUnarmed:
--				return RE::ActorValue::kNone;
--			case proto::kWeaponAxe:
--			case proto::kWeaponPierce:
--				return RE::ActorValue::kTwoHanded;
--			default:
--				return RE::ActorValue::kOneHanded;
++			}
 +			auto& proxy = it->second;
 +			proxy.mcHealth = a_ev.a;
 +			proxy.mcMax = a_ev.b;
@@ -5995,17 +6002,17 @@ index 0954b7f..cb23e20 100644
 +				AbsorbProxyDamage(actor, proxy);  // anything Skyrim did since last frame is counted before the mob's health replaces it
 +				SyncProxyHealth(actor, proxy);
  			}
+-			return RE::TESForm::LookupByID<RE::TESObjectWEAP>(id);
  		}
  
--		// Skyrim's own skill experience (what its weapons, blocking, armour and crafting call), so
--		// skills level up with Skyrim's notification and count towards the character's level.
--		// Uses are counted like Skyrim counts them: a weapon hit is worth the weapon's damage.
--		void TrainSkill(RE::PlayerCharacter* a_player, RE::ActorValue a_skill, float a_uses)
+-		// The Skyrim skill a Minecraft hit trains: swords, maces and tools One-Handed; axes and
+-		// tridents/spears in hand Two-Handed; arrows and anything thrown Archery; fists nothing.
+-		RE::ActorValue HitSkill(const proto::McEvent& a_ev)
 +		// A mob's name, from Minecraft: 24 ASCII bytes spread over a, b, c, d, flags, weapon.
 +		void MobNameEvent(const proto::McEvent& a_ev)
  		{
--			if (a_skill == RE::ActorValue::kNone || !(a_uses >= 0.05f)) {
--				return;  // nothing, or a scratch (damage over time ticks)
+-			if (a_ev.flags & proto::kHitProjectile) {
+-				return RE::ActorValue::kArchery;
 +			std::array<char, 25> text{};
 +			std::memcpy(text.data() + 0, &a_ev.a, 4);
 +			std::memcpy(text.data() + 4, &a_ev.b, 4);
@@ -6018,13 +6025,14 @@ index 0954b7f..cb23e20 100644
 +			if (name.empty()) {
 +				return;
  			}
--			const float before = a_player->AsActorValueOwner()->GetBaseActorValue(a_skill);
--			a_player->AddSkillExperience(a_skill, std::min(a_uses, 500.0f));
--			const float after = a_player->AsActorValueOwner()->GetBaseActorValue(a_skill);
--			static int logged = 0;
--			if (after > before || logged < 8) {
--				++logged;
--				logger::info("skill {} +{:.1f} uses ({:.0f}{})", static_cast<int>(a_skill), a_uses, after, after > before ? ", levelled up" : "");
+-			switch (a_ev.weapon) {
+-			case proto::kWeaponUnarmed:
+-				return RE::ActorValue::kNone;
+-			case proto::kWeaponAxe:
+-			case proto::kWeaponPierce:
+-				return RE::ActorValue::kTwoHanded;
+-			default:
+-				return RE::ActorValue::kOneHanded;
 +			mobNames[mobId] = name;
 +			if (const auto it = mobProxies.find(mobId); it != mobProxies.end() && it->second.named != name) {
 +				if (auto* actor = RE::TESForm::LookupByID<RE::Actor>(it->second.formId)) {
@@ -6034,7 +6042,10 @@ index 0954b7f..cb23e20 100644
  			}
  		}
  
--		RE::NiAVObject* HitNode(RE::Actor* a_actor)
+-		// Skyrim's own skill experience (what its weapons, blocking, armour and crafting call), so
+-		// skills level up with Skyrim's notification and count towards the character's level.
+-		// Uses are counted like Skyrim counts them: a weapon hit is worth the weapon's damage.
+-		void TrainSkill(RE::PlayerCharacter* a_player, RE::ActorValue a_skill, float a_uses)
 +		// Each frame: stand-ins whose mob has gone quiet are dropped, and what Skyrim's NPCs took off a stand-in is
 +		// handed to Minecraft and given back.
 +		// Diagnostics for stand-ins that seem to vanish: what Skyrim says about one is logged whenever it changes (not every frame), so the
@@ -6042,19 +6053,19 @@ index 0954b7f..cb23e20 100644
 +		template <class A>
 +		void WatchProxy(A* a_actor, const MobProxy& a_proxy, bool a_skyrimMode)
  		{
--			auto* root = a_actor->Get3D();
--			if (!root) {
--				return nullptr;
+-			if (a_skill == RE::ActorValue::kNone || !(a_uses >= 0.05f)) {
+-				return;  // nothing, or a scratch (damage over time ticks)
 +			static std::unordered_map<RE::FormID, std::uint32_t> seen;
 +			static int                                           logged = 0;
 +			int state = -1;
 +			if constexpr (requires { a_actor->AsActorState()->actorState1.lifeState; }) {
 +				state = static_cast<int>(a_actor->AsActorState()->actorState1.lifeState);
  			}
--			for (const char* name : { "NPC Spine2 [Spn2]", "NPC Spine1 [Spn1]", "NPC Spine [Spn0]", "NPC Pelvis [Pelv]" }) {
--				if (auto* node = root->GetObjectByName(name)) {
--					return node;
--				}
+-			const float before = a_player->AsActorValueOwner()->GetBaseActorValue(a_skill);
+-			a_player->AddSkillExperience(a_skill, std::min(a_uses, 500.0f));
+-			const float after = a_player->AsActorValueOwner()->GetBaseActorValue(a_skill);
+-			static int logged = 0;
+-			if (after > before || logged < 8) {
 +			bool ragdoll = false;
 +			if constexpr (requires { a_actor->IsInRagdollState(); }) {
 +				ragdoll = a_actor->IsInRagdollState();
@@ -6070,11 +6081,85 @@ index 0954b7f..cb23e20 100644
 +			auto& last = seen[a_proxy.formId];
 +			if (last != key && logged < 150) {
 +				last = key;
-+				++logged;
+ 				++logged;
+-				logger::info("skill {} +{:.1f} uses ({:.0f}{})", static_cast<int>(a_skill), a_uses, after, after > before ? ", levelled up" : "");
 +				logger::info("Watch stand-in ({:08X}): {} disabled={} 3d={} loaded={} combat={} life={} ragdoll={} near-mob={} silent={}", a_proxy.formId,
 +					a_skyrimMode ? "skyrim-mode" : "minecraft-mode", disabled, has3d, loaded, combat, state, ragdoll, nearMob, silent);
  			}
+ 		}
+ 
+-		RE::NiAVObject* HitNode(RE::Actor* a_actor)
++		// ---- Lock-on without the stand-ins -------------------------------------------------------------------
++		// True Directional Movement (built with virtual targets, interface version 6) is handed every mob Minecraft reports as a point to
++		// lock on to, every frame, so locking on to a mob never depends on a stand-in actor being there and switched on. The stand-ins
++		// are handed over too, as actors it must not pick, so a mob is never offered twice. Without that build of True Directional
++		// Movement nothing here does anything.
++		TDM_API::IVTDM6*                    tdmApi = nullptr;
++		bool                                tdmSearched = false;
++		std::vector<TDM_API::VirtualTarget> lockTargets;
++		std::vector<std::uint32_t>          ignoredStandIns;
++
++		void PublishLockTargets(float a_delta)
+ 		{
+-			auto* root = a_actor->Get3D();
+-			if (!root) {
+-				return nullptr;
++			if (!tdmSearched) {
++				tdmSearched = true;
++				if (const auto module = GetModuleHandleA("TrueDirectionalMovement.dll")) {
++					if (const auto request = reinterpret_cast<TDM_API::_RequestPluginAPI>(GetProcAddress(module, "RequestPluginAPI"))) {
++						tdmApi = static_cast<TDM_API::IVTDM6*>(request(TDM_API::InterfaceVersion::V6));
++					}
++					if (tdmApi) {
++						logger::info("True Directional Movement takes Minecraft's mobs as lock-on targets (interface version 6)");
++					} else {
++						logger::warn("True Directional Movement has no virtual targets (an older build): lock-on only works on the stand-ins' actors");
++					}
++				} else {
++					logger::info("True Directional Movement isn't loaded");
++				}
+ 			}
+-			for (const char* name : { "NPC Spine2 [Spn2]", "NPC Spine1 [Spn1]", "NPC Spine [Spn0]", "NPC Pelvis [Pelv]" }) {
+-				if (auto* node = root->GetObjectByName(name)) {
+-					return node;
++			if (!tdmApi) {
++				return;
++			}
++
++			const float units = static_cast<float>(proto::kUnitsPerBlock);
++			lockTargets.clear();
++			for (auto& entry : mobProxies) {
++				auto& proxy = entry.second;
++				if (proxy.silence > 2.0f || (proxy.mcMax > 0.0f && proxy.mcHealth <= 0.0f)) {  // gone, or dead
++					proxy.lockPlaced = false;
++					continue;
++				}
++				const float ahead = std::min(proxy.silence, 0.25f);
++				RE::NiPoint3 mob = proxy.pos;
++				mob.x += proxy.velX * ahead * units;
++				mob.y -= proxy.velZ * ahead * units;  // (Minecraft's z is Skyrim's -y)
++				mob.z += proxy.velY * ahead;
++				if (!proxy.lockPlaced || mob.GetDistance(proxy.lockPos) > 3.0f * units) {
++					proxy.lockPos = mob;
++					proxy.lockPlaced = true;
++				} else {
++					const float follow = 1.0f - std::exp(-40.0f * a_delta);
++					proxy.lockPos.x += (mob.x - proxy.lockPos.x) * follow;
++					proxy.lockPos.y += (mob.y - proxy.lockPos.y) * follow;
++					proxy.lockPos.z += (mob.z - proxy.lockPos.z) * follow;
+ 				}
++				const float height = proxy.height > 0.2f ? proxy.height : 1.0f;  // blocks
++				TDM_API::VirtualTarget target{};
++				target.id = static_cast<std::uint32_t>(entry.first) + 1u;
++				target.x = proxy.lockPos.x;
++				target.y = proxy.lockPos.y;
++				target.z = proxy.lockPos.z + height * 0.65f * units;  // the middle of the body
++				lockTargets.push_back(target);
+ 			}
 -			return root;
++			ignoredStandIns.assign(proxyIds.begin(), proxyIds.end());
++			(void)tdmApi->SetVirtualTargets(SKSE::GetPluginHandle(), lockTargets.data(), static_cast<std::uint32_t>(lockTargets.size()));
++			(void)tdmApi->SetIgnoredActors(SKSE::GetPluginHandle(), ignoredStandIns.data(), static_cast<std::uint32_t>(ignoredStandIns.size()));
  		}
  
 -		// A Minecraft hit on an actor's stand-in: real damage, scaled so Minecraft gear stays
@@ -6085,6 +6170,7 @@ index 0954b7f..cb23e20 100644
 -			auto* actor = RE::TESForm::LookupByID<RE::Actor>(a_ev.formId);
 -			if (!actor || actor->IsDead()) {
 -				return;
++			PublishLockTargets(a_delta);
 +			for (auto hit = proxyPlayerHitAge.begin(); hit != proxyPlayerHitAge.end();) {
 +				hit->second += a_delta;
 +				hit = hit->second > 30.0f ? proxyPlayerHitAge.erase(hit) : std::next(hit);
@@ -6311,7 +6397,7 @@ index 0954b7f..cb23e20 100644
  		}
  
  		void KillPlayer(RE::PlayerCharacter* a_player, const proto::McEvent& a_ev)
-@@ -580,7 +2451,7 @@ namespace skycraft
+@@ -580,7 +2521,7 @@ namespace skycraft
  			for (auto& handle : lists->highActorHandles) {
  				auto actorPtr = handle.get();
  				auto* actor = actorPtr.get();
@@ -6320,7 +6406,7 @@ index 0954b7f..cb23e20 100644
  					continue;
  				}
  				const auto hazard = HazardAtActor(actor);
-@@ -698,6 +2569,7 @@ namespace skycraft
+@@ -698,6 +2639,7 @@ namespace skycraft
  			RE::NiPoint3 center;
  			float        radius;  // Minecraft blocks
  			float        delay;   // seconds: after the blast's damage has landed
@@ -6328,7 +6414,7 @@ index 0954b7f..cb23e20 100644
  		};
  		std::vector<PendingExplosion> pendingExplosions;
  
-@@ -786,6 +2658,9 @@ namespace skycraft
+@@ -786,6 +2728,9 @@ namespace skycraft
  					continue;
  				}
  				if (auto* actor = ref->As<RE::Actor>()) {
@@ -6338,7 +6424,7 @@ index 0954b7f..cb23e20 100644
  					if (!actor->IsDead()) {
  						if (auto* process = actor->GetActorRuntimeData().currentProcess) {
  							process->KnockExplosion(actor, a_blast.center, 25.0f * falloff * power);
-@@ -830,6 +2705,183 @@ namespace skycraft
+@@ -830,6 +2775,183 @@ namespace skycraft
  			}
  			logger::info("Minecraft explosion (radius {:.1f}): knocked {} people away, threw {} objects", a_blast.radius, people, objects);
  		}
@@ -6522,7 +6608,7 @@ index 0954b7f..cb23e20 100644
  	}
  
  	namespace Combat
-@@ -838,8 +2890,15 @@ namespace skycraft
+@@ -838,8 +2960,15 @@ namespace skycraft
  		{
  			REL::Relocation<std::uintptr_t> vtbl{ RE::VTABLE_PlayerCharacter[0] };
  			HandleHealthDamageHook::func = vtbl.write_vfunc(0x104, HandleHealthDamageHook::thunk);
@@ -6538,7 +6624,7 @@ index 0954b7f..cb23e20 100644
  			}
  			ResolveHitPipeline();
  			logger::info("combat hooks installed");
-@@ -854,20 +2913,66 @@ namespace skycraft
+@@ -854,20 +2983,66 @@ namespace skycraft
  				}
  				healthPrimed = false;
  				engaged = false;
@@ -6611,7 +6697,7 @@ index 0954b7f..cb23e20 100644
  			SetEssential(a_player, true);
  			WriteActorTable(a_player);
  			engagedTimer -= a_delta;
-@@ -878,29 +2983,11 @@ namespace skycraft
+@@ -878,29 +3053,11 @@ namespace skycraft
  
  			proto::McEvent ev;
  			while (link.PopEvent(ev)) {
@@ -6644,7 +6730,7 @@ index 0954b7f..cb23e20 100644
  			for (auto it = pendingExplosions.begin(); it != pendingExplosions.end();) {
  				it->delay -= a_delta;
  				if (it->delay <= 0.0f) {
-@@ -924,5 +3011,15 @@ namespace skycraft
+@@ -924,5 +3081,15 @@ namespace skycraft
  		}
  
  		bool PlayerEngaged() { return engaged; }
@@ -8684,6 +8770,272 @@ index 4a78706..ae60836 100644
  				return;
  			}
  			UploadLatestFrame();
+diff --git a/skse/src/TrueDirectionalMovementAPI.h b/skse/src/TrueDirectionalMovementAPI.h
+new file mode 100644
+index 0000000..0f7a390
+--- /dev/null
++++ b/skse/src/TrueDirectionalMovementAPI.h
+@@ -0,0 +1,260 @@
++#pragma once
++#include <functional>
++#include <stdint.h>
++
++/*
++* A copy of True Directional Movement's API header (with the virtual targets added in interface version 6).
++* The inline RequestPluginAPI is left out: SkyCraft looks the export up itself.
++*/
++	namespace TDM_API
++{
++	constexpr const auto TDMPluginName = "TrueDirectionalMovement";
++
++	using PluginHandle = SKSE::PluginHandle;
++	using ActorHandle = RE::ActorHandle;
++
++	// Available True Directional Movement interface versions
++	enum class InterfaceVersion : uint8_t
++	{
++		V1,
++		V2,
++		V3,
++		V4,
++		V5,
++		V6
++	};
++
++	// Error types that may be returned by the True Directional Movement API
++	enum class APIResult : uint8_t
++	{
++		// Your API call was successful
++		OK,
++
++		// You tried to release a resource that was not allocated to you
++		// Do not attempt to manipulate the requested resource if you receive this response
++		NotOwner,
++
++		// True Directional Movement currently must keep control of this resource for proper functionality
++		// Do not attempt to manipulate the requested resource if you receive this response
++		MustKeep,
++
++		// You have already been given control of this resource
++		AlreadyGiven,
++
++		// Another mod has been given control of this resource at the present time
++		// Do not attempt to manipulate the requested resource if you receive this response
++		AlreadyTaken,
++
++		// You sent a command on a thread that could cause a data race were it to be processed
++		// Do not attempt to manipulate the requested resource if you receive this response
++		BadThread,
++	};
++
++	enum class DirectionalMovementMode : uint8_t
++	{
++		// Directional movement is disabled, the movement is vanilla
++		kDisabled,
++
++		// Directional movement is enabled, but the player is facing the crosshair
++		kVanillaStyle,
++
++		// Directional movement is enabled, and the player is facing the direction of movement
++		kDirectional,
++		
++		// Directional movement is enabled, and the player has a target locked
++		kTargetLock
++	};
++
++	// True Directional Movement's modder interface
++	class IVTDM1
++	{
++	public:
++		/// <summary>
++		/// Get the thread ID True Directional Movement is running in.
++		/// You may compare this with the result of GetCurrentThreadId() to help determine
++		/// if you are using the correct thread.
++		/// </summary>
++		/// <returns>TID</returns>
++		[[nodiscard]] virtual unsigned long GetTDMThreadId() const noexcept = 0;
++
++		/// <summary>
++		/// Get the current state (enabled / disabled) of directional movement.
++		/// </summary>
++		/// <returns>The current state (true / false) of directional movement</returns>
++		[[nodiscard]] virtual bool GetDirectionalMovementState() const noexcept = 0;
++
++		/// <summary>
++		/// Get the current state (enabled / disabled) of target lock.
++		/// </summary>
++		/// <returns>The current state (true / false) of target lock</returns>
++		[[nodiscard]] virtual bool GetTargetLockState() const noexcept = 0;
++
++		/// <summary>
++		/// Get the actor handle of the currently locked target.
++		/// </summary>
++		/// <returns>The actor handle of the currently locked target</returns>
++		[[nodiscard]] virtual ActorHandle GetCurrentTarget() const noexcept = 0;
++
++		/// <summary>
++		/// Request the plugin to forcibly disable directional movement.
++		/// If granted, directional movement will be disabled for the duration of your control.
++		/// </summary>
++		/// <param name="a_myPluginHandle">Your assigned plugin handle</param>
++		/// <returns>OK, MustKeep, AlreadyGiven, AlreadyTaken</returns>
++		[[nodiscard]] virtual APIResult RequestDisableDirectionalMovement(PluginHandle a_myPluginHandle) noexcept = 0;
++
++		/// <summary>
++		/// Request the plugin to forcibly disable headtracking.
++		/// If granted, this mod's headtracking will be disabled for the duration of your control.
++		/// </summary>
++		/// <param name="a_myPluginHandle">Your assigned plugin handle</param>
++		/// <returns>OK, MustKeep, AlreadyGiven, AlreadyTaken</returns>
++		[[nodiscard]] virtual APIResult RequestDisableHeadtracking(PluginHandle a_myPluginHandle) noexcept = 0;
++
++		/// <summary>
++		/// Returns the current owner of the forced disable of directional movement.
++		/// </summary>
++		/// <returns>Handle or kPluginHandle_Invalid if no one currently owns the resource</returns>
++		virtual PluginHandle GetDisableDirectionalMovementOwner() const noexcept = 0;
++
++		/// <summary>
++		/// Returns the current owner of the forced disable of headtracking.
++		/// </summary>
++		/// <returns>Handle or kPluginHandle_Invalid if no one currently owns the resource</returns>
++		virtual PluginHandle GetDisableHeadtrackingOwner() const noexcept = 0;
++
++		/// <summary>
++		/// Release your forced disable of directional movement.
++		/// </summary>
++		/// <param name="a_myPluginHandle">Your assigned plugin handle</param>
++		/// <returns>OK, NotOwner</returns>
++		virtual APIResult ReleaseDisableDirectionalMovement(PluginHandle a_myPluginHandle) noexcept = 0;
++
++		/// <summary>
++		/// Release your forced disable of headtracking.
++		/// </summary>
++		/// <param name="a_myPluginHandle">Your assigned plugin handle</param>
++		/// <returns>OK, NotOwner</returns>
++		virtual APIResult ReleaseDisableHeadtracking(PluginHandle a_myPluginHandle) noexcept = 0;
++	};
++
++	class IVTDM2 : public IVTDM1
++	{
++	public:
++		/// <summary>
++		/// Request the control over the player character's yaw.
++		/// If granted, you may use the SetPlayerYaw function and TDM will not adjust the yaw for the duration of your control.
++		/// </summary>
++		/// <param name="a_myPluginHandle">Your assigned plugin handle</param>
++		/// <param name="a_yawRotationSpeedMultiplier">The speed multiplier to use when smoothly rotating to the desired yaw. 0 is instant.</param>
++		/// <returns>OK, MustKeep, AlreadyGiven, AlreadyTaken</returns>
++		[[nodiscard]] virtual APIResult RequestYawControl(PluginHandle a_myPluginHandle, float a_yawRotationSpeedMultiplier) noexcept = 0;
++
++		/// <summary>
++		/// Tries to set the player character's desired yaw. Will only do so if granted control.
++		/// </summary>
++		/// <param name="a_myPluginHandle">Your assigned plugin handle</param>
++		/// <param name="a_desiredYaw">The desired yaw</param>
++		/// <returns>OK, NotOwner</returns>
++		virtual APIResult SetPlayerYaw(PluginHandle a_myPluginHandle, float a_desiredYaw) noexcept = 0;
++
++		/// <summary>
++		/// Release your control over the player character's yaw.
++		/// </summary>
++		/// <param name="a_myPluginHandle">Your assigned plugin handle</param>
++		/// <returns>OK, NotOwner</returns>
++		virtual APIResult ReleaseYawControl(PluginHandle a_myPluginHandle) noexcept = 0;
++	};
++
++	class IVTDM3 : public IVTDM2
++	{
++	public:
++		/// <summary>
++		/// Get the current directional movement mode
++		/// </summary>
++		/// <returns>The current directional movement mode</returns>
++		[[nodiscard]] virtual DirectionalMovementMode GetDirectionalMovementMode() const noexcept = 0;
++
++		/// <summary>
++		/// Gets the original movement input vector, unaltered by TDM
++		/// </summary>
++		/// <returns>The original input vector</returns>
++		[[nodiscard]] virtual RE::NiPoint2 GetActualMovementInput() const noexcept = 0;
++	};
++
++	class IVTDM4 : public IVTDM3
++	{
++	public:
++		/// <summary>
++		/// Check if the target position for the camera is behind the target when target lock is enabled.
++		/// </summary>
++		/// <returns>true if target lock is enabled AND the target position is behind the camera. False otherwise.</returns>
++		[[nodiscard]] virtual bool IsTargetLockBehindTarget() const noexcept = 0;
++	};
++
++	class IVTDM5 : public IVTDM4
++	{
++	public:
++		/// <summary>
++		/// Request the plugin to forcibly disable target lock reticle.
++		/// If granted, target lock reticle will be disabled for the duration of your control.
++		/// </summary>
++		/// <param name="a_myPluginHandle">Your assigned plugin handle</param>
++		/// <returns>OK, MustKeep, AlreadyGiven, AlreadyTaken</returns>
++		[[nodiscard]] virtual APIResult RequestDisableTargetLock(PluginHandle a_myPluginHandle) noexcept = 0;
++
++		/// <summary>
++		/// Release your forced disable of target lock reticle.
++		/// </summary>
++		/// <param name="a_myPluginHandle">Your assigned plugin handle</param>
++		/// <returns>OK, NotOwner</returns>
++		virtual APIResult ReleaseDisableTargetLock(PluginHandle a_myPluginHandle) noexcept = 0;
++
++		/// <summary>
++		/// Returns the current owner of the forced disable of target lock reticle.
++		/// </summary>
++		/// <returns>Handle or kPluginHandle_Invalid if no one currently owns the resource</returns>
++		virtual PluginHandle GetDisableTargetLockOwner() const noexcept = 0;
++	};
++
++	// A target another mod wants the player to be able to lock on to, though there is no actor behind it (a mob from another game's
++	// world, say). The position is the point to look at and to keep the camera on: the middle of the body.
++	struct VirtualTarget
++	{
++		uint32_t id;  // not 0; stays the same for as long as the target exists
++		float    x, y, z;  // world position, in Skyrim's units
++	};
++
++	class IVTDM6 : public IVTDM5
++	{
++	public:
++		/// <summary>
++		/// Replace the whole set of virtual targets. Call it again whenever they move (every frame is fine); a target that is left out of
++		/// the call is gone, and if it was locked on to, the lock is dropped. Target lock picks among them and the actors in the game.
++		/// </summary>
++		/// <param name="a_myPluginHandle">Your assigned plugin handle</param>
++		/// <param name="a_targets">The targets (may be null if a_count is 0)</param>
++		/// <param name="a_count">How many</param>
++		/// <returns>OK</returns>
++		virtual APIResult SetVirtualTargets(PluginHandle a_myPluginHandle, const VirtualTarget* a_targets, uint32_t a_count) noexcept = 0;
++
++		/// <summary>
++		/// Replace the set of actors target lock must never pick (the stand-ins you made for something that is locked on to by way of a virtual target).
++		/// An actor that is locked on to and then listed is let go.
++		/// </summary>
++		/// <param name="a_myPluginHandle">Your assigned plugin handle</param>
++		/// <param name="a_formIds">Their form ids (may be null if a_count is 0)</param>
++		/// <param name="a_count">How many</param>
++		/// <returns>OK</returns>
++		virtual APIResult SetIgnoredActors(PluginHandle a_myPluginHandle, const uint32_t* a_formIds, uint32_t a_count) noexcept = 0;
++
++		/// <summary>
++		/// The id of the virtual target that is locked on to now.
++		/// </summary>
++		/// <returns>The id, or 0 if none</returns>
++		[[nodiscard]] virtual uint32_t GetCurrentVirtualTarget() const noexcept = 0;
++	};
++
++	typedef void* (*_RequestPluginAPI)(const InterfaceVersion interfaceVersion);
++
++}
 diff --git a/skse/src/WorldRender.cpp b/skse/src/WorldRender.cpp
 index b877ae5..22fc725 100644
 --- a/skse/src/WorldRender.cpp
