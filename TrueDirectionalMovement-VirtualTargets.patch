@@ -1,5 +1,5 @@
 diff --git a/src/DirectionalMovementHandler.cpp b/src/DirectionalMovementHandler.cpp
-index c7629e1..5213f95 100644
+index c7629e1..2b0bf64 100644
 --- a/src/DirectionalMovementHandler.cpp
 +++ b/src/DirectionalMovementHandler.cpp
 @@ -4,6 +4,10 @@
@@ -63,10 +63,18 @@ index c7629e1..5213f95 100644
  	auto playerCharacter = RE::PlayerCharacter::GetSingleton();
  	if (!playerCharacter) {
  		return;
-@@ -1487,6 +1497,33 @@ bool DirectionalMovementHandler::ToggleTargetLock(bool bEnable, bool bPressedMan
+@@ -1487,6 +1497,41 @@ bool DirectionalMovementHandler::ToggleTargetLock(bool bEnable, bool bPressedMan
  			actor = FindTarget(bPressedManually ? TargetLockSelectionMode::kCombined : TargetLockSelectionMode::kClosest);
  		}
  
++		// An actor another mod has asked TDM never to lock on to (SkyCraft's stand-ins for Minecraft's mobs, which are locked on to
++		// as virtual targets instead) is not a target, whichever way it was found (IDRC's, the crosshair's, the closest...).
++		if (actor) {
++			if (const auto picked = actor.get(); picked && IsActorIgnored(picked->GetFormID())) {
++				actor = RE::ActorHandle();
++			}
++		}
++
 +		// A virtual target (from another mod) may be the better pick, or the only one
 +		{
 +			const auto mode = bPressedManually ? TargetLockSelectionMode::kCombined : TargetLockSelectionMode::kClosest;
@@ -97,7 +105,7 @@ index c7629e1..5213f95 100644
  		if (actor) 
  		{
  			SetTarget(actor);
-@@ -1510,6 +1547,7 @@ bool DirectionalMovementHandler::ToggleTargetLock(bool bEnable, bool bPressedMan
+@@ -1510,6 +1555,7 @@ bool DirectionalMovementHandler::ToggleTargetLock(bool bEnable, bool bPressedMan
  
  	if (!bEnable || HasTargetLocked())
  	{
@@ -105,7 +113,7 @@ index c7629e1..5213f95 100644
  		SetTarget(RE::ActorHandle());
  
  		// Set graph variable
-@@ -1569,12 +1607,16 @@ RE::NiPoint3 DirectionalMovementHandler::GetTargetPosition() const
+@@ -1569,12 +1615,16 @@ RE::NiPoint3 DirectionalMovementHandler::GetTargetPosition() const
  		return _target.get()->GetLookingAtLocation();
  	}
  
@@ -123,7 +131,7 @@ index c7629e1..5213f95 100644
  	{
  		ToggleTargetLock(false);
  	}
-@@ -1631,6 +1673,10 @@ bool DirectionalMovementHandler::CheckCurrentTarget(RE::ActorHandle a_target, bo
+@@ -1631,6 +1681,10 @@ bool DirectionalMovementHandler::CheckCurrentTarget(RE::ActorHandle a_target, bo
  		return false;
  	}
  
@@ -134,7 +142,7 @@ index c7629e1..5213f95 100644
  	auto actorState = target->AsActorState();
  	auto currentProcess = target->GetActorRuntimeData().currentProcess;
  	if (!currentProcess || !currentProcess->InHighProcess() ||
-@@ -1687,7 +1733,7 @@ void DirectionalMovementHandler::UpdateTargetLock()
+@@ -1687,7 +1741,7 @@ void DirectionalMovementHandler::UpdateTargetLock()
  			ToggleTargetLock(false);
  		}
  
@@ -143,7 +151,7 @@ index c7629e1..5213f95 100644
  		{
  			ToggleTargetLock(false);
  		}
-@@ -1712,6 +1758,9 @@ bool DirectionalMovementHandler::IsActorValidTarget(RE::ActorPtr a_actor, bool a
+@@ -1712,6 +1766,9 @@ bool DirectionalMovementHandler::IsActorValidTarget(RE::ActorPtr a_actor, bool a
  	if (a_actor->formType != RE::FormType::ActorCharacter)
  		return false;
  
@@ -153,7 +161,7 @@ index c7629e1..5213f95 100644
  	if (a_actor->IsDead())
  		return false;
  
-@@ -1841,6 +1890,11 @@ void DirectionalMovementHandler::SwitchTarget(Direction a_direction)
+@@ -1841,6 +1898,11 @@ void DirectionalMovementHandler::SwitchTarget(Direction a_direction)
  		return;  // too soon
  	}
  
@@ -165,10 +173,17 @@ index c7629e1..5213f95 100644
  	//RE::ActorHandle actor = GetClosestTarget(FindTargetsByDirection(a_direction), _target);
  
  	if (SwitchTargetPoint(a_direction)) {
-@@ -2200,6 +2254,11 @@ bool DirectionalMovementHandler::SetDesiredAngleToMagnetismTarget()
+@@ -2200,6 +2262,18 @@ bool DirectionalMovementHandler::SetDesiredAngleToMagnetismTarget()
  
  void DirectionalMovementHandler::SetTarget(RE::ActorHandle a_target)
  {
++	// Last line of defence: nothing on the ignored list (SkyCraft's stand-ins) is ever locked on to, by any route.
++	if (a_target) {
++		if (const auto picked = a_target.get(); picked && IsActorIgnored(picked->GetFormID())) {
++			return;
++		}
++	}
++
 +	if (a_target && _virtualTargetId != 0) {
 +		_virtualTargetId = 0;  // an actor is locked on to instead
 +		UpdateVirtualTargetBar();  // (its bar goes)
@@ -177,7 +192,7 @@ index c7629e1..5213f95 100644
  	if (_target == a_target) {
  		return;
  	}
-@@ -2231,6 +2290,411 @@ void DirectionalMovementHandler::SetTarget(RE::ActorHandle a_target)
+@@ -2231,6 +2305,411 @@ void DirectionalMovementHandler::SetTarget(RE::ActorHandle a_target)
  	}
  }
  
@@ -589,7 +604,7 @@ index c7629e1..5213f95 100644
  void DirectionalMovementHandler::SetSoftTarget(RE::ActorHandle a_softTarget)
  {
  	if (a_softTarget == _softTarget) {
-@@ -2667,12 +3131,15 @@ void DirectionalMovementHandler::LookAtTarget(RE::ActorHandle a_target)
+@@ -2667,12 +3146,15 @@ void DirectionalMovementHandler::LookAtTarget(RE::ActorHandle a_target)
  		return;
  	}
  
@@ -608,7 +623,7 @@ index c7629e1..5213f95 100644
  	auto playerCharacter = RE::PlayerCharacter::GetSingleton();
  	auto playerCamera = RE::PlayerCamera::GetSingleton();
  	RE::ThirdPersonState* thirdPersonState = nullptr;
-@@ -2941,6 +3408,11 @@ void DirectionalMovementHandler::OnPreLoadGame()
+@@ -2941,6 +3423,11 @@ void DirectionalMovementHandler::OnPreLoadGame()
  	_bJustDodged_Legacy = false;
  	_attackState = AttackState::kNone;
  	_target = RE::ActorHandle();
