@@ -4099,7 +4099,7 @@ index 0000000..0cbdd07
 +	}
 +}
 diff --git a/skse/src/Combat.cpp b/skse/src/Combat.cpp
-index 0954b7f..be58ddb 100644
+index 0954b7f..30259e5 100644
 --- a/skse/src/Combat.cpp
 +++ b/skse/src/Combat.cpp
 @@ -1,4 +1,7 @@
@@ -4308,7 +4308,7 @@ index 0954b7f..be58ddb 100644
  				const auto mc = SkyToMc(pos);
  				r.x = static_cast<float>(mc.x);
  				r.y = static_cast<float>(mc.y);
-@@ -230,171 +385,1957 @@ namespace skycraft
+@@ -230,171 +385,1958 @@ namespace skycraft
  				logger::info("hit pipeline: not on AE; using plain damage");
  				return;
  			}
@@ -6154,6 +6154,7 @@ index 0954b7f..be58ddb 100644
 +				target.x = proxy.lockPos.x;
 +				target.y = proxy.lockPos.y;
 +				target.z = proxy.lockPos.z + height * 0.65f * units;  // the middle of the body
++				target.actorFormId = proxy.formId;  // its stand-in has the mob's name and health: TrueHUD shows them as a bar while it is locked on to
 +				lockTargets.push_back(target);
  			}
 -			return root;
@@ -6397,7 +6398,7 @@ index 0954b7f..be58ddb 100644
  		}
  
  		void KillPlayer(RE::PlayerCharacter* a_player, const proto::McEvent& a_ev)
-@@ -580,7 +2521,7 @@ namespace skycraft
+@@ -580,7 +2522,7 @@ namespace skycraft
  			for (auto& handle : lists->highActorHandles) {
  				auto actorPtr = handle.get();
  				auto* actor = actorPtr.get();
@@ -6406,7 +6407,7 @@ index 0954b7f..be58ddb 100644
  					continue;
  				}
  				const auto hazard = HazardAtActor(actor);
-@@ -698,6 +2639,7 @@ namespace skycraft
+@@ -698,6 +2640,7 @@ namespace skycraft
  			RE::NiPoint3 center;
  			float        radius;  // Minecraft blocks
  			float        delay;   // seconds: after the blast's damage has landed
@@ -6414,7 +6415,7 @@ index 0954b7f..be58ddb 100644
  		};
  		std::vector<PendingExplosion> pendingExplosions;
  
-@@ -786,6 +2728,9 @@ namespace skycraft
+@@ -786,6 +2729,9 @@ namespace skycraft
  					continue;
  				}
  				if (auto* actor = ref->As<RE::Actor>()) {
@@ -6424,7 +6425,7 @@ index 0954b7f..be58ddb 100644
  					if (!actor->IsDead()) {
  						if (auto* process = actor->GetActorRuntimeData().currentProcess) {
  							process->KnockExplosion(actor, a_blast.center, 25.0f * falloff * power);
-@@ -830,6 +2775,183 @@ namespace skycraft
+@@ -830,6 +2776,183 @@ namespace skycraft
  			}
  			logger::info("Minecraft explosion (radius {:.1f}): knocked {} people away, threw {} objects", a_blast.radius, people, objects);
  		}
@@ -6608,7 +6609,7 @@ index 0954b7f..be58ddb 100644
  	}
  
  	namespace Combat
-@@ -838,8 +2960,15 @@ namespace skycraft
+@@ -838,8 +2961,15 @@ namespace skycraft
  		{
  			REL::Relocation<std::uintptr_t> vtbl{ RE::VTABLE_PlayerCharacter[0] };
  			HandleHealthDamageHook::func = vtbl.write_vfunc(0x104, HandleHealthDamageHook::thunk);
@@ -6624,7 +6625,7 @@ index 0954b7f..be58ddb 100644
  			}
  			ResolveHitPipeline();
  			logger::info("combat hooks installed");
-@@ -854,20 +2983,66 @@ namespace skycraft
+@@ -854,20 +2984,66 @@ namespace skycraft
  				}
  				healthPrimed = false;
  				engaged = false;
@@ -6697,7 +6698,7 @@ index 0954b7f..be58ddb 100644
  			SetEssential(a_player, true);
  			WriteActorTable(a_player);
  			engagedTimer -= a_delta;
-@@ -878,29 +3053,11 @@ namespace skycraft
+@@ -878,29 +3054,11 @@ namespace skycraft
  
  			proto::McEvent ev;
  			while (link.PopEvent(ev)) {
@@ -6730,7 +6731,7 @@ index 0954b7f..be58ddb 100644
  			for (auto it = pendingExplosions.begin(); it != pendingExplosions.end();) {
  				it->delay -= a_delta;
  				if (it->delay <= 0.0f) {
-@@ -924,5 +3081,15 @@ namespace skycraft
+@@ -924,5 +3082,15 @@ namespace skycraft
  		}
  
  		bool PlayerEngaged() { return engaged; }
@@ -7520,7 +7521,7 @@ index 3bb4d34..24cb7d0 100644
  				Perf::Scope timer(Perf::kDigMeshes);
  				Dig::UpdateMeshes(digSettled > 3.0f ? a_player : nullptr, a_delta, !dugChanged.empty());
 diff --git a/skse/src/Game.h b/skse/src/Game.h
-index 05788b1..686ba97 100644
+index 05788b1..2e787dd 100644
 --- a/skse/src/Game.h
 +++ b/skse/src/Game.h
 @@ -17,6 +17,20 @@ namespace skycraft
@@ -7586,12 +7587,11 @@ index 05788b1..686ba97 100644
  	}
  
  	namespace BlockLights
-@@ -146,6 +177,23 @@ namespace skycraft
+@@ -146,6 +177,22 @@ namespace skycraft
  		void OnSolids(const std::uint8_t* a_data, std::uint32_t a_bytes);
  		void Clear();
  		bool SolidAt(std::int32_t a_x, std::int32_t a_y, std::int32_t a_z);
 +		// The jump button went down (input sink): HoldPlayerUp checks that Skyrim really started the jump.
-+		void NoteJumpPressed();
 +		// Minecraft's exact collision boxes (blocks, absolute Minecraft coordinates, y up). A block that
 +		// isn't a full cube (slab, stair, fence, carpet...) has its own boxes; a full one has one cube.
 +		struct BlockBox
@@ -7610,7 +7610,7 @@ index 05788b1..686ba97 100644
  		// For the blocks' contact shadows (any thread): sets a_bit in a_out[x + w*(y + h*z)] for
  		// each solid block of the box at a_origin (Minecraft block coords) of a_size blocks. The
  		// generation changes whenever any section's blocks do.
-@@ -153,6 +201,11 @@ namespace skycraft
+@@ -153,6 +200,11 @@ namespace skycraft
  		std::uint32_t Generation();
  		// Main thread, every frame: NPCs overlapping solid Minecraft blocks are pushed back out.
  		void PushActorsOut(RE::PlayerCharacter* a_player, float a_delta);
@@ -7623,7 +7623,7 @@ index 05788b1..686ba97 100644
  
  	namespace WorldRender
 diff --git a/skse/src/Input.cpp b/skse/src/Input.cpp
-index 092862e..580093c 100644
+index 092862e..6b42d97 100644
 --- a/skse/src/Input.cpp
 +++ b/skse/src/Input.cpp
 @@ -1,5 +1,14 @@
@@ -7834,13 +7834,10 @@ index 092862e..580093c 100644
  
  				for (auto* e = *a_event; e; e = e->next) {
  					switch (e->GetEventType()) {
-@@ -132,14 +304,38 @@ namespace skycraft
+@@ -132,14 +304,35 @@ namespace skycraft
  							auto* button = e->AsButtonEvent();
  							const bool down = button->IsDown();
  							const bool up = button->IsUp();
-+							if (down && st.skyrimMode && !menuOpen && button->userEvent == RE::UserEvents::GetSingleton()->jump) {
-+								NpcBlocks::NoteJumpPressed();
-+							}
 +							// The controls switch works in either mode, whoever has the input.
 +							if (button->GetDevice() == RE::INPUT_DEVICE::kKeyboard && button->GetIDCode() == toggleKey) {
 +								if (down) {
@@ -7874,7 +7871,7 @@ index 092862e..580093c 100644
  									if (IsSkyrimMenuKey(code)) {
  										break;  // MenuControls (see the hook below) opens Skyrim's menu
  									}
-@@ -176,7 +372,7 @@ namespace skycraft
+@@ -176,7 +369,7 @@ namespace skycraft
  							break;
  						}
  					case RE::INPUT_EVENT_TYPE::kChar:
@@ -7883,7 +7880,7 @@ index 092862e..580093c 100644
  							link.PushInput(proto::kInText, 0, static_cast<std::int32_t>(e->AsCharEvent()->keyCode));
  						}
  						break;
-@@ -184,6 +380,30 @@ namespace skycraft
+@@ -184,6 +377,30 @@ namespace skycraft
  						break;
  					}
  				}
@@ -7914,7 +7911,7 @@ index 092862e..580093c 100644
  				return RE::BSEventNotifyControl::kContinue;
  			}
  		};
-@@ -201,13 +421,21 @@ namespace skycraft
+@@ -201,13 +418,21 @@ namespace skycraft
  				}
  				std::vector<RE::InputEvent*> keep;
  				std::vector<RE::InputEvent*> all;
@@ -7940,7 +7937,7 @@ index 092862e..580093c 100644
  							keep.push_back(e);
  						}
  					}
-@@ -250,11 +478,64 @@ namespace skycraft
+@@ -250,11 +475,64 @@ namespace skycraft
  
  	namespace Input
  	{
@@ -8006,7 +8003,7 @@ index 092862e..580093c 100644
  			REL::Relocation<std::uintptr_t> vtbl{ RE::VTABLE_MenuControls[0] };
  			MenuControlsHook::func = vtbl.write_vfunc(0x1, MenuControlsHook::thunk);
  			REL::Relocation<std::uintptr_t> playerVtbl{ RE::VTABLE_PlayerControls[0] };
-@@ -274,6 +555,11 @@ namespace skycraft
+@@ -274,6 +552,11 @@ namespace skycraft
  			Link::Get().PushInput(proto::kInReleaseAll, 0);
  		}
  
@@ -8071,7 +8068,7 @@ index 741fcca..8ca0083 100644
  
  namespace skycraft::Launcher
 diff --git a/skse/src/NpcBlocks.cpp b/skse/src/NpcBlocks.cpp
-index 5e25a7d..afb03c9 100644
+index 5e25a7d..27c37c4 100644
 --- a/skse/src/NpcBlocks.cpp
 +++ b/skse/src/NpcBlocks.cpp
 @@ -1,4 +1,6 @@
@@ -8126,7 +8123,7 @@ index 5e25a7d..afb03c9 100644
  	}
  
  	namespace NpcBlocks
-@@ -69,16 +102,25 @@ namespace skycraft
+@@ -69,16 +102,18 @@ namespace skycraft
  			++solidsGeneration;
  			if (hdr->count == 0 || a_bytes < sizeof(proto::RenSolids) + 512) {
  				solids.erase(key);
@@ -8137,13 +8134,6 @@ index 5e25a7d..afb03c9 100644
  		}
  
 -		void Clear()
-+		std::atomic<bool> jumpPressed{ false };
-+
-+	void NoteJumpPressed()
-+	{
-+		jumpPressed.store(true, std::memory_order_relaxed);
-+	}
-+
 +	void Clear()
  		{
  			std::unique_lock lock(solidsLock);
@@ -8153,7 +8143,7 @@ index 5e25a7d..afb03c9 100644
  		}
  
  		std::uint32_t Generation() { return solidsGeneration.load(); }
-@@ -120,6 +162,132 @@ namespace skycraft
+@@ -120,6 +155,132 @@ namespace skycraft
  			}
  		}
  
@@ -8286,7 +8276,7 @@ index 5e25a7d..afb03c9 100644
  		bool SolidAt(std::int32_t a_x, std::int32_t a_y, std::int32_t a_z)
  		{
  			std::shared_lock lock(solidsLock);
-@@ -158,7 +326,7 @@ namespace skycraft
+@@ -158,7 +319,7 @@ namespace skycraft
  			for (auto& handle : lists->highActorHandles) {
  				auto actorPtr = handle.get();
  				auto* actor = actorPtr.get();
@@ -8295,7 +8285,7 @@ index 5e25a7d..afb03c9 100644
  					continue;
  				}
  				const auto   sky = actor->GetPosition();
-@@ -169,37 +337,15 @@ namespace skycraft
+@@ -169,37 +330,15 @@ namespace skycraft
  				const int y0 = int(std::floor(mc.y + 0.3)), y1 = int(std::floor(mc.y + h - 0.1));
  				double    cx = mc.x, cz = mc.z;
  				bool      moved = false;
@@ -8341,7 +8331,7 @@ index 5e25a7d..afb03c9 100644
  					}
  					if (std::abs(pushX) < 1e-4 && std::abs(pushZ) < 1e-4) {
  						break;
-@@ -250,5 +396,414 @@ namespace skycraft
+@@ -250,5 +389,374 @@ namespace skycraft
  				detours.clear();
  			}
  		}
@@ -8357,19 +8347,6 @@ index 5e25a7d..afb03c9 100644
 +					v.quad.m128_f32[2] = 0.0f;
 +					a_controller->SetLinearVelocityImpl(v);
 +				}
-+			}
-+		}
-+
-+		// Jump started by hand: the same upward speed Skyrim's own jump has in the log (about 4.7), and the air state.
-+		template <class C, class V = RE::hkVector4>
-+		void KickJump(C* a_controller)
-+		{
-+			if constexpr (requires(V v) { a_controller->GetLinearVelocityImpl(v); v.quad.m128_f32[2]; a_controller->SetLinearVelocityImpl(v); }) {
-+				V v;
-+				a_controller->GetLinearVelocityImpl(v);
-+				v.quad.m128_f32[2] = 4.7f;
-+				a_controller->SetLinearVelocityImpl(v);
-+				a_controller->context.currentState = RE::hkpCharacterStateType::kInAir;
 +			}
 +		}
 +
@@ -8581,33 +8558,6 @@ index 5e25a7d..afb03c9 100644
 +			// (state 0): that read as a jump, so the standing hold was dropped for 0.2 s again and again (the bumping, and the
 +			// inconsistent jumps). Rising only counts in the air.
 +			const bool   rising = controller && controller->context.currentState == RE::hkpCharacterStateType::kInAir && UpSpeed(controller) > 0.5f;
-+			// The jump button was pressed while Minecraft has the player on a block, and Skyrim has not started a jump half a second
-+			// later (it refuses at some edges and between two blocks: its own support check disagrees with Minecraft's). Log why, and jump
-+			// by hand so the button always works where the player stands.
-+			static float pendingJump = 0.0f;
-+			if (jumpPressed.exchange(false)) {
-+				pendingJump = 0.5f;
-+			}
-+			if (pendingJump > 0.0f) {
-+				if (jumpState || rising) {
-+					pendingJump = 0.0f;  // Skyrim jumped by itself
-+				} else {
-+					pendingJump -= a_delta;
-+					if (pendingJump <= 0.0f) {
-+						pendingJump = 0.0f;
-+						if (controller && move.y <= 0.03 && probe > -kProbe + 1e-6) {
-+							static int announcedKick = 0;
-+							if (announcedKick < 30) {
-+								++announcedKick;
-+								logger::info("Skyrim control: jump pressed, Skyrim did not jump; jumping by hand (state {}, landed {}, stoodUp {}, probe {:.3f}, move.y {:.3f}, airTime {:.2f})",
-+									int(controller->context.currentState), landed, stoodUp, probe, move.y, airTime);
-+							}
-+							KickJump(controller);
-+							jumpLatch = 0.20f;
-+						}
-+					}
-+				}
-+			}
 +			if (jumpState || rising) {
 +				jumpLatch = 0.20f;
 +			} else if (jumpLatch > 0.0f) {
@@ -8772,10 +8722,10 @@ index 4a78706..ae60836 100644
  			UploadLatestFrame();
 diff --git a/skse/src/TrueDirectionalMovementAPI.h b/skse/src/TrueDirectionalMovementAPI.h
 new file mode 100644
-index 0000000..0f7a390
+index 0000000..973814f
 --- /dev/null
 +++ b/skse/src/TrueDirectionalMovementAPI.h
-@@ -0,0 +1,260 @@
+@@ -0,0 +1,261 @@
 +#pragma once
 +#include <functional>
 +#include <stdint.h>
@@ -9001,6 +8951,7 @@ index 0000000..0f7a390
 +	{
 +		uint32_t id;  // not 0; stays the same for as long as the target exists
 +		float    x, y, z;  // world position, in Skyrim's units
++		uint32_t actorFormId;  // optional (0: none): an actor that stands for the target, for TrueHUD's name and health bar while it is locked on to
 +	};
 +
 +	class IVTDM6 : public IVTDM5
@@ -9168,7 +9119,7 @@ index b877ae5..22fc725 100644
  				logger::info("in-frame block drawing: hooked after Main::RenderWorld");
  			}
 diff --git a/skse/src/main.cpp b/skse/src/main.cpp
-index eb548b4..0789e12 100644
+index eb548b4..d6f65da 100644
 --- a/skse/src/main.cpp
 +++ b/skse/src/main.cpp
 @@ -21,6 +21,9 @@ namespace
@@ -9185,7 +9136,7 @@ index eb548b4..0789e12 100644
  	SetupLog();
  	skycraft::CrashLog::Install();
  	logger::info("SkyCraft {} loading (runtime {})", "0.1.2", a_skse->RuntimeVersion().string());
-+	logger::info("patch revision 18 (jump button: logs and jumps by hand when Skyrim refuses while Minecraft has the player on a block; revision 17: crate sides and rim contacts no longer reach the player: edges, seams and corners; revision 16: ledge assist rises over several frames; revision 15: stand-in health follows the mob by more ways, logs for the stand-in switching off; revision 14: no riding up block sides, steadier landings; revision 13: walking no longer read as jumping, ledge assist only in the air; collision: standing hold, slide stop, jump off blocks, ledge assist, steadier standing, friction when still; starts in Skyrim mode; stand-ins last as long as their mob, health 1:1)");
++	logger::info("patch revision 19 (the by-hand jump is gone: Skyrim's own jump is all there is; revision 18: jump button logs and jumps by hand when Skyrim refuses while Minecraft has the player on a block; revision 17: crate sides and rim contacts no longer reach the player: edges, seams and corners; revision 16: ledge assist rises over several frames; revision 15: stand-in health follows the mob by more ways, logs for the stand-in switching off; revision 14: no riding up block sides, steadier landings; revision 13: walking no longer read as jumping, ledge assist only in the air; collision: standing hold, slide stop, jump off blocks, ledge assist, steadier standing, friction when still; starts in Skyrim mode; stand-ins last as long as their mob, health 1:1)");
  	SKSE::GetMessagingInterface()->RegisterListener(OnMessage);
  	// As early as possible: Minecraft takes about as long to start as Skyrim does to reach its menu.
  	skycraft::Launcher::StartMinecraft();
