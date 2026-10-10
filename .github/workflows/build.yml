@@ -4,6 +4,7 @@
 # is already in the source; the patch adds world reset, show world, mobs, mob roaming, roaming on rough
 # ground, chat input, mob life, mob combat, mob polish and mob hit effects, stand-in cleanup, no mobs in settlements, lock-on on the mob's body, stand-in damage guard and 1:1 stand-in health, and a body-width block collision for Skyrim mode) is in the root of the repo, it is applied
 # before building, and skipped if the source already has it.
+# The collision work (Minecraft's collision moves the player in Skyrim mode) is part of SkyCraft-Patch.patch itself; there is no separate collision patch.
 # A second job ("tdm-patch") builds True Directional Movement from its own source with
 # TrueDirectionalMovement-VirtualTargets.patch (also in the root of the repo) applied, so TDM can lock on to Minecraft's mobs, and
 # uploads it as its own optional zip: TrueDirectionalMovement.dll for SKSE\\Plugins, to be installed over TDM's, the way TDM's
@@ -277,9 +278,9 @@ jobs:
             grep -aq "back on the ground inside the physics step" skse/build/RelWithDebInfo/SkyCraft.dll \
               && echo "SkyCraft.dll has the in-step ground hold." \
               || { echo "::error::SkyCraft.dll was built without the in-step ground hold."; exit 1; }
-            grep -aq "patch revision 19" skse/build/RelWithDebInfo/SkyCraft.dll \
-              && echo "SkyCraft.dll is patch revision 19." \
-              || { echo "::error::SkyCraft.dll was built without patch revision 19 (is the newest SkyCraft-Patch.patch in the repo?)."; exit 1; }
+            grep -aq "patch revision 20" skse/build/RelWithDebInfo/SkyCraft.dll \
+              && echo "SkyCraft.dll is patch revision 20." \
+              || { echo "::error::SkyCraft.dll was built without patch revision 20 (is the newest SkyCraft-Patch.patch in the repo?)."; exit 1; }
           fi
 
       - name: Check the ledge assist made it into the build
@@ -307,6 +308,15 @@ jobs:
             grep -aq "crate side and edge contacts ignored" skse/build/RelWithDebInfo/SkyCraft.dll \
               && echo "SkyCraft.dll has the crate edge-contact filter." \
               || { echo "::error::SkyCraft.dll was built without the crate edge-contact filter."; exit 1; }
+          fi
+
+      - name: Check True Directional Movement is told to ignore the stand-ins
+        shell: bash
+        run: |
+          if [ -f SkyCraft-Patch.patch ] || grep -q PublishIgnoredStandIns skse/src/Combat.cpp; then
+            grep -aq "told not to lock on to stand-in actors" skse/build/RelWithDebInfo/SkyCraft.dll \
+              && echo "SkyCraft.dll hands True Directional Movement the stand-ins to ignore." \
+              || { echo "::error::SkyCraft.dll was built without the stand-in ignore list for True Directional Movement."; exit 1; }
           fi
 
       - name: Upload the mod
@@ -418,7 +428,8 @@ jobs:
 
           Install over True Directional Movement (it needs TDM's other files); this DLL replaces TDM's.
           It is TDM $(git -C tdm rev-parse --short HEAD) with TrueDirectionalMovement-VirtualTargets.patch applied, which lets a mod hand
-          TDM things to lock on to that aren't actors (SkyCraft hands it Minecraft's mobs). Nothing else changes.
+          TDM things to lock on to that aren't actors (SkyCraft hands it Minecraft's mobs), and a list of actors TDM must never lock on
+          to (SkyCraft's stand-ins, so a mob is only ever locked on to once). Nothing else changes.
           True Directional Movement is by Ersh, GPL-3.0 with its modding exception (COPYING, EXCEPTIONS). The source is
           https://github.com/ersh1/TrueDirectionalMovement plus the patch included here.
           "@ | Set-Content "$stage\README.txt"
