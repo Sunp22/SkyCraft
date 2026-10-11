@@ -2,11 +2,12 @@
 #
 # Put this file in your repo as .github/workflows/build.yml. If SkyCraft-Patch.patch is in the root of the repo (control mode is already
 # in the source; the patch adds world reset, show world, mobs, mob roaming, chat input, mob life, mob combat, mob polish and mob hit
-# effects, no mobs in settlements, real-crate block collision for Skyrim mode, and Minecraft's hostile mobs as lock-on targets), it is
+# effects, no mobs in settlements, block collision for Skyrim mode (section models of merged boxes, real crates as the fallback), and Minecraft's mobs as lock-on targets), it is
 # applied before building, and skipped if the source already has it.
 #
-# Block collision in Skyrim's own control mode is real: invisible crates on the blocks around you (BlockCrates.cpp), which Skyrim's own
-# character controller stands, steps and jumps on. There is no simulated collision holding the player up any more.
+# Block collision in Skyrim's own control mode is real: every section of Minecraft's blocks is written as a small collision-only model of
+# merged boxes (BlockCollision.cpp) and loaded as an invisible static, so the player, NPCs and projectiles all meet the blocks. If that
+# can't work on an install, invisible crates on the blocks around you (BlockCrates.cpp) hold the player up instead.
 #
 # A second job ("tdm-patch") builds True Directional Movement from its own source with TrueDirectionalMovement-VirtualTargets.patch (also
 # in the root of the repo) applied, and uploads it as its own zip: TrueDirectionalMovement.dll for SKSE\\Plugins, to be installed over TDM's,
@@ -187,7 +188,7 @@ jobs:
               || { echo "::error::SkyCraft.dll was built without the settlement check."; exit 1; }
           fi
 
-      - name: Check the real-crate block collision and mob lock-on made it into the build
+      - name: Check the block collision and mob lock-on made it into the build
         shell: bash
         run: |
           if [ -f SkyCraft-Patch.patch ] || grep -q LockOn::Install skse/src/main.cpp; then
@@ -201,9 +202,12 @@ jobs:
             if grep -aq "Skyrim control: Minecraft block collision" skse/build/RelWithDebInfo/SkyCraft.dll; then
               echo "::error::SkyCraft.dll still has the simulated block collision (is an old SkyCraft-Patch.patch in the repo?)."; exit 1
             fi
-            grep -aq "patch revision 22" skse/build/RelWithDebInfo/SkyCraft.dll \
-              && echo "SkyCraft.dll is patch revision 22." \
-              || { echo "::error::SkyCraft.dll was built without patch revision 22 (is the newest SkyCraft-Patch.patch in the repo?)."; exit 1; }
+            grep -aq "patch revision 23" skse/build/RelWithDebInfo/SkyCraft.dll \
+              && echo "SkyCraft.dll is patch revision 23." \
+              || { echo "::error::SkyCraft.dll was built without patch revision 23 (is the newest SkyCraft-Patch.patch in the repo?)."; exit 1; }
+            grep -aq "Block collision: on" skse/build/RelWithDebInfo/SkyCraft.dll \
+              && echo "SkyCraft.dll has the block collision models." \
+              || { echo "::error::SkyCraft.dll was built without the block collision models."; exit 1; }
           fi
 
       - name: Upload the mod
