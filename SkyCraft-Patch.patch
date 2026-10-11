@@ -3314,10 +3314,10 @@ index 92b585a..d5e586c 100644
 +fRange = 40
 diff --git a/skse/src/BlockCollision.cpp b/skse/src/BlockCollision.cpp
 new file mode 100644
-index 0000000..a756692
+index 0000000..926da09
 --- /dev/null
 +++ b/skse/src/BlockCollision.cpp
-@@ -0,0 +1,599 @@
+@@ -0,0 +1,761 @@
 +#include "Game.h"
 +#include "CollisionNif.h"
 +
@@ -3408,6 +3408,25 @@ index 0000000..a756692
 +		};
 +		Probe probe;
 +
++		// Tells which details of the .nif Skyrim is particular about: the first time a section model is made, tiny models that differ in
++		// those details are put in the world side by side, and the log says which of them Skyrim loaded. The first that loads is then used
++		// for every section model.
++		struct Variant
++		{
++			std::string            label;
++			collisionnif::Options  opts;
++			RE::FormID             refId{ 0 };
++			std::string            file;
++			float                  waited{ 0.0f };
++			bool                   forced{ false };
++			bool                   done{ false };
++			bool                   ok{ false };
++		};
++		std::vector<Variant>  variants;
++		bool                  variantsStarted = false;
++		bool                  variantsDone = false;
++		collisionnif::Options activeOpts;
++
 +		std::uint64_t Key(int a_x, int a_y, int a_z)
 +		{
 +			return (std::uint64_t(std::uint32_t(a_x) & 0x3FFFFF) << 42) | (std::uint64_t(std::uint32_t(a_z) & 0x3FFFFF) << 20) | (std::uint64_t(std::uint32_t(a_y) & 0xFFFFF));
@@ -3432,6 +3451,25 @@ index 0000000..a756692
 +			if (probe.refId != 0) {
 +				DeleteRef(RE::TESForm::LookupByID<RE::TESObjectREFR>(probe.refId));
 +				probe.refId = 0;
++			}
++		}
++
++		void EndVariants()
++		{
++			for (auto& v : variants) {
++				if (v.refId != 0) {
++					DeleteRef(RE::TESForm::LookupByID<RE::TESObjectREFR>(v.refId));
++					v.refId = 0;
++				}
++				if (!v.file.empty()) {
++					std::error_code ec;
++					std::filesystem::remove(kDir / v.file, ec);
++					v.file.clear();
++				}
++			}
++			variants.clear();
++			if (!variantsDone) {
++				variantsStarted = false;  // interrupted (another cell): starts again
 +			}
 +		}
 +
@@ -3607,11 +3645,132 @@ index 0000000..a756692
 +			a_inWorld = rigid && rigid->world;
 +		}
 +
++		void DropMeshes()
++		{
++			if (meshes.empty()) {
++				return;
++			}
++			for (const auto& entry : meshes) {
++				PutAway(entry.second.refId, entry.second.file);
++				PutAway(entry.second.oldRefId, entry.second.oldFile);
++			}
++			logger::info("Block collision: put away {} section meshes", meshes.size());
++			meshes.clear();
++			sincePass = 1.0f;
++		}
++
 +		void GiveUp(const char* a_why)
 +		{
 +			failed = true;
 +			logger::warn("Block collision: {}; giving it up, block crates take over", a_why);
 +			BlockCollision::Release();
++		}
++	}
++
++	namespace
++	{
++		void StartVariants(RE::PlayerCharacter* a_player, RE::TESDataHandler* a_handler, const RE::NiPoint3& a_pos, std::uint32_t a_material)
++		{
++			variantsStarted = true;
++			variantsDone = false;
++			using O = collisionnif::Options;
++			std::vector<std::pair<std::string, O>> defs;
++			defs.emplace_back("as written", O{});
++			{ O o; o.preambleExtra = -4; defs.emplace_back("body: 4 bytes fewer before its translation", o); }
++			{ O o; o.preambleExtra = 4; defs.emplace_back("body: 4 bytes more before its translation", o); }
++			{ O o; o.tailExtra = -4; defs.emplace_back("body: 4 bytes fewer after its flags", o); }
++			{ O o; o.tailExtra = 4; defs.emplace_back("body: 4 bytes more after its flags", o); }
++			{ O o; o.tailExtra = -12; defs.emplace_back("body: 12 bytes fewer after its flags", o); }
++			{ O o; o.preambleExtra = -4; o.tailExtra = -4; defs.emplace_back("body: 4 fewer before and 4 fewer after", o); }
++			{ O o; o.plainNode = true; defs.emplace_back("root is a NiNode", o); }
++			{ O o; o.collisionFlags = 129; defs.emplace_back("collision object flags 129", o); }
++			{ O o; o.rigidBodyT = true; defs.emplace_back("body named bhkRigidBodyT", o); }
++			{ O o; o.rigidBodyT = true; o.collisionFlags = 129; o.bsxFlags = 3; defs.emplace_back("bhkRigidBodyT, flags 129, BSX 3", o); }
++
++			const float                          u = float(proto::kUnitsPerBlock);
++			const std::vector<collisionnif::Box> one{ collisionnif::Box{ { 0.0f, 0.0f, 0.0f }, { u, u, u } } };
++			int                                  index = 0;
++			for (auto& [label, opts] : defs) {
++				Variant v;
++				v.label = label;
++				v.opts = opts;
++				v.file = fmt::format("v{}_{}.nif", index++, ++serial);
++				const auto bytes = collisionnif::Build(one, a_material, 0.01f, opts);
++				{
++					std::ofstream out(kDir / v.file, std::ios::binary | std::ios::trunc);
++					out.write(reinterpret_cast<const char*>(bytes.data()), static_cast<std::streamsize>(bytes.size()));
++					if (!out.good()) {
++						v.file.clear();
++						v.done = true;
++						variants.push_back(std::move(v));
++						continue;
++					}
++				}
++				if (auto* form = MakeStatic(std::string(kModelDir) + v.file, float(16 * proto::kUnitsPerBlock))) {
++					auto ref = a_handler->CreateReferenceAtLocation(form, a_pos, RE::NiPoint3(), a_player->GetParentCell(), a_player->GetWorldspace(), nullptr, nullptr, RE::ObjectRefHandle(), false, true).get();
++					if (ref) {
++						ref->SetActivationBlocked(true);
++						v.refId = ref->GetFormID();
++					}
++				}
++				if (v.refId == 0) {
++					v.done = true;
++				}
++				variants.push_back(std::move(v));
++			}
++			logger::info("Block collision test: {} variants of the model are in the world to see which Skyrim loads", variants.size());
++		}
++
++		void TickVariants(float a_delta)
++		{
++			if (!variantsStarted || variantsDone) {
++				return;
++			}
++			bool all = true;
++			for (auto& v : variants) {
++				if (v.done) {
++					continue;
++				}
++				v.waited += a_delta;
++				auto* ref = RE::TESForm::LookupByID<RE::TESObjectREFR>(v.refId);
++				auto* root = ref ? ref->Get3D() : nullptr;
++				if (ref && !root && !v.forced && v.waited > 1.5f) {
++					v.forced = true;
++					root = ref->Load3D(false);
++				}
++				if (root) {
++					bool hasObject = false, inWorld = false;
++					CollisionState(root, hasObject, inWorld);
++					v.done = v.ok = true;
++					logger::info("Block collision test: LOADED  '{}' (3D after {:.1f} s; collision object {}, in the Havok world {})", v.label, v.waited, hasObject ? "yes" : "no", inWorld ? "yes" : "not yet");
++				} else if (v.waited > 5.0f) {
++					v.done = true;
++					logger::info("Block collision test: no 3D  '{}'", v.label);
++				}
++				all = all && v.done;
++			}
++			if (!all) {
++				return;
++			}
++			variantsDone = true;
++			int first = -1;
++			for (std::size_t i = 0; i < variants.size(); ++i) {
++				if (variants[i].ok) {
++					first = static_cast<int>(i);
++					break;
++				}
++			}
++			if (first < 0) {
++				logger::warn("Block collision test: Skyrim loaded none of {} variants; Data/Meshes/SkyCraft/debug_default.nif is the file as written (NifSkope will say what is wrong with it)", variants.size());
++			} else if (first == 0) {
++				logger::info("Block collision test: the model as written loads; the section models should too");
++			} else {
++				activeOpts = variants[first].opts;
++				logger::info("Block collision test: using '{}' for the section models from now on", variants[first].label);
++				failures = 0;
++				DropMeshes();  // the ones made as written are made again
++			}
++			EndVariants();
 +		}
 +	}
 +
@@ -3635,16 +3794,8 @@ index 0000000..a756692
 +		void Release()
 +		{
 +			EndProbe();
-+			if (meshes.empty()) {
-+				return;
-+			}
-+			for (const auto& entry : meshes) {
-+				PutAway(entry.second.refId, entry.second.file);
-+				PutAway(entry.second.oldRefId, entry.second.oldFile);
-+			}
-+			logger::info("Block collision: put away {} section meshes", meshes.size());
-+			meshes.clear();
-+			sincePass = 1.0f;
++			EndVariants();
++			DropMeshes();
 +			cellKey = 0;
 +		}
 +
@@ -3734,6 +3885,8 @@ index 0000000..a756692
 +					++it;
 +				}
 +			}
++
++			TickVariants(a_delta);
 +
 +			if (probe.refId != 0 && !probe.done) {
 +				probe.waited += a_delta;
@@ -3827,7 +3980,13 @@ index 0000000..a756692
 +					logger::warn("Block collision: section ({}, {}, {}) has {} boxes; only the first {} get collision", s.sx, s.sy, s.sz, boxes.size(), collisionnif::kMaxBoxes);
 +				}
 +
-+				const auto bytes = collisionnif::Build(boxes, cfg.material);
++				const auto bytes = collisionnif::Build(boxes, cfg.material, 0.01f, activeOpts);
++				static bool dumped = false;
++				if (!dumped) {
++					dumped = true;  // kept for looking at in NifSkope if Skyrim won't load it
++					std::ofstream dump(kDir.parent_path() / "debug_default.nif", std::ios::binary | std::ios::trunc);
++					dump.write(reinterpret_cast<const char*>(bytes.data()), static_cast<std::streamsize>(bytes.size()));
++				}
 +				const auto file = fmt::format("s{:06x}_{}.nif", serial & 0xFFFFFF, ++serial);
 +				{
 +					std::ofstream out(kDir / file, std::ios::binary | std::ios::trunc);
@@ -3874,6 +4033,9 @@ index 0000000..a756692
 +				ref->SetActivationBlocked(true);
 +				++made;
 +
++				if (!variantsStarted) {
++					StartVariants(a_player, handler, pos, cfg.material);
++				}
 +				if (!probe.done && probe.refId == 0) {
 +					auto* crateForm = RE::TESForm::LookupByID(0x0007A617);
 +					auto* crateModel = crateForm ? skyrim_cast<RE::TESModel*>(crateForm) : nullptr;
@@ -4351,10 +4513,10 @@ index 0000000..2b5b996
 +}
 diff --git a/skse/src/CollisionNif.h b/skse/src/CollisionNif.h
 new file mode 100644
-index 0000000..65a3dc8
+index 0000000..fc0062d
 --- /dev/null
 +++ b/skse/src/CollisionNif.h
-@@ -0,0 +1,256 @@
+@@ -0,0 +1,268 @@
 +#pragma once
 +
 +// Writes a Skyrim SE .nif that holds nothing but collision: an invisible static (BSFadeNode) with a fixed rigid body whose shape is a list
@@ -4385,6 +4547,18 @@ index 0000000..65a3dc8
 +	inline constexpr float kHavokScale = 69.99124f;
 +
 +	inline constexpr std::uint32_t kMaxBoxes = 4000;
++
++	// Details of the file that Skyrim might be particular about; BlockCollision.cpp tries variants of these side by side and keeps the first
++	// that Skyrim loads (the defaults are the layout written from the NIF format's description).
++	struct Options
++	{
++		bool          plainNode{ false };      // the root is a NiNode, not a BSFadeNode
++		bool          rigidBodyT{ false };     // the body's type is named bhkRigidBodyT (same fields; most of Skyrim's static bodies are)
++		std::uint16_t collisionFlags{ 1 };     // bhkCollisionObject flags (Skyrim's own often have 129)
++		std::uint32_t bsxFlags{ 2 };           // BSXFlags value (2: havok)
++		int           preambleExtra{ 0 };      // bytes more (or fewer) in the body before its translation
++		int           tailExtra{ 0 };          // bytes more (or fewer) in the body after its flags and before its constraints
++	};
 +
 +	// Havok material of the whole shape (the hash of its name). 3741512247 is stone: its footsteps, its sounds, its impacts.
 +	inline constexpr std::uint32_t kMaterialStone = 3741512247u;
@@ -4435,7 +4609,7 @@ index 0000000..65a3dc8
 +	}
 +
 +	// The file's bytes. a_radius is Havok's convex radius in Havok units (0.01 is what Skyrim's own meshes use); boxes beyond kMaxBoxes are dropped.
-+	inline std::vector<std::uint8_t> Build(const std::vector<Box>& a_boxes, std::uint32_t a_material = kMaterialStone, float a_radius = 0.01f)
++	inline std::vector<std::uint8_t> Build(const std::vector<Box>& a_boxes, std::uint32_t a_material = kMaterialStone, float a_radius = 0.01f, const Options& a_opt = {})
 +	{
 +		using namespace detail;
 +
@@ -4468,14 +4642,14 @@ index 0000000..65a3dc8
 +		{
 +			Out& b = blocks[1];
 +			b.Put<std::int32_t>(1);  // name: string 1 ("BSX")
-+			b.Put<std::uint32_t>(2);
++			b.Put<std::uint32_t>(a_opt.bsxFlags);
 +		}
 +
 +		// 2: bhkCollisionObject
 +		{
 +			Out& b = blocks[2];
 +			b.Put<std::int32_t>(0);   // target: the root
-+			b.Put<std::uint16_t>(1);  // flags: active
++			b.Put<std::uint16_t>(a_opt.collisionFlags);  // flags (1: active)
 +			b.Put<std::int32_t>(3);   // body
 +		}
 +
@@ -4493,7 +4667,7 @@ index 0000000..65a3dc8
 +			b.Put<std::uint16_t>(0xFFFF); // process contact callback delay
 +			b.Put<std::uint32_t>(0);
 +			Filter(b);                    // filter copy
-+			b.Zeros(12);
++			b.Zeros(static_cast<std::size_t>(12 + a_opt.preambleExtra));
 +			Vec4(b, 0, 0, 0, 0);          // translation
 +			Vec4(b, 0, 0, 0, 1);          // rotation (x y z w)
 +			Vec4(b, 0, 0, 0, 0);          // linear velocity
@@ -4519,7 +4693,7 @@ index 0000000..65a3dc8
 +			b.Put<std::uint8_t>(0);       // response modifier
 +			b.Put<std::uint8_t>(0);       // shape keys in contact point cache
 +			b.Put<std::uint8_t>(0);       // force collided owner
-+			b.Zeros(12);
++			b.Zeros(static_cast<std::size_t>(12 + a_opt.tailExtra));
 +			b.Put<std::uint32_t>(0);      // constraints
 +			b.Put<std::uint16_t>(0);      // body flags
 +		}
@@ -4566,7 +4740,7 @@ index 0000000..65a3dc8
 +		}
 +
 +		// ---- the header ----
-+		static const char* const kTypeNames[6] = { "BSFadeNode", "BSXFlags", "bhkCollisionObject", "bhkRigidBody", "bhkListShape", "bhkConvexVerticesShape" };
++		const char* const kTypeNames[6] = { a_opt.plainNode ? "NiNode" : "BSFadeNode", "BSXFlags", "bhkCollisionObject", a_opt.rigidBodyT ? "bhkRigidBodyT" : "bhkRigidBody", "bhkListShape", "bhkConvexVerticesShape" };
 +		const std::uint16_t      typeOf[6] = { 0, 1, 2, 3, 4, 5 };
 +		const std::string        strings[2] = { "SkyCraftCollision", "BSX" };
 +
@@ -7318,7 +7492,7 @@ index b877ae5..36666dc 100644
  				logger::info("in-frame block drawing: hooked after Main::RenderWorld");
  			}
 diff --git a/skse/src/main.cpp b/skse/src/main.cpp
-index eb548b4..2423170 100644
+index eb548b4..474ec14 100644
 --- a/skse/src/main.cpp
 +++ b/skse/src/main.cpp
 @@ -21,6 +21,9 @@ namespace
@@ -7343,7 +7517,7 @@ index eb548b4..2423170 100644
  	SetupLog();
  	skycraft::CrashLog::Install();
  	logger::info("SkyCraft {} loading (runtime {})", "0.1.2", a_skse->RuntimeVersion().string());
-+	logger::info("patch revision 25 (exact block shapes: no padding on doors, stairs and other non-cube blocks, up to 16 boxes per block; a probe in the log tells a rejected .nif from a form that can't load models; revision 24: block collision models checked in the Havok world, crates kept until they work; lock-on survives a missing frame; revision 23: section models of merged boxes loaded as invisible statics over the whole area Minecraft sent; revision 22: crates only, the box simulation that held the Skyrim player is gone; Minecraft's mobs, passive ones too, are lock-on targets again, handed to True Directional Movement as virtual targets; revision 21: mob stand-ins removed)");
++	logger::info("patch revision 26 (block model variants tried side by side, the first Skyrim loads is used; revision 25: exact block shapes: no padding on doors, stairs and other non-cube blocks, up to 16 boxes per block; a probe in the log tells a rejected .nif from a form that can't load models; revision 24: block collision models checked in the Havok world, crates kept until they work; lock-on survives a missing frame; revision 23: section models of merged boxes loaded as invisible statics over the whole area Minecraft sent; revision 22: crates only, the box simulation that held the Skyrim player is gone; Minecraft's mobs, passive ones too, are lock-on targets again, handed to True Directional Movement as virtual targets; revision 21: mob stand-ins removed)");
  	SKSE::GetMessagingInterface()->RegisterListener(OnMessage);
  	// As early as possible: Minecraft takes about as long to start as Skyrim does to reach its menu.
  	skycraft::Launcher::StartMinecraft();
