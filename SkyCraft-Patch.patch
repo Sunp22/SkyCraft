@@ -402,19 +402,25 @@ index 3127e6e..6929eed 100644
  		if ((flags & Proto.MC_IN_WORLD) != 0) {
  			try {
 diff --git a/fabric/src/client/java/dev/skycraft/client/render/WorldExporter.java b/fabric/src/client/java/dev/skycraft/client/render/WorldExporter.java
-index 9f909ce..d88346e 100644
+index 9f909ce..ebf2d1b 100644
 --- a/fabric/src/client/java/dev/skycraft/client/render/WorldExporter.java
 +++ b/fabric/src/client/java/dev/skycraft/client/render/WorldExporter.java
-@@ -67,6 +67,8 @@ public final class WorldExporter {
+@@ -62,11 +62,14 @@ import net.minecraft.world.phys.shapes.VoxelShape;
+  */
+ public final class WorldExporter {
+ 	private static final int SECTIONS_PER_FRAME = 12;
++	private static final int MAX_SHAPE_BOXES = 16; // boxes of one block sent to Skyrim (Game.h kMaxBoxes); vanilla blocks have a handful
+ 	private static final double ENTITY_RANGE = 96.0;
+ 
  	private static final LongLinkedOpenHashSet DIRTY = new LongLinkedOpenHashSet();
  	private static final LongOpenHashSet SENT = new LongOpenHashSet(); // sections Skyrim holds a mesh for
  	private static final LongOpenHashSet LIT = new LongOpenHashSet(); // sections Skyrim holds lights for
 +	private static final LongOpenHashSet SHAPE = new LongOpenHashSet(); // sections Skyrim holds exact block shapes for
-+	private static final ByteBuffer SHAPES = ByteBuffer.allocate(4096 * (3 + 8 * 6)).order(ByteOrder.LITTLE_ENDIAN);
++	private static final ByteBuffer SHAPES = ByteBuffer.allocate(4096 * (3 + MAX_SHAPE_BOXES * 6)).order(ByteOrder.LITTLE_ENDIAN);
  	private static final LongOpenHashSet SOLID = new LongOpenHashSet(); // sections Skyrim holds NPC collision for
  	private static final long[] SOLID_BITS = new long[64]; // 4096 blocks: bit x + 16z + 256y
  	private static final LongOpenHashSet DUG = new LongOpenHashSet(); // sections Skyrim holds dug cells for
-@@ -136,6 +138,7 @@ public final class WorldExporter {
+@@ -136,6 +139,7 @@ public final class WorldExporter {
  		SENT.clear();
  		LIT.clear();
  		SOLID.clear();
@@ -422,7 +428,7 @@ index 9f909ce..d88346e 100644
  		DUG.clear();
  		dev.skycraft.client.SkyDigClient.resendAll();
  		// Everything already loaded needs meshing again; later chunk loads mark themselves dirty.
-@@ -205,6 +208,8 @@ public final class WorldExporter {
+@@ -205,6 +209,8 @@ public final class WorldExporter {
  		int lightCount = 0;
  		java.util.Arrays.fill(SOLID_BITS, 0L);
  		int solidCount = 0;
@@ -431,7 +437,7 @@ index 9f909ce..d88346e 100644
  		MESH.cardinal = level.cardinalLighting();
  		if (!empty) {
  			BlockPos origin = SectionPos.of(sx, sy, sz).origin();
-@@ -218,10 +223,25 @@ public final class WorldExporter {
+@@ -218,10 +224,25 @@ public final class WorldExporter {
  							continue;
  						}
  						// Blocks Skyrim's NPCs can't walk through (anything with a collision shape).
@@ -446,7 +452,7 @@ index 9f909ce..d88346e 100644
 +							boolean whole = boxes.size() == 1 && boxes.get(0).minX <= 0.0 && boxes.get(0).minY <= 0.0 && boxes.get(0).minZ <= 0.0
 +								&& boxes.get(0).maxX >= 1.0 && boxes.get(0).maxY == 1.0 && boxes.get(0).maxZ >= 1.0;
 +							if (!whole && !boxes.isEmpty()) {
-+								int n = Math.min(boxes.size(), 8);
++								int n = Math.min(boxes.size(), MAX_SHAPE_BOXES);
 +								SHAPES.putShort((short) bit).put((byte) n);
 +								for (int i = 0; i < n; i++) {
 +									var b = boxes.get(i);
@@ -458,7 +464,7 @@ index 9f909ce..d88346e 100644
  						}
  						// Light-emitting blocks (torches, lava, glowstone, ...) light Skyrim's world too.
  						int emission = state.getLightEmission();
-@@ -288,6 +308,17 @@ public final class WorldExporter {
+@@ -288,6 +309,17 @@ public final class WorldExporter {
  					SOLID.remove(key);
  				}
  			}
@@ -476,7 +482,7 @@ index 9f909ce..d88346e 100644
  			// Cells dug out of Skyrim's world: its geometry there goes.
  			if (dugCount > 0 || DUG.contains(key)) {
  				ByteBuffer dugHeader = ByteBuffer.allocate(24).order(ByteOrder.LITTLE_ENDIAN).putInt(sx).putInt(sy).putInt(sz).putInt(dugCount)
-@@ -315,8 +346,33 @@ public final class WorldExporter {
+@@ -315,8 +347,33 @@ public final class WorldExporter {
  		return true;
  	}
  
@@ -510,7 +516,7 @@ index 9f909ce..d88346e 100644
  		Vec3 eye = minecraft.player.getEyePosition(partialTick);
  		for (Entity e : level.entitiesForRendering()) {
  			if (ENTITIES.size() >= Proto.MAX_WORLD_ENTITIES || e.distanceToSqr(eye) > ENTITY_RANGE * ENTITY_RANGE) {
-@@ -344,6 +400,14 @@ public final class WorldExporter {
+@@ -344,6 +401,14 @@ public final class WorldExporter {
  				&& (e != minecraft.player || minecraft.gameRenderer.mainCamera().isDetached())) {
  				// Players and mobs: Skyrim darkens the ground softly under their feet.
  				ENTITIES.add(new SkyLink.WorldEntity(Proto.WE_SHADOW, e.getId(), (float) p.x, (float) p.y, (float) p.z, 0.0F, 0.0F, e.getBbWidth(), null, null, 0));
@@ -525,7 +531,7 @@ index 9f909ce..d88346e 100644
  			}
  		}
  		addCracks(level);
-@@ -651,4 +715,9 @@ public final class WorldExporter {
+@@ -651,4 +716,9 @@ public final class WorldExporter {
  			return this;
  		}
  	}
@@ -3308,10 +3314,10 @@ index 92b585a..d5e586c 100644
 +fRange = 40
 diff --git a/skse/src/BlockCollision.cpp b/skse/src/BlockCollision.cpp
 new file mode 100644
-index 0000000..059a6c0
+index 0000000..a756692
 --- /dev/null
 +++ b/skse/src/BlockCollision.cpp
-@@ -0,0 +1,546 @@
+@@ -0,0 +1,599 @@
 +#include "Game.h"
 +#include "CollisionNif.h"
 +
@@ -3392,6 +3398,16 @@ index 0000000..059a6c0
 +		std::uint32_t                           failures = 0;
 +		std::uint64_t                           cellKey = 0;  // which cell / world the meshes are in
 +
++		// Tells a model Skyrim rejects from a form it can't load models for: the first time a section model is made, a vanilla model (the
++		// crate's own) is put in the world through the very same kind of form, and the log says which of the two got a 3D.
++		struct Probe
++		{
++			RE::FormID refId{ 0 };
++			float      waited{ 0.0f };
++			bool       done{ false };
++		};
++		Probe probe;
++
 +		std::uint64_t Key(int a_x, int a_y, int a_z)
 +		{
 +			return (std::uint64_t(std::uint32_t(a_x) & 0x3FFFFF) << 42) | (std::uint64_t(std::uint32_t(a_z) & 0x3FFFFF) << 20) | (std::uint64_t(std::uint32_t(a_y) & 0xFFFFF));
@@ -3408,6 +3424,14 @@ index 0000000..059a6c0
 +			}
 +			if constexpr (requires { a_ref->SetDelete(true); }) {
 +				a_ref->SetDelete(true);
++			}
++		}
++
++		void EndProbe()
++		{
++			if (probe.refId != 0) {
++				DeleteRef(RE::TESForm::LookupByID<RE::TESObjectREFR>(probe.refId));
++				probe.refId = 0;
 +			}
 +		}
 +
@@ -3452,10 +3476,11 @@ index 0000000..059a6c0
 +			}
 +
 +			const double U = proto::kUnitsPerBlock;
-+			auto         emit = [&](const float a_lo[3], const float a_hi[3]) {
-+                // (Minecraft: x east, y up, z south.) A little wider on the sides and underneath, the top left exactly at the block's top.
-+				const float lo[3] = { a_lo[0] - a_overlap, a_lo[1] - a_overlap, a_lo[2] - a_overlap };
-+				const float hi[3] = { a_hi[0] + a_overlap, a_hi[1], a_hi[2] + a_overlap };
++			auto         emit = [&](const float a_lo[3], const float a_hi[3], float a_pad) {
++                // (Minecraft: x east, y up, z south.) Merged whole cubes are a little wider on the sides and underneath (the top left exactly at
++                // the block's top) so neighbours leave no seam. Every other shape is Minecraft's exact box: a door stays 3/16 thick.
++				const float lo[3] = { a_lo[0] - a_pad, a_lo[1] - a_pad, a_lo[2] - a_pad };
++				const float hi[3] = { a_hi[0] + a_pad, a_hi[1], a_hi[2] + a_pad };
 +				collisionnif::Box b;
 +				b.lo[0] = float((lo[0] - x0) * U);
 +				b.hi[0] = float((hi[0] - x0) * U);
@@ -3510,12 +3535,12 @@ index 0000000..059a6c0
 +						}
 +						const float lo[3] = { float(x0 + x), float(y0 + y), float(z0 + z) };
 +						const float hi[3] = { float(x0 + x1 + 1), float(y0 + y1 + 1), float(z0 + z1 + 1) };
-+						emit(lo, hi);
++						emit(lo, hi, a_overlap);
 +					}
 +				}
 +			}
 +			for (const auto& b : others) {
-+				emit(b.lo, b.hi);
++				emit(b.lo, b.hi, 0.0f);
 +			}
 +		}
 +
@@ -3609,6 +3634,7 @@ index 0000000..059a6c0
 +
 +		void Release()
 +		{
++			EndProbe();
 +			if (meshes.empty()) {
 +				return;
 +			}
@@ -3706,6 +3732,20 @@ index 0000000..059a6c0
 +					}
 +				} else {
 +					++it;
++				}
++			}
++
++			if (probe.refId != 0 && !probe.done) {
++				probe.waited += a_delta;
++				auto* probeRef = RE::TESForm::LookupByID<RE::TESObjectREFR>(probe.refId);
++				if (probeRef && probeRef->Get3D()) {
++					probe.done = true;
++					logger::info("Block collision probe: a vanilla model loaded through a runtime-made static form in {:.1f} s, so such forms work; if the section models don't, Skyrim is rejecting SkyCraft's .nif files", probe.waited);
++					EndProbe();
++				} else if (probe.waited > 8.0f) {
++					probe.done = true;
++					logger::warn("Block collision probe: a vanilla model did NOT load through a runtime-made static form either, so the cause is the form or the reference (not the .nif files)");
++					EndProbe();
 +				}
 +			}
 +
@@ -3833,6 +3873,25 @@ index 0000000..059a6c0
 +				}
 +				ref->SetActivationBlocked(true);
 +				++made;
++
++				if (!probe.done && probe.refId == 0) {
++					auto* crateForm = RE::TESForm::LookupByID(0x0007A617);
++					auto* crateModel = crateForm ? skyrim_cast<RE::TESModel*>(crateForm) : nullptr;
++					const char* vanillaPath = crateModel ? crateModel->GetModel() : nullptr;
++					if (vanillaPath && *vanillaPath) {
++						if (auto* probeForm = MakeStatic(vanillaPath, float(16 * proto::kUnitsPerBlock))) {
++							auto probeRef = handler->CreateReferenceAtLocation(probeForm, pos, RE::NiPoint3(), a_player->GetParentCell(), a_player->GetWorldspace(), nullptr, nullptr, RE::ObjectRefHandle(), false, true).get();
++							if (probeRef) {
++								probeRef->SetActivationBlocked(true);
++								probe.refId = probeRef->GetFormID();
++								logger::info("Block collision probe: put the vanilla model '{}' in the world through a runtime-made static form", vanillaPath);
++							}
++						}
++					}
++					if (probe.refId == 0) {
++						probe.done = true;
++					}
++				}
 +
 +				Mesh fresh;
 +				fresh.sx = s.sx;
@@ -5814,7 +5873,7 @@ index 3bb4d34..50eb9e4 100644
  				Perf::Scope timer(Perf::kDigMeshes);
  				Dig::UpdateMeshes(digSettled > 3.0f ? a_player : nullptr, a_delta, !dugChanged.empty());
 diff --git a/skse/src/Game.h b/skse/src/Game.h
-index 05788b1..9c8789b 100644
+index 05788b1..726596a 100644
 --- a/skse/src/Game.h
 +++ b/skse/src/Game.h
 @@ -17,6 +17,20 @@ namespace skycraft
@@ -5890,7 +5949,7 @@ index 05788b1..9c8789b 100644
 +		{
 +			float lo[3], hi[3];
 +		};
-+		static constexpr int kMaxBoxes = 8;
++		static constexpr int kMaxBoxes = 16;  // (a block with more has the rest dropped; vanilla blocks have at most a handful)
 +		// Boxes of block (x, y, z) in block-local coordinates (0..1, fences up to 1.5); 0 if not solid.
 +		int BoxesAt(std::int32_t a_x, std::int32_t a_y, std::int32_t a_z, BlockBox a_out[kMaxBoxes]);
 +		// Every box of every solid block in the given block range (inclusive), absolute coordinates.
@@ -6540,7 +6599,7 @@ index 0000000..179ccfe
 +	}
 +}
 diff --git a/skse/src/NpcBlocks.cpp b/skse/src/NpcBlocks.cpp
-index 5e25a7d..43e20c7 100644
+index 5e25a7d..80d891a 100644
 --- a/skse/src/NpcBlocks.cpp
 +++ b/skse/src/NpcBlocks.cpp
 @@ -1,4 +1,5 @@
@@ -6563,7 +6622,7 @@ index 5e25a7d..43e20c7 100644
 +		struct ShapeBlock
 +		{
 +			std::uint8_t n{ 0 };
-+			std::uint8_t b[8][6]{};
++			std::uint8_t b[16][6]{};  // kMaxBoxes
 +		};
 +		std::unordered_map<std::uint64_t, std::unordered_map<std::uint16_t, ShapeBlock>> shapes;  // guarded by solidsLock
 +
@@ -7259,7 +7318,7 @@ index b877ae5..36666dc 100644
  				logger::info("in-frame block drawing: hooked after Main::RenderWorld");
  			}
 diff --git a/skse/src/main.cpp b/skse/src/main.cpp
-index eb548b4..37d9575 100644
+index eb548b4..2423170 100644
 --- a/skse/src/main.cpp
 +++ b/skse/src/main.cpp
 @@ -21,6 +21,9 @@ namespace
@@ -7284,7 +7343,7 @@ index eb548b4..37d9575 100644
  	SetupLog();
  	skycraft::CrashLog::Install();
  	logger::info("SkyCraft {} loading (runtime {})", "0.1.2", a_skse->RuntimeVersion().string());
-+	logger::info("patch revision 24 (block collision models checked in the Havok world, crates kept until they work; lock-on survives a missing frame; revision 23: section models of merged boxes loaded as invisible statics over the whole area Minecraft sent; revision 22: crates only, the box simulation that held the Skyrim player is gone; Minecraft's mobs, passive ones too, are lock-on targets again, handed to True Directional Movement as virtual targets; revision 21: mob stand-ins removed)");
++	logger::info("patch revision 25 (exact block shapes: no padding on doors, stairs and other non-cube blocks, up to 16 boxes per block; a probe in the log tells a rejected .nif from a form that can't load models; revision 24: block collision models checked in the Havok world, crates kept until they work; lock-on survives a missing frame; revision 23: section models of merged boxes loaded as invisible statics over the whole area Minecraft sent; revision 22: crates only, the box simulation that held the Skyrim player is gone; Minecraft's mobs, passive ones too, are lock-on targets again, handed to True Directional Movement as virtual targets; revision 21: mob stand-ins removed)");
  	SKSE::GetMessagingInterface()->RegisterListener(OnMessage);
  	// As early as possible: Minecraft takes about as long to start as Skyrim does to reach its menu.
  	skycraft::Launcher::StartMinecraft();
