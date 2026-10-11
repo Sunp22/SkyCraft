@@ -1,16 +1,18 @@
 # Builds SkyCraft on GitHub's Windows machines and uploads the Vortex/MO2 mod zip.
 #
-# Put this file in your repo as .github/workflows/build.yml. If SkyCraft-Patch.patch (control mode
-# is already in the source; the patch adds world reset, show world, mobs, mob roaming, roaming on rough
-# ground, chat input, mob life, mob combat, mob polish and mob hit effects, no mobs in settlements, and a body-width block collision for Skyrim mode; no mob stand-ins and none of the patch's own jump handling) is in the root of the repo, it is applied
-# before building, and skipped if the source already has it.
-# NOTE: SkyCraft no longer makes stand-in actors for Minecraft's mobs and no longer hands True Directional Movement any targets, so the
-# second job below does nothing useful any more; delete it (and TrueDirectionalMovement-VirtualTargets.patch) if you like.
-# A second job ("tdm-patch") builds True Directional Movement from its own source with
-# TrueDirectionalMovement-VirtualTargets.patch (also in the root of the repo) applied, so TDM can lock on to Minecraft's mobs, and
-# uploads it as its own optional zip: TrueDirectionalMovement.dll for SKSE\\Plugins, to be installed over TDM's, the way TDM's
-# Improved Camera patch is. SkyCraft works without it (lock-on then goes by the stand-ins' actors). If the patch isn't in the repo
-# the job does nothing.
+# Put this file in your repo as .github/workflows/build.yml. If SkyCraft-Patch.patch is in the root of the repo (control mode is already
+# in the source; the patch adds world reset, show world, mobs, mob roaming, chat input, mob life, mob combat, mob polish and mob hit
+# effects, no mobs in settlements, real-crate block collision for Skyrim mode, and Minecraft's hostile mobs as lock-on targets), it is
+# applied before building, and skipped if the source already has it.
+#
+# Block collision in Skyrim's own control mode is real: invisible crates on the blocks around you (BlockCrates.cpp), which Skyrim's own
+# character controller stands, steps and jumps on. There is no simulated collision holding the player up any more.
+#
+# A second job ("tdm-patch") builds True Directional Movement from its own source with TrueDirectionalMovement-VirtualTargets.patch (also
+# in the root of the repo) applied, and uploads it as its own zip: TrueDirectionalMovement.dll for SKSE\\Plugins, to be installed over TDM's,
+# the way TDM's Improved Camera patch is. SkyCraft needs THAT dll to lock on to Minecraft's mobs: it hands them over as TDM's virtual
+# targets. Without it SkyCraft still works, but there is no lock-on to mobs (SkyCraft.log says so). If the patch isn't in the repo the
+# job does nothing.
 # Run it from the repo's Actions tab ("Build SkyCraft" -> Run workflow), or it runs on every push.
 #
 # The first run takes a long time (vcpkg compiles the C++ dependencies, Gradle fetches Minecraft);
@@ -46,7 +48,7 @@ jobs:
         with:
           submodules: recursive
 
-      - name: Apply SkyCraft-Patch.patch (world reset, show world, mobs, mob roaming, roaming on rough ground, chat input, mob life, mob combat and mob polish) if it is in the repo
+      - name: Apply SkyCraft-Patch.patch (world reset, mobs, real-crate block collision, mob lock-on) if it is in the repo
         shell: bash
         run: |
           # The docs aren't part of the build, so a change upstream there must not stop it.
@@ -67,7 +69,7 @@ jobs:
               exit 1
             fi
           }
-          apply_patch SkyCraft-Patch.patch SkyrimPlayerHalfWidth skse/src/NpcBlocks.cpp
+          apply_patch SkyCraft-Patch.patch LockOn::Install skse/src/main.cpp
 
       # A repo made from "Download ZIP" has no submodule contents. Fetch CommonLibSSE-NG ourselves
       # then (the branch's latest commit, not the exact one the author built with).
@@ -185,67 +187,23 @@ jobs:
               || { echo "::error::SkyCraft.dll was built without the settlement check."; exit 1; }
           fi
 
-      - name: Check the Skyrim-mode block collision made it into the build
+      - name: Check the real-crate block collision and mob lock-on made it into the build
         shell: bash
         run: |
-          if [ -f SkyCraft-Patch.patch ] || grep -q BlockMove skse/src/NpcBlocks.cpp; then
-            grep -aq "Skyrim control: Minecraft block collision" skse/build/RelWithDebInfo/SkyCraft.dll \
-              && echo "SkyCraft.dll has the Skyrim-mode block collision." \
-              || { echo "::error::SkyCraft.dll was built without the Skyrim-mode block collision."; exit 1; }
-          fi
-
-      - name: Check the Skyrim-mode landing fix made it into the build
-        shell: bash
-        run: |
-          if [ -f SkyCraft-Patch.patch ] || grep -q airHeld skse/src/NpcBlocks.cpp; then
-            grep -aq "landed on a block by hand" skse/build/RelWithDebInfo/SkyCraft.dll \
-              && echo "SkyCraft.dll has the Skyrim-mode landing fix." \
-              || { echo "::error::SkyCraft.dll was built without the Skyrim-mode landing fix."; exit 1; }
-          fi
-
-      - name: Check the block-resting support fix made it into the build
-        shell: bash
-        run: |
-          if [ -f SkyCraft-Patch.patch ] || grep -q SetSkyrimPlayerResting skse/src/Dig.h; then
-            grep -aq "resting on a block: support plane added" skse/build/RelWithDebInfo/SkyCraft.dll \
-              && echo "SkyCraft.dll has the block-resting support fix." \
-              || { echo "::error::SkyCraft.dll was built without the block-resting support fix."; exit 1; }
-          fi
-
-      - name: Check the Skyrim-mode body-width collision made it into the build
-        shell: bash
-        run: |
-          if [ -f SkyCraft-Patch.patch ] || grep -q SkyrimPlayerHalfWidth skse/src/Dig.h; then
-            grep -aq "blocks wide for Minecraft's block collision" skse/build/RelWithDebInfo/SkyCraft.dll \
-              && echo "SkyCraft.dll has the Skyrim-mode body-width collision." \
-              || { echo "::error::SkyCraft.dll was built without the Skyrim-mode body-width collision."; exit 1; }
-          fi
-
-      - name: Check the Skyrim-mode standing fix made it into the build
-        shell: bash
-        run: |
-          if [ -f SkyCraft-Patch.patch ] || grep -q kProbe skse/src/NpcBlocks.cpp; then
-            grep -aq "held the player on the ground" skse/build/RelWithDebInfo/SkyCraft.dll \
-              && echo "SkyCraft.dll has the Skyrim-mode standing fix." \
-              || { echo "::error::SkyCraft.dll was built without the Skyrim-mode standing fix."; exit 1; }
-            grep -aq "stopped the player's leftover speed" skse/build/RelWithDebInfo/SkyCraft.dll \
-              && echo "SkyCraft.dll has the Skyrim-mode slide stop." \
-              || { echo "::error::SkyCraft.dll was built without the Skyrim-mode slide stop."; exit 1; }
-            grep -aq "back on the ground inside the physics step" skse/build/RelWithDebInfo/SkyCraft.dll \
-              && echo "SkyCraft.dll has the in-step ground hold." \
-              || { echo "::error::SkyCraft.dll was built without the in-step ground hold."; exit 1; }
-            grep -aq "patch revision 21" skse/build/RelWithDebInfo/SkyCraft.dll \
-              && echo "SkyCraft.dll is patch revision 21." \
-              || { echo "::error::SkyCraft.dll was built without patch revision 21 (is the newest SkyCraft-Patch.patch in the repo?)."; exit 1; }
-          fi
-
-      - name: Check the crate edge-contact filter made it into the build
-        shell: bash
-        run: |
-          if [ -f SkyCraft-Patch.patch ] || grep -q DropCrateContact skse/src/DigPhysics.cpp; then
-            grep -aq "crate side and edge contacts ignored" skse/build/RelWithDebInfo/SkyCraft.dll \
-              && echo "SkyCraft.dll has the crate edge-contact filter." \
-              || { echo "::error::SkyCraft.dll was built without the crate edge-contact filter."; exit 1; }
+          if [ -f SkyCraft-Patch.patch ] || grep -q LockOn::Install skse/src/main.cpp; then
+            grep -aq "Block crates:" skse/build/RelWithDebInfo/SkyCraft.dll \
+              && echo "SkyCraft.dll has the real-crate block collision." \
+              || { echo "::error::SkyCraft.dll was built without the real-crate block collision."; exit 1; }
+            grep -aq "lock-on: " skse/build/RelWithDebInfo/SkyCraft.dll \
+              && echo "SkyCraft.dll has the mob lock-on." \
+              || { echo "::error::SkyCraft.dll was built without the mob lock-on."; exit 1; }
+            # The old simulated collision (a box holding the player up by hand) must be gone.
+            if grep -aq "Skyrim control: Minecraft block collision" skse/build/RelWithDebInfo/SkyCraft.dll; then
+              echo "::error::SkyCraft.dll still has the simulated block collision (is an old SkyCraft-Patch.patch in the repo?)."; exit 1
+            fi
+            grep -aq "patch revision 22" skse/build/RelWithDebInfo/SkyCraft.dll \
+              && echo "SkyCraft.dll is patch revision 22." \
+              || { echo "::error::SkyCraft.dll was built without patch revision 22 (is the newest SkyCraft-Patch.patch in the repo?)."; exit 1; }
           fi
 
       - name: Upload the mod
