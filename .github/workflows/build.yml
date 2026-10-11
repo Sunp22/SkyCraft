@@ -202,9 +202,9 @@ jobs:
             if grep -aq "Skyrim control: Minecraft block collision" skse/build/RelWithDebInfo/SkyCraft.dll; then
               echo "::error::SkyCraft.dll still has the simulated block collision (is an old SkyCraft-Patch.patch in the repo?)."; exit 1
             fi
-            grep -aq "patch revision 23" skse/build/RelWithDebInfo/SkyCraft.dll \
-              && echo "SkyCraft.dll is patch revision 23." \
-              || { echo "::error::SkyCraft.dll was built without patch revision 23 (is the newest SkyCraft-Patch.patch in the repo?)."; exit 1; }
+            grep -aq "patch revision 24" skse/build/RelWithDebInfo/SkyCraft.dll \
+              && echo "SkyCraft.dll is patch revision 24." \
+              || { echo "::error::SkyCraft.dll was built without patch revision 24 (is the newest SkyCraft-Patch.patch in the repo?)."; exit 1; }
             grep -aq "Block collision: on" skse/build/RelWithDebInfo/SkyCraft.dll \
               && echo "SkyCraft.dll has the block collision models." \
               || { echo "::error::SkyCraft.dll was built without the block collision models."; exit 1; }
