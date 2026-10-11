@@ -3304,7 +3304,7 @@ index 92b585a..a1d4ffb 100644
 +fRange = 40
 diff --git a/skse/src/BlockCollision.cpp b/skse/src/BlockCollision.cpp
 new file mode 100644
-index 0000000..ac61dc7
+index 0000000..b124d6e
 --- /dev/null
 +++ b/skse/src/BlockCollision.cpp
 @@ -0,0 +1,477 @@
@@ -3675,8 +3675,8 @@ index 0000000..ac61dc7
 +			for (auto it = meshes.begin(); it != meshes.end();) {
 +				const auto& mesh = it->second;
 +				const bool  gone = !present.contains(it->first);
-+				const bool  far = std::abs(mesh.sx - psx) > cfg.radius + 1 || std::abs(mesh.sz - psz) > cfg.radius + 1 || std::abs(mesh.sy - psy) > 4;
-+				if (gone || far || (!mesh.pending && !Alive(mesh))) {
++				const bool  outOfRange = std::abs(mesh.sx - psx) > cfg.radius + 1 || std::abs(mesh.sz - psz) > cfg.radius + 1 || std::abs(mesh.sy - psy) > 4;
++				if (gone || outOfRange || (!mesh.pending && !Alive(mesh))) {
 +					PutAway(mesh.refId, mesh.file);
 +					PutAway(mesh.oldRefId, mesh.oldFile);
 +					it = meshes.erase(it);
