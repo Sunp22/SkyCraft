@@ -3221,10 +3221,10 @@ index fce6cf8..a0775fd 100644
  	{
  		std::int32_t  sx, sy, sz;  // section coords, as in RenSection
 diff --git a/skse/SkyCraft.ini b/skse/SkyCraft.ini
-index 92b585a..a1d4ffb 100644
+index 92b585a..d5e586c 100644
 --- a/skse/SkyCraft.ini
 +++ b/skse/SkyCraft.ini
-@@ -14,7 +14,77 @@ sLauncher =
+@@ -14,7 +14,81 @@ sLauncher =
  ; What to pass to your own launcher. For Prism: --launch and the SkyCraft instance's folder name.
  sArguments = --launch SkyCraft
  
@@ -3272,6 +3272,10 @@ index 92b585a..a1d4ffb 100644
 +; Havok material of the blocks (their footsteps and impact sounds): 3741512247 is stone.
 +sMaterial = 3741512247
 +
++; The block crates round you (see [Crates]) are kept until a section model has been seen working on your install (its collision in Skyrim's
++; Havok world; SkyCraft.log says "works"), so there is always something to stand on. 1 = keep them even then.
++bCratesWithMesh = 0
++
 +[Crates]
 +; Skyrim's mode: Minecraft's blocks are real, invisible crates put on the solid blocks around you, so Skyrim's own character controller
 +; stands, walks, steps, jumps and bumps on them like on any crate in the game. There is no other block collision for your character: with
@@ -3304,10 +3308,10 @@ index 92b585a..a1d4ffb 100644
 +fRange = 40
 diff --git a/skse/src/BlockCollision.cpp b/skse/src/BlockCollision.cpp
 new file mode 100644
-index 0000000..b124d6e
+index 0000000..059a6c0
 --- /dev/null
 +++ b/skse/src/BlockCollision.cpp
-@@ -0,0 +1,477 @@
+@@ -0,0 +1,546 @@
 +#include "Game.h"
 +#include "CollisionNif.h"
 +
@@ -3340,6 +3344,7 @@ index 0000000..b124d6e
 +			int           maxMeshes{ 220 };
 +			float         overlap{ 0.02f }; // how much wider than a block (a fraction) so boxes that meet leave no seam to catch a foot on
 +			std::uint32_t material{ collisionnif::kMaterialStone };
++			bool          cratesAlso{ false };  // keep the crates round the player even once the models are known to work
 +		};
 +
 +		const CollisionCfg& Cfg()
@@ -3354,6 +3359,7 @@ index 0000000..b124d6e
 +				s.maxMeshes = static_cast<int>(std::clamp<long>(ini.GetLongValue("Collision", "iMaxMeshes", 220), 20, 1000));
 +				s.overlap = static_cast<float>(std::clamp(ini.GetDoubleValue("Collision", "fOverlap", 0.02), 0.0, 0.2));
 +				s.material = static_cast<std::uint32_t>(std::strtoul(ini.GetValue("Collision", "sMaterial", "3741512247"), nullptr, 0));
++				s.cratesAlso = ini.GetBoolValue("Collision", "bCratesWithMesh", false);
 +				return s;
 +			}();
 +			return settings;
@@ -3369,8 +3375,11 @@ index 0000000..b124d6e
 +			RE::FormID    refId{ 0 };
 +			std::string   file;        // its file name
 +			std::uint32_t boxes{ 0 };
-+			bool          pending{ false };  // its reference is made, its 3D not loaded yet
++			bool          pending{ false };  // its reference is made, and not yet known to hold collision in Skyrim's Havok world
++			bool          forced{ false };   // Skyrim was asked to load its 3D
++			bool          atPlayer{ false }; // its reference was made at the player and moved (else made where it goes)
 +			float         waited{ 0.0f };
++			float         settled{ 0.0f };   // seconds since its 3D loaded
 +			RE::FormID    oldRefId{ 0 };     // the mesh this one replaces: put away when this one has loaded
 +			std::string   oldFile;
 +		};
@@ -3379,8 +3388,8 @@ index 0000000..b124d6e
 +		bool                                    failed = false;
 +		float                                   sincePass = 1.0f;
 +		std::uint32_t                           serial = 0;
-+		std::uint32_t                           loadedWithCollision = 0;
-+		std::uint32_t                           loadedWithout = 0;
++		std::uint32_t                           inWorldCount = 0;  // models whose collision is in the Havok world: they work
++		std::uint32_t                           failures = 0;
 +		std::uint64_t                           cellKey = 0;  // which cell / world the meshes are in
 +
 +		std::uint64_t Key(int a_x, int a_y, int a_z)
@@ -3558,6 +3567,21 @@ index 0000000..b124d6e
 +			return cell && cell->IsAttached();
 +		}
 +
++		// What a loaded model has: a collision object, and a body of it that is in a Havok world.
++		void CollisionState(RE::NiAVObject* a_root, bool& a_hasObject, bool& a_inWorld)
++		{
++			a_hasObject = false;
++			a_inWorld = false;
++			auto* object = a_root ? a_root->GetCollisionObject() : nullptr;
++			if (!object) {
++				return;
++			}
++			a_hasObject = true;
++			auto* body = skyrim_cast<RE::bhkRigidBody*>(object->body.get());
++			auto* rigid = body ? body->GetRigidBody() : nullptr;
++			a_inWorld = rigid && rigid->world;
++		}
++
 +		void GiveUp(const char* a_why)
 +		{
 +			failed = true;
@@ -3571,6 +3595,16 @@ index 0000000..b124d6e
 +		bool Wanted()
 +		{
 +			return Cfg().on && !failed;
++		}
++
++		bool Verified()
++		{
++			return inWorldCount > 0;
++		}
++
++		bool NeedCrates()
++		{
++			return !Verified() || Cfg().cratesAlso;
 +		}
 +
 +		void Release()
@@ -3616,42 +3650,63 @@ index 0000000..b124d6e
 +				cellKey = key;
 +			}
 +
-+			// Meshes made a moment ago: has Skyrim loaded them, and is there collision in them?
-+			for (auto& entry : meshes) {
-+				auto& mesh = entry.second;
++			// Meshes made a moment ago: has Skyrim loaded them, and is their collision in the Havok world?
++			for (auto it = meshes.begin(); it != meshes.end();) {
++				auto& mesh = it->second;
 +				if (!mesh.pending) {
++					++it;
 +					continue;
 +				}
 +				mesh.waited += a_delta;
 +				auto* ref = RE::TESForm::LookupByID<RE::TESObjectREFR>(mesh.refId);
 +				auto* root = ref ? ref->Get3D() : nullptr;
-+				if (root) {
-+					mesh.pending = false;
-+					const bool hasCollision = root->GetCollisionObject() != nullptr;
-+					if (hasCollision) {
-+						++loadedWithCollision;
-+					} else {
-+						++loadedWithout;
-+					}
-+					static int logged = 0;
-+					if (logged++ < 6) {
-+						logger::info("Block collision: section ({}, {}, {}) loaded ({} boxes, {}): {}", mesh.sx, mesh.sy, mesh.sz, mesh.boxes, mesh.file,
-+							hasCollision ? "it has a collision object" : "NO collision object in it");
-+					}
-+					if (mesh.oldRefId != 0 || !mesh.oldFile.empty()) {
-+						PutAway(mesh.oldRefId, mesh.oldFile);
-+						mesh.oldRefId = 0;
-+						mesh.oldFile.clear();
-+					}
-+				} else if (mesh.waited > 20.0f) {
-+					mesh.pending = false;
-+					++loadedWithout;
-+					logger::warn("Block collision: section ({}, {}, {}) has no 3D after {:.0f} seconds ({})", mesh.sx, mesh.sy, mesh.sz, mesh.waited, mesh.file);
++				if (ref && !root && !mesh.forced && mesh.waited > 1.5f) {
++					mesh.forced = true;
++					root = ref->Load3D(false);
++					logger::info("Block collision: section ({}, {}, {}) had no 3D after {:.1f} s; asked Skyrim to load it: {}", mesh.sx, mesh.sy, mesh.sz, mesh.waited,
++						root ? "it did" : "still nothing");
 +				}
-+			}
-+			if (loadedWithout >= 3 && loadedWithCollision == 0) {
-+				GiveUp("the section models load without any collision (or don't load at all)");
-+				return;
++				bool failed3d = false;
++				if (root) {
++					mesh.settled += a_delta;
++					bool hasObject = false, inWorld = false;
++					CollisionState(root, hasObject, inWorld);
++					if (hasObject && inWorld) {
++						mesh.pending = false;
++						++inWorldCount;
++						static int logged = 0;
++						if (logged++ < 6) {
++							logger::info("Block collision: section ({}, {}, {}) works: {} boxes, collision in the Havok world ({}; reference made {})", mesh.sx, mesh.sy, mesh.sz, mesh.boxes, mesh.file,
++								mesh.atPlayer ? "at the player and moved" : "where it goes");
++						}
++						if (mesh.oldRefId != 0 || !mesh.oldFile.empty()) {
++							PutAway(mesh.oldRefId, mesh.oldFile);
++							mesh.oldRefId = 0;
++							mesh.oldFile.clear();
++						}
++					} else if (mesh.settled > 4.0f) {
++						failed3d = true;
++						logger::warn("Block collision: section ({}, {}, {}) loaded ({}) but {}", mesh.sx, mesh.sy, mesh.sz, mesh.file,
++							hasObject ? "its collision object never got a body into the Havok world" : "there is NO collision object in it");
++					}
++				} else if (mesh.waited > 8.0f) {
++					failed3d = true;
++					logger::warn("Block collision: section ({}, {}, {}) has no 3D after {:.0f} s ({}); reference {:08X} {}, in {}, model '{}'", mesh.sx, mesh.sy, mesh.sz, mesh.waited, mesh.file,
++						mesh.refId, ref ? (ref->IsDisabled() ? "is disabled" : "is enabled") : "is gone", ref && ref->GetParentCell() ? (ref->GetParentCell()->IsAttached() ? "an attached cell" : "a cell that isn't attached") : "no cell",
++						mesh.file);
++				}
++				if (failed3d) {
++					++failures;
++					PutAway(mesh.refId, mesh.file);  // the next pass makes it again, until it has failed three times
++					PutAway(mesh.oldRefId, mesh.oldFile);
++					it = meshes.erase(it);
++					if (failures >= 3 && inWorldCount == 0) {
++						GiveUp("the section models never got collision into the Havok world");
++						return;
++					}
++				} else {
++					++it;
++				}
 +			}
 +
 +			sincePass += a_delta;
@@ -3743,6 +3798,13 @@ index 0000000..b124d6e
 +					}
 +				}
 +
++				static bool checkedVisible = false;
++				if (!checkedVisible) {
++					checkedVisible = true;
++					RE::BSResourceNiBinaryStream stream(std::string("Meshes\\") + kModelDir + file);
++					logger::info("Block collision: can Skyrim's own file system open the first model (Meshes\\{}{}): {}", kModelDir, file, stream.good() ? "yes" : "NO");
++				}
++
 +				auto* form = MakeStatic(std::string(kModelDir) + file, float(16 * proto::kUnitsPerBlock));
 +				if (!form) {
 +					std::error_code ec;
@@ -3751,8 +3813,18 @@ index 0000000..b124d6e
 +					return;
 +				}
 +				const RE::NiPoint3 pos = McToSky(double(s.sx) * 16.0, double(s.sy) * 16.0, double(s.sz) * 16.0);
-+				const auto         handle = handler->CreateReferenceAtLocation(form, pos, RE::NiPoint3(), a_player->GetParentCell(), a_player->GetWorldspace(), nullptr, nullptr, RE::ObjectRefHandle(), false, true);
-+				const auto         ref = handle.get();
++				// Two ways to put a reference in the world, tried by turns if the first doesn't give a model that loads: made right where it goes, or
++				// made at the player (as the crates are) and moved.
++				const bool                       placeAtPlayer = (failures & 1) != 0;
++				RE::NiPointer<RE::TESObjectREFR> ref;
++				if (placeAtPlayer) {
++					ref = a_player->PlaceObjectAtMe(form, false);
++					if (ref) {
++						ref->SetPosition(pos);
++					}
++				} else {
++					ref = handler->CreateReferenceAtLocation(form, pos, RE::NiPoint3(), a_player->GetParentCell(), a_player->GetWorldspace(), nullptr, nullptr, RE::ObjectRefHandle(), false, true).get();
++				}
 +				if (!ref) {
 +					std::error_code ec;
 +					std::filesystem::remove(kDir / file, ec);
@@ -3771,6 +3843,7 @@ index 0000000..b124d6e
 +				fresh.file = file;
 +				fresh.boxes = static_cast<std::uint32_t>(std::min<std::size_t>(boxes.size(), collisionnif::kMaxBoxes));
 +				fresh.pending = true;
++				fresh.atPlayer = placeAtPlayer;
 +				if (auto it = meshes.find(mapKey); it != meshes.end()) {
 +					fresh.oldRefId = it->second.refId;  // stays until this one has loaded
 +					fresh.oldFile = it->second.file;
@@ -5485,7 +5558,7 @@ index 4ce955a..41f51a0 100644
  	{
  		REL::Relocation<std::uintptr_t> collector{ RE::VTABLE_bhkCharacterPointCollector[0] };
 diff --git a/skse/src/Game.cpp b/skse/src/Game.cpp
-index 3bb4d34..85d4bab 100644
+index 3bb4d34..50eb9e4 100644
 --- a/skse/src/Game.cpp
 +++ b/skse/src/Game.cpp
 @@ -4,6 +4,14 @@
@@ -5665,7 +5738,7 @@ index 3bb4d34..85d4bab 100644
  			if (puppet) {
  				EnsureControlsEnabled();
  				Game::NoteFrameStep('P');
-@@ -654,9 +775,29 @@ namespace skycraft
+@@ -654,9 +775,33 @@ namespace skycraft
  			st.mcGuiScale = haveMc ? static_cast<int>(mc.guiScale) : 0;
  			Input::SetActivatePromptKey(puppet);
  			Combat::PerFrame(a_player, puppet, a_delta);
@@ -5679,8 +5752,12 @@ index 3bb4d34..85d4bab 100644
 +				// Skyrim's own control mode: the blocks are still there, for NPCs and for the player.
 +				NpcBlocks::PushActorsOut(a_player, a_delta);
 +				if (BlockCollision::Wanted()) {
-+					BlockCrates::Release();
 +					BlockCollision::Update(a_player, a_delta);
++					if (BlockCollision::NeedCrates()) {
++						BlockCrates::Update(a_player, a_delta);
++					} else {
++						BlockCrates::Release();
++					}
 +				} else {
 +					BlockCollision::Release();
 +					BlockCrates::Update(a_player, a_delta);
@@ -5695,7 +5772,7 @@ index 3bb4d34..85d4bab 100644
  			}
  
  			// Interpolate Minecraft's 20 Hz physics ticks on our own clock (what MC's renderer does
-@@ -976,7 +1117,8 @@ namespace skycraft
+@@ -976,7 +1121,8 @@ namespace skycraft
  
  			// Tell Minecraft where Skyrim's player is and where they're looking.
  			proto::SkyState sky{};
@@ -5705,7 +5782,7 @@ index 3bb4d34..85d4bab 100644
  			const auto skyMc = SkyToMc(current);
  			sky.worldId = worldId;
  			sky.collisionEpoch = epoch;
-@@ -991,6 +1133,10 @@ namespace skycraft
+@@ -991,6 +1137,10 @@ namespace skycraft
  			if (auto* calendar = RE::Calendar::GetSingleton()) {
  				sky.gameHour = calendar->GetHour();
  			}
@@ -5716,7 +5793,7 @@ index 3bb4d34..85d4bab 100644
  			link.WriteSkyState(sky);
  
  			settleTimer -= a_delta;
-@@ -1009,7 +1155,8 @@ namespace skycraft
+@@ -1009,7 +1159,8 @@ namespace skycraft
  			const McVec lightCentre = puppet ? McVec{ mc.x, mc.y, mc.z } : skyMc;
  			{
  				Perf::Scope timer(Perf::kLights);
@@ -5726,7 +5803,7 @@ index 3bb4d34..85d4bab 100644
  			}
  
  			// Blocks dug out of Skyrim's world: its collision around them goes to Minecraft again, and
-@@ -1023,7 +1170,8 @@ namespace skycraft
+@@ -1023,7 +1174,8 @@ namespace skycraft
  			}
  			// Not while the world is still settling after a load (its cells are still being attached).
  			static float digSettled = 0.0f;
@@ -5737,7 +5814,7 @@ index 3bb4d34..85d4bab 100644
  				Perf::Scope timer(Perf::kDigMeshes);
  				Dig::UpdateMeshes(digSettled > 3.0f ? a_player : nullptr, a_delta, !dugChanged.empty());
 diff --git a/skse/src/Game.h b/skse/src/Game.h
-index 05788b1..125b63f 100644
+index 05788b1..9c8789b 100644
 --- a/skse/src/Game.h
 +++ b/skse/src/Game.h
 @@ -17,6 +17,20 @@ namespace skycraft
@@ -5832,7 +5909,7 @@ index 05788b1..125b63f 100644
  		// For the blocks' contact shadows (any thread): sets a_bit in a_out[x + w*(y + h*z)] for
  		// each solid block of the box at a_origin (Minecraft block coords) of a_size blocks. The
  		// generation changes whenever any section's blocks do.
-@@ -155,6 +208,18 @@ namespace skycraft
+@@ -155,6 +208,22 @@ namespace skycraft
  		void PushActorsOut(RE::PlayerCharacter* a_player, float a_delta);
  	}
  
@@ -5842,6 +5919,10 @@ index 05788b1..125b63f 100644
 +		// invisible statics (BlockCollision.cpp), so that the player, NPCs and projectiles all meet the blocks. False when it is off in
 +		// SkyCraft.ini or has given up on this install; BlockCrates then holds the player up instead.
 +		bool Wanted();
++		// A section model has been seen with its collision in Skyrim's Havok world, so the models work on this install; until then the crates
++		// BlockCrates.cpp makes round the player are kept as well, so there is always something to stand on.
++		bool Verified();
++		bool NeedCrates();
 +		// Main thread, every frame, while Skyrim's controls are on.
 +		void Update(RE::PlayerCharacter* a_player, float a_delta);
 +		// Puts every section model away (leaving Skyrim's control mode, another cell).
@@ -6266,14 +6347,18 @@ index 741fcca..7690cd8 100644
  namespace skycraft::Launcher
 diff --git a/skse/src/LockOn.cpp b/skse/src/LockOn.cpp
 new file mode 100644
-index 0000000..8a8ba14
+index 0000000..179ccfe
 --- /dev/null
 +++ b/skse/src/LockOn.cpp
-@@ -0,0 +1,125 @@
+@@ -0,0 +1,188 @@
 +#include "Game.h"
 +#include "TDMApi.h"
 +
 +#include <SimpleIni.h>
++
++#include <chrono>
++#include <cmath>
++#include <unordered_map>
 +
 +// Lock-on for Minecraft's mobs. They are not Skyrim actors, so True Directional Movement has nothing to lock on to; instead
 +// every frame the mobs Minecraft sent (proto::kWeMob) are handed to it as virtual targets, with TDM built from
@@ -6296,8 +6381,25 @@ index 0000000..8a8ba14
 +		bool                   installed = false;
 +		bool                   sentAny = false;
 +		std::uint32_t          lastLocked = 0;
++		std::uint32_t          missingLogged = 0;
 +		proto::WorldEntities   entities{};
 +		std::vector<TDM_API::VirtualTarget> targets;
++
++		// The targets of the last few frames. A mob that is missing from one frame's list (Minecraft's list not read in time, a mob left out for a
++		// moment) must not drop the lock: TDM lets go the instant its target isn't there, so a target stays in the list for a little while after it
++		// was last seen. (Not for long: one that has really gone must stop being a target.)
++		struct Seen
++		{
++			TDM_API::VirtualTarget target{};
++			std::int64_t           atMs{ 0 };
++		};
++		std::unordered_map<std::uint32_t, Seen> seen;
++		constexpr std::int64_t                  kGraceMs = 750;
++
++		std::int64_t NowMs()
++		{
++			return std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now().time_since_epoch()).count();
++		}
 +
 +		std::uint32_t TargetId(std::uint32_t a_entityId)
 +		{
@@ -6306,6 +6408,7 @@ index 0000000..8a8ba14
 +
 +		void Withdraw()
 +		{
++			seen.clear();
 +			if (api && sentAny) {
 +				(void)api->SetVirtualTargets(SKSE::GetPluginHandle(), nullptr, 0);
 +			}
@@ -6346,34 +6449,75 @@ index 0000000..8a8ba14
 +		if (!api) {
 +			return;
 +		}
-+		if (!a_active || !a_player || !Link::Get().ReadWorldEntities(entities)) {
++		if (!a_active || !a_player) {
 +			Withdraw();
 +			return;
 +		}
 +
++		const auto now = NowMs();
 +		const auto playerMc = SkyToMc(a_player->GetPosition());
++		// A list that couldn't be read this frame (Minecraft was writing it) is not "no mobs": the last one stands for the grace period.
++		const bool read = Link::Get().ReadWorldEntities(entities);
++		if (read) {
++			for (std::uint32_t i = 0; i < entities.count; ++i) {
++				const auto& e = entities.entities[i];
++				if (e.kind != proto::kWeMob) {
++					continue;
++				}
++				const double dx = e.x - playerMc.x, dy = e.y - playerMc.y, dz = e.z - playerMc.z;
++				if (dx * dx + dy * dy + dz * dz > double(cfg.range) * cfg.range) {
++					continue;
++				}
++				TDM_API::VirtualTarget target{};
++				target.id = TargetId(e.id);
++				const float height = std::max(e.scale, 0.3f);
++				const auto  aim = McToSky(e.x, e.y + height * cfg.aimHeight, e.z);
++				target.x = aim.x;
++				target.y = aim.y;
++				target.z = aim.z;
++				target.health = e.ext[0] < 0.0f ? -1.0f : std::min(e.ext[0], 1.0f);
++				static_assert(sizeof(target.name) == proto::kMobNameBytes);
++				std::memcpy(target.name, e.uv, sizeof(target.name));
++				target.name[sizeof(target.name) - 1] = '\0';
++				seen[target.id] = { target, now };
++			}
++		}
++
++		// Why a lock is about to go: the locked mob is not in this frame's list. Said once, with what is known about it.
++		const std::uint32_t lockedNow = api->GetCurrentVirtualTarget();
++		if (read && lockedNow != 0) {
++			const auto it = seen.find(lockedNow);
++			if (it != seen.end() && it->second.atMs == now) {
++				missingLogged = 0;
++			} else if (missingLogged != lockedNow) {
++				missingLogged = lockedNow;
++				bool         stillThere = false;
++				proto::WorldEntity gone{};
++				for (std::uint32_t i = 0; i < entities.count; ++i) {
++					if (entities.entities[i].id == lockedNow - 1 && entities.entities[i].kind != proto::kWeMob) {
++						stillThere = true;  // Minecraft still has it (its shadow is sent) but sends it no longer as a mob to lock on to
++						gone = entities.entities[i];
++						break;
++					}
++				}
++				if (it != seen.end()) {
++					const auto&  t = it->second.target;
++					const double d = std::sqrt(double(gone.x - playerMc.x) * (gone.x - playerMc.x) + double(gone.z - playerMc.z) * (gone.z - playerMc.z));
++					logger::info("lock-on: locked mob {} ('{}', health {:.2f}) is not in Minecraft's list this frame; {} (last seen {} ms ago{}{})", lockedNow - 1, t.name, t.health,
++						stillThere ? "Minecraft still has it in the world, but not as a lockable mob (dead or dying?)" : "it is gone from Minecraft's list altogether", now - it->second.atMs,
++						stillThere ? ", now " : "", stillThere ? fmt::format("{:.1f} blocks away", d) : std::string());
++				}
++			}
++		}
++
 +		targets.clear();
-+		for (std::uint32_t i = 0; i < entities.count; ++i) {
-+			const auto& e = entities.entities[i];
-+			if (e.kind != proto::kWeMob) {
-+				continue;
++		for (auto it = seen.begin(); it != seen.end();) {
++			if (now - it->second.atMs > kGraceMs) {
++				it = seen.erase(it);
++			} else {
++				targets.push_back(it->second.target);
++				++it;
 +			}
-+			const double dx = e.x - playerMc.x, dy = e.y - playerMc.y, dz = e.z - playerMc.z;
-+			if (dx * dx + dy * dy + dz * dz > double(cfg.range) * cfg.range) {
-+				continue;
-+			}
-+			TDM_API::VirtualTarget target{};
-+			target.id = TargetId(e.id);
-+			const float height = std::max(e.scale, 0.3f);
-+			const auto  aim = McToSky(e.x, e.y + height * cfg.aimHeight, e.z);
-+			target.x = aim.x;
-+			target.y = aim.y;
-+			target.z = aim.z;
-+			target.health = e.ext[0] < 0.0f ? -1.0f : std::min(e.ext[0], 1.0f);
-+			static_assert(sizeof(target.name) == proto::kMobNameBytes);
-+			std::memcpy(target.name, e.uv, sizeof(target.name));
-+			target.name[sizeof(target.name) - 1] = '\0';
-+			targets.push_back(target);
 +		}
 +
 +		(void)api->SetVirtualTargets(SKSE::GetPluginHandle(), targets.data(), static_cast<std::uint32_t>(targets.size()));
@@ -7115,7 +7259,7 @@ index b877ae5..36666dc 100644
  				logger::info("in-frame block drawing: hooked after Main::RenderWorld");
  			}
 diff --git a/skse/src/main.cpp b/skse/src/main.cpp
-index eb548b4..894c1c4 100644
+index eb548b4..37d9575 100644
 --- a/skse/src/main.cpp
 +++ b/skse/src/main.cpp
 @@ -21,6 +21,9 @@ namespace
@@ -7140,7 +7284,7 @@ index eb548b4..894c1c4 100644
  	SetupLog();
  	skycraft::CrashLog::Install();
  	logger::info("SkyCraft {} loading (runtime {})", "0.1.2", a_skse->RuntimeVersion().string());
-+	logger::info("patch revision 23 (block collision is real: section models of merged boxes loaded as invisible statics over the whole area Minecraft sent, with crates as the fallback; revision 22: crates only, the box simulation that held the Skyrim player is gone; Minecraft's mobs, passive ones too, are lock-on targets again, handed to True Directional Movement as virtual targets; revision 21: mob stand-ins removed)");
++	logger::info("patch revision 24 (block collision models checked in the Havok world, crates kept until they work; lock-on survives a missing frame; revision 23: section models of merged boxes loaded as invisible statics over the whole area Minecraft sent; revision 22: crates only, the box simulation that held the Skyrim player is gone; Minecraft's mobs, passive ones too, are lock-on targets again, handed to True Directional Movement as virtual targets; revision 21: mob stand-ins removed)");
  	SKSE::GetMessagingInterface()->RegisterListener(OnMessage);
  	// As early as possible: Minecraft takes about as long to start as Skyrim does to reach its menu.
  	skycraft::Launcher::StartMinecraft();
