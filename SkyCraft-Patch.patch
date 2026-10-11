@@ -402,7 +402,7 @@ index 3127e6e..6929eed 100644
  		if ((flags & Proto.MC_IN_WORLD) != 0) {
  			try {
 diff --git a/fabric/src/client/java/dev/skycraft/client/render/WorldExporter.java b/fabric/src/client/java/dev/skycraft/client/render/WorldExporter.java
-index 9f909ce..ea5a230 100644
+index 9f909ce..973d63b 100644
 --- a/fabric/src/client/java/dev/skycraft/client/render/WorldExporter.java
 +++ b/fabric/src/client/java/dev/skycraft/client/render/WorldExporter.java
 @@ -67,6 +67,8 @@ public final class WorldExporter {
@@ -476,7 +476,62 @@ index 9f909ce..ea5a230 100644
  			// Cells dug out of Skyrim's world: its geometry there goes.
  			if (dugCount > 0 || DUG.contains(key)) {
  				ByteBuffer dugHeader = ByteBuffer.allocate(24).order(ByteOrder.LITTLE_ENDIAN).putInt(sx).putInt(sy).putInt(sz).putInt(dugCount)
-@@ -651,4 +682,9 @@ public final class WorldExporter {
+@@ -315,8 +346,39 @@ public final class WorldExporter {
+ 		return true;
+ 	}
+ 
++	/** Mobs Skyrim's player can lock on to (True Directional Movement's virtual targets): the hostile ones, and any that have set on the player. */
++	private static final int MAX_LOCKABLE_MOBS = 24;
++
++	private static boolean isLockable(Minecraft minecraft, net.minecraft.world.entity.LivingEntity living) {
++		if (living.isDeadOrDying() || living.isRemoved()) {
++			return false;
++		}
++		if (living instanceof net.minecraft.world.entity.Mob mob && mob.getTarget() == minecraft.player) {
++			return true;
++		}
++		return living.getType().getCategory() == net.minecraft.world.entity.MobCategory.MONSTER;
++	}
++
++	/** A mob's name as the 8 floats the entity record's uv holds, which Skyrim reads back as 32 bytes of zero-ended UTF-8. */
++	private static float[] nameBits(String name) {
++		byte[] raw = name.getBytes(java.nio.charset.StandardCharsets.UTF_8);
++		int length = Math.min(raw.length, Proto.MOB_NAME_BYTES - 1);
++		while (length > 0 && length < raw.length && (raw[length] & 0xC0) == 0x80) {
++			--length; // don't cut a multi-byte character in half
++		}
++		byte[] padded = new byte[Proto.MOB_NAME_BYTES];
++		System.arraycopy(raw, 0, padded, 0, length);
++		float[] out = new float[Proto.MOB_NAME_BYTES / 4];
++		ByteBuffer buffer = ByteBuffer.wrap(padded).order(ByteOrder.LITTLE_ENDIAN);
++		for (int i = 0; i < out.length; i++) {
++			out[i] = Float.intBitsToFloat(buffer.getInt());
++		}
++		return out;
++	}
++
+ 	private static void exportEntities(Minecraft minecraft, ClientLevel level, float partialTick) {
+ 		ENTITIES.clear();
++		int lockableMobs = 0;
+ 		Vec3 eye = minecraft.player.getEyePosition(partialTick);
+ 		for (Entity e : level.entitiesForRendering()) {
+ 			if (ENTITIES.size() >= Proto.MAX_WORLD_ENTITIES || e.distanceToSqr(eye) > ENTITY_RANGE * ENTITY_RANGE) {
+@@ -344,6 +406,14 @@ public final class WorldExporter {
+ 				&& (e != minecraft.player || minecraft.gameRenderer.mainCamera().isDetached())) {
+ 				// Players and mobs: Skyrim darkens the ground softly under their feet.
+ 				ENTITIES.add(new SkyLink.WorldEntity(Proto.WE_SHADOW, e.getId(), (float) p.x, (float) p.y, (float) p.z, 0.0F, 0.0F, e.getBbWidth(), null, null, 0));
++				if (e != minecraft.player && lockableMobs < MAX_LOCKABLE_MOBS && ENTITIES.size() < Proto.MAX_WORLD_ENTITIES && isLockable(minecraft, (net.minecraft.world.entity.LivingEntity) e)) {
++					net.minecraft.world.entity.LivingEntity living = (net.minecraft.world.entity.LivingEntity) e;
++					float max = living.getMaxHealth();
++					float health = max > 0.0F ? Mth.clamp(living.getHealth() / max, 0.0F, 1.0F) : -1.0F;
++					ENTITIES.add(new SkyLink.WorldEntity(Proto.WE_MOB, e.getId(), (float) p.x, (float) p.y, (float) p.z, 0.0F, 0.0F, e.getBbHeight(),
++						new float[] { health, e.getBbWidth(), 0.0F }, nameBits(e.getName().getString()), 0));
++					++lockableMobs;
++				}
+ 			}
+ 		}
+ 		addCracks(level);
+@@ -651,4 +721,9 @@ public final class WorldExporter {
  			return this;
  		}
  	}
@@ -2240,7 +2295,7 @@ index 0000000..9909cc5
 +	}
 +}
 diff --git a/fabric/src/main/java/dev/skycraft/link/Proto.java b/fabric/src/main/java/dev/skycraft/link/Proto.java
-index 26b7fe6..3eebb93 100644
+index 26b7fe6..f3c9318 100644
 --- a/fabric/src/main/java/dev/skycraft/link/Proto.java
 +++ b/fabric/src/main/java/dev/skycraft/link/Proto.java
 @@ -8,7 +8,7 @@ public final class Proto {
@@ -2304,7 +2359,16 @@ index 26b7fe6..3eebb93 100644
  	public static final int WEAPON_UNARMED = 0;
  	public static final int WEAPON_BLADE = 1;
  	public static final int WEAPON_AXE = 2;
-@@ -118,6 +142,7 @@ public final class Proto {
+@@ -100,6 +124,8 @@ public final class Proto {
+ 	public static final int WE_BLOCK = 4;
+ 	public static final int WE_CRACK = 5;
+ 	public static final int WE_SHADOW = 6;
++	public static final int WE_MOB = 7;
++	public static final int MOB_NAME_BYTES = 32;
+ 
+ 	// Render ring (relative to OFF_RENDER_RING)
+ 	public static final long RR_HEAD = 0x00;
+@@ -118,6 +144,7 @@ public final class Proto {
  	public static final int REN_RAGDOLL = 9;
  	public static final int REN_SOLIDS = 10;
  	public static final int REN_DUG = 11;
@@ -2312,7 +2376,7 @@ index 26b7fe6..3eebb93 100644
  	public static final int PART_HEAD = 1, PART_BODY = 2, PART_RIGHT_ARM = 3, PART_LEFT_ARM = 4, PART_RIGHT_LEG = 5, PART_LEFT_LEG = 6;
  	public static final int LIGHT_STEADY = 0, LIGHT_FLAME = 1, LIGHT_LAVA = 2;
  	public static final int REN_VERTEX_BYTES = 32;
-@@ -144,10 +169,14 @@ public final class Proto {
+@@ -144,10 +171,14 @@ public final class Proto {
  	public static final long SS_VIEWPORT_W = 0x34;
  	public static final long SS_VIEWPORT_H = 0x38;
  	public static final long SS_GAME_HOUR = 0x3C;
@@ -2327,7 +2391,7 @@ index 26b7fe6..3eebb93 100644
  
  	// McState (relative to OFF_MC_STATE)
  	public static final long MS_SEQ = 0x00;
-@@ -189,6 +218,7 @@ public final class Proto {
+@@ -189,6 +220,7 @@ public final class Proto {
  	public static final int MC_DEAD = 1 << 5;
  	public static final int MC_SWIMMING = 1 << 6;
  	public static final int MC_FLYING = 1 << 7;
@@ -3007,7 +3071,7 @@ index 5ea8e5b..ae3cf6e 100644
      "PressurePlateMixin",
      "ProjectileMixin",
 diff --git a/protocol/skycraft_protocol.h b/protocol/skycraft_protocol.h
-index fce6cf8..0b76170 100644
+index fce6cf8..c1e8ebf 100644
 --- a/protocol/skycraft_protocol.h
 +++ b/protocol/skycraft_protocol.h
 @@ -13,7 +13,7 @@
@@ -3118,7 +3182,26 @@ index fce6cf8..0b76170 100644
  	};
  	static_assert(sizeof(McEvent) == 32);
  
-@@ -345,6 +377,11 @@ namespace skycraft::proto
+@@ -283,6 +315,8 @@ namespace skycraft::proto
+ 	// block outline.
+ 	inline constexpr std::uint32_t kMaxWorldEntities = 160;
+ 
++	inline constexpr std::uint32_t kMobNameBytes = 32;
++
+ 	enum WorldEntityKind : std::uint32_t
+ 	{
+ 		kWeArrow = 1,    // uv[0]: the arrow's item icon
+@@ -291,6 +325,9 @@ namespace skycraft::proto
+ 		kWeBlock = 4,    // dropped block item: a spinning cube of side `scale`, uv[0..2] = side, top, bottom
+ 		kWeCrack = 5,    // block-breaking cracks over the box at (x, y, z) of size ext, uv[0] = crack stage
+ 		kWeShadow = 6,   // a player's or mob's feet at (x, y, z), `scale` wide: its soft contact shadow
++		kWeMob = 7,      // a hostile Minecraft mob Skyrim's player may lock on to (not drawn: Minecraft draws it). id = entity id, (x, y, z) = its feet,
++		                 // scale = its height in blocks, ext[0] = health 0..1 (< 0: unknown), ext[1] = its width in blocks, and its name is
++		                 // zero-ended UTF-8 in the first 32 bytes of uv (kMobNameBytes)
+ 	};
+ 
+ 	struct WorldEntity
+@@ -345,6 +382,11 @@ namespace skycraft::proto
  		                      // section NPCs collide with (sent after its kRenSection; 0 = none)
  		kRenDug = 11,         // RenDug + 512-byte bitset (bit x + 16z + 256y): which blocks of a section
  		                      // were dug out of Skyrim's world (its geometry there is gone); 0 = none
@@ -3130,7 +3213,7 @@ index fce6cf8..0b76170 100644
  		kRenRagdoll = 9,      // RenAvatar + RenBatch[] + RenVertex[]: the player's body standing still,
  		                      // relative to the feet and facing +Z, split into its parts (RenBatch
  		                      // flags bits 8-11: RagdollPart). Sent about once a second while alive;
-@@ -357,6 +394,12 @@ namespace skycraft::proto
+@@ -357,6 +399,12 @@ namespace skycraft::proto
  		std::uint32_t count;       // solid blocks (0: none, and no bitset follows)
  	};
  
@@ -3144,10 +3227,10 @@ index fce6cf8..0b76170 100644
  	{
  		std::int32_t  sx, sy, sz;  // section coords, as in RenSection
 diff --git a/skse/SkyCraft.ini b/skse/SkyCraft.ini
-index 92b585a..46e79e2 100644
+index 92b585a..7963fc6 100644
 --- a/skse/SkyCraft.ini
 +++ b/skse/SkyCraft.ini
-@@ -14,7 +14,54 @@ sLauncher =
+@@ -14,7 +14,60 @@ sLauncher =
  ; What to pass to your own launcher. For Prism: --launch and the SkyCraft instance's folder name.
  sArguments = --launch SkyCraft
  
@@ -3166,12 +3249,6 @@ index 92b585a..46e79e2 100644
 +; over. 0: start with Minecraft's controls.
 +bStartInSkyrimMode = 1
 +
-+; Skyrim's mode: half the width, in blocks, of the box Minecraft's block collision holds your character to.
-+; Minecraft's own player is 0.6 wide (0.3), but Skyrim's body is wider, so at 0.3 your head, shoulders
-+; and arms sink into walls and block corners. Raise it if parts of you still poke into blocks; lower it
-+; if you can't squeeze through one-block gaps. Between 0.3 and 0.49.
-+fSkyrimBodyHalfWidth = 0.4
-+
 +; The key that resets the Minecraft world: every block you built or dug is removed, so nothing is left
 +; floating where Skyrim has moved on (through a door, fast travel). Press it twice within 6 seconds to
 +; confirm. Skyrim's controls take over for the few seconds it takes, then you're back where you were.
@@ -3185,9 +3262,9 @@ index 92b585a..46e79e2 100644
  bDiagnostics = 0
 +
 +[Crates]
-+; Skyrim's mode: real, invisible crates are put on the solid Minecraft blocks around you so Skyrim's own physics has real ground
-+; to stand, slide and jump on (it has none otherwise: Minecraft's blocks only exist for it as fake support planes).
-+; 0 = off (the older way only).
++; Skyrim's mode: Minecraft's blocks are real, invisible crates put on the solid blocks around you, so Skyrim's own character controller
++; stands, walks, steps, jumps and bumps on them like on any crate in the game. There is no other block collision for your character: with
++; this off you fall through every block you place.
 +bBlockCrates = 1
 +
 +; The base form of the crate: hex, as the console shows it (click a crate, read its base ID). Each is scaled to one block
@@ -3202,6 +3279,18 @@ index 92b585a..46e79e2 100644
 +
 +; Blocks to set the crates' tops below the top of their block (negative: above), to tune how the ground feels.
 +fSink = 0.0
++
++[LockOn]
++; Skyrim's mode: Minecraft's hostile mobs are handed to True Directional Movement as lock-on targets (they have no Skyrim actor to lock
++; on to). Needs the TrueDirectionalMovement.dll built with TrueDirectionalMovement-VirtualTargets.patch; with any other TDM this does
++; nothing and the log says so. 0 = off.
++bLockOnMobs = 1
++
++; How high up a mob's body the camera and your character face when locked on, as a fraction of its height.
++fAimHeight = 0.6
++
++; How far, in blocks, a mob can be and still be offered for lock-on (TDM's own lock-on distance applies as well).
++fRange = 40
 diff --git a/skse/src/BlockCrates.cpp b/skse/src/BlockCrates.cpp
 new file mode 100644
 index 0000000..2b5b996
@@ -3632,170 +3721,6 @@ index 0000000..2b5b996
 +				}
 +			}
 +		}
-+	}
-+}
-diff --git a/skse/src/BlockMove.h b/skse/src/BlockMove.h
-new file mode 100644
-index 0000000..0cbdd07
---- /dev/null
-+++ b/skse/src/BlockMove.h
-@@ -0,0 +1,158 @@
-+#pragma once
-+
-+#include <algorithm>
-+#include <cmath>
-+#include <vector>
-+
-+// Minecraft's own movement collision (Entity.collide / collideBoundingBox / the step-up test),
-+// on plain boxes and with no game types in it, so it is the same algorithm Minecraft runs and can
-+// be tested on its own. Used to hold the Skyrim-controlled player against Minecraft's blocks 1:1.
-+// Coordinates are Minecraft's (x east, y up, z south), in blocks. B is any box type with float or
-+// double lo[3] and hi[3].
-+namespace skycraft::BlockMove
-+{
-+	struct Aabb
-+	{
-+		double lo[3], hi[3];
-+
-+		Aabb Moved(double a_x, double a_y, double a_z) const
-+		{
-+			return { { lo[0] + a_x, lo[1] + a_y, lo[2] + a_z }, { hi[0] + a_x, hi[1] + a_y, hi[2] + a_z } };
-+		}
-+		// Minecraft's AABB.expandTowards: grows the box in the direction of the movement.
-+		Aabb Expanded(double a_x, double a_y, double a_z) const
-+		{
-+			Aabb r = *this;
-+			(a_x < 0 ? r.lo[0] : r.hi[0]) += a_x;
-+			(a_y < 0 ? r.lo[1] : r.hi[1]) += a_y;
-+			(a_z < 0 ? r.lo[2] : r.hi[2]) += a_z;
-+			return r;
-+		}
-+	};
-+
-+	struct Vec
-+	{
-+		double x, y, z;
-+		double HorizSqr() const { return x * x + z * z; }
-+	};
-+
-+	constexpr double kEps = 1.0e-7;       // Shapes.collide's epsilon
-+	constexpr double kStepHeight = 0.6;   // the player's maxUpStep
-+
-+	// Shapes.collide: how far the box can move along a_axis (by a_d) before a box stops it.
-+	template <class B>
-+	double ClipAxis(const std::vector<B>& a_boxes, const Aabb& a_a, int a_axis, double a_d)
-+	{
-+		const int o1 = (a_axis + 1) % 3, o2 = (a_axis + 2) % 3;
-+		for (const auto& b : a_boxes) {
-+			if (!(a_a.hi[o1] > b.lo[o1] + kEps && a_a.lo[o1] < b.hi[o1] - kEps && a_a.hi[o2] > b.lo[o2] + kEps && a_a.lo[o2] < b.hi[o2] - kEps)) {
-+				continue;
-+			}
-+			if (a_d > 0.0 && b.lo[a_axis] >= a_a.hi[a_axis] - kEps) {
-+				a_d = std::min(a_d, double(b.lo[a_axis]) - a_a.hi[a_axis]);
-+			} else if (a_d < 0.0 && b.hi[a_axis] <= a_a.lo[a_axis] + kEps) {
-+				a_d = std::max(a_d, double(b.hi[a_axis]) - a_a.lo[a_axis]);
-+			}
-+		}
-+		return a_d;
-+	}
-+
-+	// Entity.collideBoundingBox: y first, then whichever of x and z is the longer move first.
-+	template <class B>
-+	Vec CollideBox(const std::vector<B>& a_boxes, Aabb a_a, Vec a_m)
-+	{
-+		if (a_m.y != 0.0) {
-+			a_m.y = ClipAxis(a_boxes, a_a, 1, a_m.y);
-+			if (a_m.y != 0.0) {
-+				a_a = a_a.Moved(0, a_m.y, 0);
-+			}
-+		}
-+		const bool zFirst = std::abs(a_m.x) < std::abs(a_m.z);
-+		if (zFirst && a_m.z != 0.0) {
-+			a_m.z = ClipAxis(a_boxes, a_a, 2, a_m.z);
-+			if (a_m.z != 0.0) {
-+				a_a = a_a.Moved(0, 0, a_m.z);
-+			}
-+		}
-+		if (a_m.x != 0.0) {
-+			a_m.x = ClipAxis(a_boxes, a_a, 0, a_m.x);
-+			if (!zFirst && a_m.x != 0.0) {
-+				a_a = a_a.Moved(a_m.x, 0, 0);
-+			}
-+		}
-+		if (!zFirst && a_m.z != 0.0) {
-+			a_m.z = ClipAxis(a_boxes, a_a, 2, a_m.z);
-+		}
-+		return a_m;
-+	}
-+
-+	// Entity.collide: the move the entity actually makes, with the step-up onto ledges of up to
-+	// a_stepHeight when it was a_onGround (or lands this very move).
-+	template <class B>
-+	Vec Collide(const std::vector<B>& a_boxes, const Aabb& a_a, Vec a_m, bool a_onGround, double a_stepHeight = kStepHeight)
-+	{
-+		const Vec  c = CollideBox(a_boxes, a_a, a_m);
-+		const bool xc = a_m.x != c.x, yc = a_m.y != c.y, zc = a_m.z != c.z;
-+		const bool below = yc && a_m.y < 0.0;
-+		if (a_stepHeight > 0.0 && (a_onGround || below) && (xc || zc)) {
-+			Vec up = CollideBox(a_boxes, a_a, { a_m.x, a_stepHeight, a_m.z });
-+			const Vec vert = CollideBox(a_boxes, a_a.Expanded(a_m.x, 0.0, a_m.z), { 0.0, a_stepHeight, 0.0 });
-+			if (vert.y < a_stepHeight) {
-+				Vec h = CollideBox(a_boxes, a_a.Moved(0, vert.y, 0), { a_m.x, 0.0, a_m.z });
-+				h.y += vert.y;
-+				if (h.HorizSqr() > up.HorizSqr()) {
-+					up = h;
-+				}
-+			}
-+			if (up.HorizSqr() > c.HorizSqr()) {
-+				const Vec down = CollideBox(a_boxes, a_a.Moved(up.x, up.y, up.z), { 0.0, -up.y + a_m.y, 0.0 });
-+				return { up.x + down.x, up.y + down.y, up.z + down.z };
-+			}
-+		}
-+		return c;
-+	}
-+
-+	// Pushes a box that ended up inside blocks (a block placed on it, a teleport) back out the
-+	// shortest way, up first when the ledge is within a step. Returns how far it moved.
-+	template <class B>
-+	Vec Depenetrate(const std::vector<B>& a_boxes, Aabb a_a, double a_stepHeight = kStepHeight)
-+	{
-+		Vec total{ 0, 0, 0 };
-+		for (int pass = 0; pass < 6; ++pass) {
-+			bool hit = false;
-+			for (const auto& b : a_boxes) {
-+				bool in = true;
-+				for (int i = 0; i < 3; ++i) {
-+					in = in && a_a.hi[i] > b.lo[i] + 1e-4 && a_a.lo[i] < b.hi[i] - 1e-4;
-+				}
-+				if (!in) {
-+					continue;
-+				}
-+				const double up = b.hi[1] - a_a.lo[1];
-+				double       best = 1e9;
-+				Vec          move{ 0, 0, 0 };
-+				if (up <= a_stepHeight + 0.05) {
-+					best = up;
-+					move = { 0, up, 0 };
-+				} else {
-+					const double d[4] = { b.hi[0] - a_a.lo[0], a_a.hi[0] - b.lo[0], b.hi[2] - a_a.lo[2], a_a.hi[2] - b.lo[2] };
-+					const Vec    v[4] = { { d[0], 0, 0 }, { -d[1], 0, 0 }, { 0, 0, d[2] }, { 0, 0, -d[3] } };
-+					for (int i = 0; i < 4; ++i) {
-+						if (d[i] < best) {
-+							best = d[i];
-+							move = v[i];
-+						}
-+					}
-+				}
-+				a_a = a_a.Moved(move.x, move.y, move.z);
-+				total = { total.x + move.x, total.y + move.y, total.z + move.z };
-+				hit = true;
-+				break;
-+			}
-+			if (!hit) {
-+				break;
-+			}
-+		}
-+		return total;
 +	}
 +}
 diff --git a/skse/src/Combat.cpp b/skse/src/Combat.cpp
@@ -4606,35 +4531,21 @@ index 0954b7f..c7705b5 100644
  	}
  }
 diff --git a/skse/src/Dig.h b/skse/src/Dig.h
-index 9b1d191..f8007c8 100644
+index 9b1d191..0106d8c 100644
 --- a/skse/src/Dig.h
 +++ b/skse/src/Dig.h
-@@ -48,6 +48,23 @@ namespace skycraft::Dig
+@@ -48,6 +48,9 @@ namespace skycraft::Dig
  	// drives the player (null otherwise), and its feet (Havok z). Its body only stands on what's
  	// under its feet: anything else (the ground over a hole it's in) would shove it out.
  	void SetPuppet(const RE::hkpCollidable* a_proxy, float a_feetHavokZ);
-+	// Main thread, every frame: the player proxy's collidable while Skyrim drives the player (null otherwise).
-+	// Minecraft's blocks are held against it by NpcBlocks::HoldPlayerUp, not by Havok planes.
-+	void SetSkyrimPlayer(const RE::hkpCollidable* a_proxy, RE::bhkCharacterController* a_controller = nullptr);
-+	// Minecraft's collision has the Skyrim-controlled player resting on a block's top: Havok's support check must agree.
-+	void SetSkyrimPlayerResting(bool a_resting);
-+	// The Skyrim-controlled player stands on a block with no movement key held: its block planes then have friction (see the plane hook).
-+	void SetSkyrimPlayerStill(bool a_still);
-+	// Physics steps since the last call in which Skyrim put the resting player in the air and the plane hook put it back.
-+	int TakeSkyrimPlayerFlips();
-+	// What the plane hook last did for the Skyrim-controlled player (for the log): hook calls since the last read, planes added, the nearest
-+	// plane's distance, the proxy's keepDistance, the capsule's bottom in blocks.
-+	void SkyrimPlayerSupportDebug(int& a_calls, int& a_planes, float& a_nearest, float& a_keep, float& a_boxZ, int& a_own, int& a_manifold);
-+	// Half the width, in blocks, of the box Minecraft's block collision holds the Skyrim-controlled player to, and
-+	// that the planes it stands on are worked out from. Minecraft's own player is 0.6 wide (0.3 each side), but
-+	// Skyrim's body (shoulders, arms, a head leaning into a run) is wider than that, so held to 0.3 the model sank
-+	// into every wall and block corner it touched. SkyCraft.ini [Controls] fSkyrimBodyHalfWidth, default 0.4. Any thread.
-+	double SkyrimPlayerHalfWidth();
++	// Main thread, every frame: the player proxy's collidable while Skyrim drives the player (null otherwise). Minecraft's blocks are real
++	// crates for it then (BlockCrates.cpp), so Havok gets no planes of ours for this body.
++	void SetSkyrimPlayer(const RE::hkpCollidable* a_proxy);
  	// Main thread, every frame: cuts dug blocks out of the meshes Skyrim draws (DigMesh.cpp).
  	// a_changed: blocks were dug this frame.
  	void UpdateMeshes(RE::PlayerCharacter* a_player, float a_delta, bool a_changed);
 diff --git a/skse/src/DigPhysics.cpp b/skse/src/DigPhysics.cpp
-index 4ce955a..0b3c243 100644
+index 4ce955a..41f51a0 100644
 --- a/skse/src/DigPhysics.cpp
 +++ b/skse/src/DigPhysics.cpp
 @@ -2,6 +2,8 @@
@@ -4661,104 +4572,17 @@ index 4ce955a..0b3c243 100644
  namespace skycraft::Dig
  {
  	namespace
-@@ -66,6 +76,21 @@ namespace skycraft::Dig
+@@ -66,6 +76,9 @@ namespace skycraft::Dig
  		std::atomic<int> loggedDropped{ 0 };
  		std::atomic<int> loggedPlanes{ 0 };
  		std::atomic<const RE::hkpCollidable*> puppet{ nullptr };
-+		// The player's proxy in Skyrim's own control mode: held against the blocks by NpcBlocks.cpp (Minecraft's own
-+		// collision), so Havok only gives it the planes it stands on.
++		// The player's proxy in Skyrim's own control mode. Minecraft's blocks are real crates there (BlockCrates.cpp), so Havok's own contacts
++		// are all the player gets: no planes of ours, no holding it up by hand.
 +		std::atomic<const RE::hkpCollidable*> skyPlayer{ nullptr };
-+		std::atomic<bool>                     skyPlayerResting{ false };
-+		std::atomic<bool>                     skyPlayerStill{ false };
-+		std::atomic<RE::bhkCharacterController*> skyController{ nullptr };  // the Skyrim-controlled player's controller (hook can't trust its own `this`)
-+		std::atomic<int>                      skyPlayerPlaneCount{ 0 };    // planes added to the player's last support/integrate call
-+		std::atomic<float>                    skyPlayerNearest{ 99.0f };   // the nearest of them (Havok units)
-+		std::atomic<float>                    skyPlayerKeep{ 0.0f };       // the proxy's keepDistance
-+		std::atomic<float>                    skyPlayerBoxZ{ 0.0f };       // capsule bottom, blocks
-+		std::atomic<int>                      skyPlayerFlips{ 0 };         // steps in which Skyrim had the player in the air on a block and the hook put it back
-+		std::atomic<int>                      skyPlayerCalls{ 0 };         // hook calls for the player since the last read
-+		std::atomic<int>                      skyPlayerOwnPlanes{ 0 };     // planes Skyrim's own callback had already put in
-+		std::atomic<int>                      skyPlayerManifold{ -1 };     // contacts in the proxy's manifold (-1: unknown)
-+		std::atomic<double>                   skyBodyHalfWidth{ 0.4 };  // Dig::SkyrimPlayerHalfWidth
  		std::atomic<float>                    puppetFeet{ 0.0f };
  		constexpr float                       kFeetSlack = 0.3f;  // Havok units above the feet still "under" them
  
-@@ -83,6 +108,55 @@ namespace skycraft::Dig
- 			return p[2] > puppetFeet.load(std::memory_order_relaxed) + kFeetSlack;
- 		}
- 
-+		// The Skyrim-controlled player is held against Minecraft's blocks by NpcBlocks::HoldPlayerUp (a box wider than the capsule), so
-+		// the real crates under the blocks only have to be flat ground. Their sides, and the rim of their tops (tilted normals; the
-+		// strip beyond a block's open edge where Minecraft still has the player standing), pushed the capsule about, read as sliding or
-+		// "not supported" (no jump at an edge), and bumped at every corner. Those contacts are dropped; SupportPlanes covers the strip.
-+		bool DropCrateContact(const RE::hkpCdPoint& a_point)
-+		{
-+			const auto* sp = skyPlayer.load(std::memory_order_relaxed);
-+			if (!sp) {
-+				return false;
-+			}
-+			const auto* rootA = Root(a_point.cdBodyA);
-+			const auto* rootB = Root(a_point.cdBodyB);
-+			if (rootA != sp && rootB != sp) {
-+				return false;
-+			}
-+			const RE::hkpCollidable* world = rootA == sp ? rootB : rootA;
-+			auto*                    ref = world ? RE::TESHavokUtilities::FindCollidableRef(*world) : nullptr;
-+			auto*                    base = ref ? ref->GetBaseObject() : nullptr;
-+			if (!base || base->GetFormID() != BlockCrates::BaseForm()) {
-+				return false;
-+			}
-+			alignas(16) float p[4], n[4];
-+			_mm_store_ps(p, a_point.contact.position.quad);
-+			_mm_store_ps(n, a_point.contact.separatingNormal.quad);
-+			const float sign = world == rootB ? 1.0f : -1.0f;
-+			bool        drop = n[2] * sign < 0.95f;  // a side, or the rounded rim of a top
-+			if (!drop) {
-+				const float k = BlocksPerHavok();
-+				const float mx = p[0] * k, my = p[2] * k, mz = -p[1] * k;
-+				const int   bx = int(std::floor(mx)), by = int(std::floor(my - 0.05f)), bz = int(std::floor(mz));
-+				constexpr float kEdge = 0.12f;
-+				if (!NpcBlocks::SolidAt(bx, by, bz)) {
-+					drop = true;  // over the crate's overhang
-+				} else {
-+					const float fx = mx - float(bx), fz = mz - float(bz);
-+					// Near an edge that has no solid block beside it at this height: the top does not go on there.
-+					drop = (fx < kEdge && !NpcBlocks::SolidAt(bx - 1, by, bz)) || (fx > 1.0f - kEdge && !NpcBlocks::SolidAt(bx + 1, by, bz)) ||
-+					       (fz < kEdge && !NpcBlocks::SolidAt(bx, by, bz - 1)) || (fz > 1.0f - kEdge && !NpcBlocks::SolidAt(bx, by, bz + 1));
-+				}
-+			}
-+			if (drop) {
-+				static std::atomic<int> logged{ 0 };
-+				if (logged.fetch_add(1) == 0) {
-+					logger::info("Skyrim control: crate side and edge contacts ignored for the player (blocks hold it, not the crates' rims)");
-+				}
-+			}
-+			return drop;
-+		}
-+
- 		struct AddCdPointHook
- 		{
- 			static void thunk(RE::bhkCharacterPointCollector* a_this, const RE::hkpCdPoint& a_point)
-@@ -94,7 +168,7 @@ namespace skycraft::Dig
- 					}
- 					return;
- 				}
--				if (AboveThePuppetsFeet(a_point)) {
-+				if (AboveThePuppetsFeet(a_point) || DropCrateContact(a_point)) {
- 					return;
- 				}
- 				func(a_this, a_point);
-@@ -113,6 +187,9 @@ namespace skycraft::Dig
- 				if (Any() && OnDugGround(a_point)) {
- 					return;
- 				}
-+				if (DropCrateContact(a_point)) {
-+					return;
-+				}
- 				func(a_this, a_point);
- 			}
- 			static inline REL::Relocation<decltype(thunk)> func;
-@@ -145,68 +222,174 @@ namespace skycraft::Dig
+@@ -145,62 +158,68 @@ namespace skycraft::Dig
  			if ((x1 - x0 + 1) * (y1 - y0 + 1) * (z1 - z0 + 1) > 512) {
  				return;  // something huge (a dragon): not worth it
  			}
@@ -4846,7 +4670,16 @@ index 4ce955a..0b3c243 100644
 +								} else {
 +									plane = { { 0, 1, 0 }, -(side[3] + r) };
 +								}
-+							}
+ 							}
+-						}
+-						if (plane.d > kPlaneReach) {
+-							continue;
+-						}
+-						bool duplicate = false;
+-						for (const auto& other : a_out) {
+-							if (std::fabs(other.d - plane.d) < 1e-3f && other.n[0] * plane.n[0] + other.n[1] * plane.n[1] + other.n[2] * plane.n[2] > 0.9999f) {
+-								duplicate = true;
+-								break;
 +							if (plane.d > kPlaneReach) {
 +								continue;
 +							}
@@ -4860,259 +4693,43 @@ index 4ce955a..0b3c243 100644
 +							if (!duplicate) {
 +								a_out.push_back(plane);
  							}
- 						}
--						if (plane.d > kPlaneReach) {
-+					}
-+				}
-+			}
-+		}
-+
-+		// Minecraft stands the player on a block as long as any of its 0.6-wide box is over the block's top, but the
-+		// capsule planes above only count a block as ground while the capsule's centre is within about its radius of the
-+		// block. In the strip between, Minecraft says "standing" and Skyrim says "falling", and Skyrim moves a falling
-+		// player slowly: that was the crawl near the edges of blocks. So for the Skyrim-controlled player, each block top
-+		// under any part of Minecraft's box becomes a flat plane, whatever the capsule's centre is over.
-+		void SupportPlanes(const RE::hkAabb& a_box, float a_keepDistance, std::vector<Plane>& a_out)
-+		{
-+			const double     kHalf = Dig::SkyrimPlayerHalfWidth();  // the box NpcBlocks::HoldPlayerUp holds the player to
-+			constexpr double kBelow = 0.02;    // blocks: feet this far into a top still count as on it
-+			constexpr double kAbove = 0.30;    // blocks: tops this far under the feet still hold it up
-+			alignas(16) float lo[4], hi[4];
-+			_mm_store_ps(lo, a_box.min.quad);
-+			_mm_store_ps(hi, a_box.max.quad);
-+			const double k = BlocksPerHavok();
-+			const double mx = (lo[0] + hi[0]) * 0.5 * k, mz = -(lo[1] + hi[1]) * 0.5 * k, fy = lo[2] * k;
-+			const int    bx0 = int(std::floor(mx - kHalf)), bx1 = int(std::floor(mx + kHalf));
-+			const int    bz0 = int(std::floor(mz - kHalf)), bz1 = int(std::floor(mz + kHalf));
-+			for (int by = int(std::floor(fy - kAbove)) - 1; by <= int(std::floor(fy + kBelow)); ++by) {  // -1: a fence reaches up from the block below
-+				for (int bz = bz0; bz <= bz1; ++bz) {
-+					for (int bx = bx0; bx <= bx1; ++bx) {
-+						if (!NpcBlocks::SolidAt(bx, by, bz)) {
- 							continue;
- 						}
--						bool duplicate = false;
--						for (const auto& other : a_out) {
--							if (std::fabs(other.d - plane.d) < 1e-3f && other.n[0] * plane.n[0] + other.n[1] * plane.n[1] + other.n[2] * plane.n[2] > 0.9999f) {
--								duplicate = true;
--								break;
-+						NpcBlocks::BlockBox boxes[NpcBlocks::kMaxBoxes];
-+						const int           boxCount = NpcBlocks::BoxesAt(bx, by, bz, boxes);
-+						for (int bi = 0; bi < boxCount; ++bi) {
-+							const auto&               bb = boxes[bi];
-+							const NpcBlocks::BlockBox ab{ { bx + bb.lo[0], by + bb.lo[1], bz + bb.lo[2] }, { bx + bb.hi[0], by + bb.hi[1], bz + bb.hi[2] } };
-+							// Same overlap test as Minecraft's own collision (Shapes.collide's epsilon).
-+							if (!(mx + kHalf > ab.lo[0] + 1e-7 && mx - kHalf < ab.hi[0] - 1e-7 && mz + kHalf > ab.lo[2] + 1e-7 && mz - kHalf < ab.hi[2] - 1e-7)) {
-+								continue;
-+							}
-+							const double gap = fy - ab.hi[1];  // blocks, feet above the top
-+							if (gap < -kBelow || gap > kAbove || NpcBlocks::FaceCovered(ab, 1, 1)) {
-+								continue;
-+							}
-+							// Minecraft's collision already keeps the player out of the block, so anywhere within kSnap of a top counts as resting
-+							// exactly on it: a plane at keepDistance (zero gap, no push). A plane with a real gap of 0.05-0.3 blocks, or one the
-+							// capsule has sunk into (a push upward), made Havok's support check say "not supported" or "sliding", and Skyrim
-+							// then moved the player as if in the air: sliding across blocks, never landing.
-+							// 0.16: after a jump the capsule bottom sat 0.15-0.17 above the top in the log, outside the old 0.10, so Havok kept
-+							// the real gap, kept pulling the player down (0.01-0.02 a frame, undone by hand every frame) and held it "in the air" for 0.8 s.
-+							constexpr double kSnap = 0.16;
-+							const float     d = (gap <= kSnap) ? a_keepDistance : float(gap / k);
-+							bool        duplicate = false;
-+							for (const auto& other : a_out) {
-+								if (std::fabs(other.d - d) < 1e-3f && other.n[2] > 0.9999f) {
-+									duplicate = true;
-+									break;
-+								}
-+							}
-+							if (!duplicate) {
-+								a_out.push_back({ { 0.0f, 0.0f, 1.0f }, d });
- 							}
 -						}
 -						if (!duplicate) {
 -							a_out.push_back(plane);
  						}
  					}
  				}
- 			}
- 		}
- 
-+		// Skyrim's state machine puts the player in the air (state 2) on every physics step while it rests on a Minecraft block (Havok's
-+		// manifold has no contact under it, only our planes), and an airborne player has air control (ice-like sliding), no jump
-+		// and the falling pose. The hook runs inside the step (support check, state update, integrate), so putting the ground state
-+		// back here leaves the player on the ground at the END of the step, before anything reads it. Only from the air state, not
-+		// the jump (state 1): the jump has to run.
-+		template <class C>
-+		bool HoldGround(C* a_controller)
-+		{
-+			if (!a_controller) {
-+				return false;
-+			}
-+			static bool probed = false;
-+			if (!probed) {
-+				probed = true;
-+				constexpr bool hasSurfaceInfo = requires { a_controller->surfaceInfo.supportedState = RE::hkpSurfaceInfo::SupportedState::kSupported; };
-+				logger::info("dig: this CommonLib {} the controller's surface info (supported state)", hasSurfaceInfo ? "can set" : "cannot reach");
-+			}
-+			a_controller->flags.set(RE::CHARACTER_FLAGS::kSupport);
-+			if constexpr (requires { a_controller->surfaceInfo.supportedState = RE::hkpSurfaceInfo::SupportedState::kSupported; }) {
-+				a_controller->surfaceInfo.supportedState = RE::hkpSurfaceInfo::SupportedState::kSupported;
-+			}
-+			if (a_controller->context.currentState == RE::hkpCharacterStateType::kInAir) {
-+				a_controller->context.currentState = RE::hkpCharacterStateType::kOnGround;
-+				a_controller->fallTime = 0.0f;
-+				skyPlayerFlips.fetch_add(1, std::memory_order_relaxed);
-+				return true;
-+			}
-+			return false;
-+		}
-+
-+		template <class M>
-+		int ManifoldSize(const M& a_manifold)
-+		{
-+			if constexpr (requires { a_manifold.size(); }) {
-+				return int(a_manifold.size());
-+			} else {
-+				return -1;
-+			}
-+		}
-+
- 		struct ProcessConstraintsHook
- 		{
- 			static void thunk(RE::bhkCharProxyController* a_this, RE::hkpCharacterProxy* a_proxy, const RE::hkArray<RE::hkpRootCdPoint>& a_manifold, RE::hkpSimplexSolverInput& a_input)
-@@ -235,18 +418,56 @@ namespace skycraft::Dig
+@@ -232,11 +251,15 @@ namespace skycraft::Dig
+ 				}
+ 				RE::hkAabb box;
+ 				shape->GetAabbImpl(phantom->motionState.transform, 0.0f, box);
++				// The player in Skyrim's own control mode stands on real crates (BlockCrates.cpp): Havok's contacts with them are all it gets.
++				if (&phantom->collidable == skyPlayer.load(std::memory_order_relaxed)) {
++					return;
++				}
  				static thread_local std::vector<Plane> planes;
  				planes.clear();
  				BlockPlanes(box, planes);
--				if (&phantom->collidable == puppet.load(std::memory_order_relaxed)) {
+ 				if (&phantom->collidable == puppet.load(std::memory_order_relaxed)) {
 -					// The player's body: only the blocks it stands on (Minecraft does the rest).
-+				if (&phantom->collidable == puppet.load(std::memory_order_relaxed) || &phantom->collidable == skyPlayer.load(std::memory_order_relaxed)) {
-+					// The player's body: only the blocks it stands on (Minecraft's own collision does the rest). Skyrim then
-+					// really is standing on them: on the ground, able to jump, no falling pose.
++					// The player's body while Minecraft drives it: only the blocks it stands on (Minecraft's own collision does the rest).
  					std::erase_if(planes, [](const Plane& a_plane) { return a_plane.n[2] < 0.7f; });
-+					if (&phantom->collidable == skyPlayer.load(std::memory_order_relaxed)) {
-+						SupportPlanes(box, a_proxy->keepDistance, planes);  // Minecraft's box, not just the capsule, decides what it stands on
-+					}
  				}
  				if (planes.empty()) {
- 					return;
- 				}
- 				std::ranges::sort(planes, {}, &Plane::d);
-+				if (&phantom->collidable == skyPlayer.load(std::memory_order_relaxed) && skyPlayerResting.load(std::memory_order_relaxed)) {
-+					// Minecraft's collision has the player resting on a block's top, to the millimetre. Where the capsule's lowest
-+					// point sits relative to that (its radius, Havok's keepDistance) is not something the planes above can know:
-+					// if they come out a hair too far, Havok's support check says "nothing under it", the player is in the air as far
-+					// as Skyrim is concerned (no jump, falling pose, slow air control while it slides across the block). So a flat
-+					// plane exactly at keepDistance, which stops the fall with no push, goes first.
-+					planes.insert(planes.begin(), Plane{ { 0.0f, 0.0f, 1.0f }, a_proxy->keepDistance });
-+					if (HoldGround(skyController.load(std::memory_order_relaxed))) {
-+						static int announcedHoldGround = 0;
-+						if (announcedHoldGround < 5) {
-+							++announcedHoldGround;
-+							logger::info("dig: put the Skyrim-controlled player back on the ground inside the physics step (it rests on a block)");
-+						}
-+					}
-+					static bool announcedRest = false;
-+					if (!announcedRest) {
-+						announcedRest = true;
-+						logger::info("dig: resting on a block: support plane added for the Skyrim-controlled player");
-+					}
-+				}
- 				const int count = std::min<int>(room, static_cast<int>(planes.size()));
-+				if (&phantom->collidable == skyPlayer.load(std::memory_order_relaxed)) {
-+					skyPlayerPlaneCount.store(count, std::memory_order_relaxed);
-+					skyPlayerNearest.store(planes[0].d, std::memory_order_relaxed);
-+					skyPlayerKeep.store(a_proxy->keepDistance, std::memory_order_relaxed);
-+					alignas(16) float zlo[4];
-+					_mm_store_ps(zlo, box.min.quad);
-+					skyPlayerBoxZ.store(zlo[2] * BlocksPerHavok(), std::memory_order_relaxed);
-+					skyPlayerCalls.fetch_add(1, std::memory_order_relaxed);
-+					skyPlayerOwnPlanes.store(before, std::memory_order_relaxed);
-+					skyPlayerManifold.store(ManifoldSize(a_manifold), std::memory_order_relaxed);
-+				}
- 				if (loggedPlanes.fetch_add(1) < 3) {
- 					logger::info("dig: {} Minecraft block planes for an actor (room {}, nearest {:.2f})", count, room, planes[0].d);
- 				}
-+				// The Skyrim-controlled player's planes carry no friction. Skyrim has that player in the air state on a block, where gravity presses
-+				// it into the plane every step, and the proxy's friction then ate its walking speed (it waded through the blocks like mud).
-+				const bool frictionless = &phantom->collidable == skyPlayer.load(std::memory_order_relaxed) && !skyPlayerStill.load(std::memory_order_relaxed);
- 				for (int i = 0; i < count; ++i) {
- 					const auto& p = planes[i];
- 					auto&       c = a_input.constraints[a_input.numConstraints++];
-@@ -259,10 +480,10 @@ namespace skycraft::Dig
- 					}
- 					c.plane = RE::hkVector4(p.n[0], p.n[1], p.n[2], w);
- 					c.velocity = RE::hkVector4(v[0], v[1], v[2], 0.0f);
--					c.staticFriction = a_proxy->staticFriction;
--					c.extraUpStaticFriction = a_proxy->extraUpStaticFriction;
--					c.extraDownStaticFriction = a_proxy->extraDownStaticFriction;
--					c.dynamicFriction = a_proxy->dynamicFriction;
-+					c.staticFriction = frictionless ? 0.0f : a_proxy->staticFriction;
-+					c.extraUpStaticFriction = frictionless ? 0.0f : a_proxy->extraUpStaticFriction;
-+					c.extraDownStaticFriction = frictionless ? 0.0f : a_proxy->extraDownStaticFriction;
-+					c.dynamicFriction = frictionless ? 0.0f : a_proxy->dynamicFriction;
- 					c.priority = 0;
- 				}
- 			}
-@@ -302,8 +523,58 @@ namespace skycraft::Dig
+@@ -302,6 +325,11 @@ namespace skycraft::Dig
  		puppet.store(a_proxy, std::memory_order_relaxed);
  	}
  
-+	void SetSkyrimPlayer(const RE::hkpCollidable* a_proxy, RE::bhkCharacterController* a_controller)
++	void SetSkyrimPlayer(const RE::hkpCollidable* a_proxy)
 +	{
 +		skyPlayer.store(a_proxy, std::memory_order_relaxed);
-+		skyController.store(a_proxy ? a_controller : nullptr, std::memory_order_relaxed);
-+		if (!a_proxy) {
-+			skyPlayerResting.store(false, std::memory_order_relaxed);
-+		}
-+	}
-+
-+	void SkyrimPlayerSupportDebug(int& a_calls, int& a_planes, float& a_nearest, float& a_keep, float& a_boxZ, int& a_own, int& a_manifold)
-+	{
-+		a_calls = skyPlayerCalls.exchange(0, std::memory_order_relaxed);
-+		a_planes = skyPlayerPlaneCount.load(std::memory_order_relaxed);
-+		a_nearest = skyPlayerNearest.load(std::memory_order_relaxed);
-+		a_keep = skyPlayerKeep.load(std::memory_order_relaxed);
-+		a_boxZ = skyPlayerBoxZ.load(std::memory_order_relaxed);
-+		a_own = skyPlayerOwnPlanes.load(std::memory_order_relaxed);
-+		a_manifold = skyPlayerManifold.load(std::memory_order_relaxed);
-+	}
-+
-+	int TakeSkyrimPlayerFlips()
-+	{
-+		return skyPlayerFlips.exchange(0, std::memory_order_relaxed);
-+	}
-+
-+	void SetSkyrimPlayerResting(bool a_resting)
-+	{
-+		skyPlayerResting.store(a_resting, std::memory_order_relaxed);
-+	}
-+
-+	void SetSkyrimPlayerStill(bool a_still)
-+	{
-+		skyPlayerStill.store(a_still, std::memory_order_relaxed);
-+	}
-+
-+	double SkyrimPlayerHalfWidth()
-+	{
-+		return skyBodyHalfWidth.load(std::memory_order_relaxed);
 +	}
 +
  	void Install()
  	{
-+		{
-+			CSimpleIniA ini;
-+			ini.SetUnicode();
-+			ini.LoadFile("Data/SKSE/Plugins/SkyCraft.ini");
-+			const double wanted = ini.GetDoubleValue("Controls", "fSkyrimBodyHalfWidth", 0.4);
-+			// Under Minecraft's 0.3 it is no use; at 0.5 or more nothing fits through a one-block gap.
-+			const double used = std::isfinite(wanted) ? std::clamp(wanted, 0.3, 0.49) : 0.4;
-+			skyBodyHalfWidth.store(used, std::memory_order_relaxed);
-+			logger::info("Skyrim control: player body is {:.2f} blocks wide for Minecraft's block collision (fSkyrimBodyHalfWidth {:.2f})", used * 2.0, used);
-+		}
  		REL::Relocation<std::uintptr_t> collector{ RE::VTABLE_bhkCharacterPointCollector[0] };
- 		AddCdPointHook::func = collector.write_vfunc(0x1, AddCdPointHook::thunk);
- 		REL::Relocation<std::uintptr_t> plain{ RE::VTABLE_hkpAllCdPointCollector[0] };
 diff --git a/skse/src/Game.cpp b/skse/src/Game.cpp
-index 3bb4d34..a0b7d81 100644
+index 3bb4d34..8ed7e5a 100644
 --- a/skse/src/Game.cpp
 +++ b/skse/src/Game.cpp
 @@ -4,6 +4,14 @@
@@ -5292,7 +4909,11 @@ index 3bb4d34..a0b7d81 100644
  			if (puppet) {
  				EnsureControlsEnabled();
  				Game::NoteFrameStep('P');
-@@ -657,6 +778,18 @@ namespace skycraft
+@@ -654,9 +775,21 @@ namespace skycraft
+ 			st.mcGuiScale = haveMc ? static_cast<int>(mc.guiScale) : 0;
+ 			Input::SetActivatePromptKey(puppet);
+ 			Combat::PerFrame(a_player, puppet, a_delta);
++			LockOn::Update(a_player, skyrimMode && haveMc && st.mcInWorld && !loading && !a_player->IsDead());
  			WorldRender::UpdateRagdoll(a_player, haveMc && st.mcInWorld);
  			if (puppet) {
  				NpcBlocks::PushActorsOut(a_player, a_delta);
@@ -5300,11 +4921,10 @@ index 3bb4d34..a0b7d81 100644
 +			} else if (skyrimMode && haveMc && st.mcInWorld && !loading && !a_player->IsDead()) {
 +				// Skyrim's own control mode: the blocks are still there, for NPCs and for the player.
 +				NpcBlocks::PushActorsOut(a_player, a_delta);
-+				NpcBlocks::HoldPlayerUp(a_player, a_delta);
 +				BlockCrates::Update(a_player, a_delta);
 +				auto* proxyController = skyrim_cast<RE::bhkCharProxyController*>(a_player->GetCharController());
 +				auto* proxy = proxyController ? proxyController->GetCharacterProxy() : nullptr;
-+				Dig::SetSkyrimPlayer(proxy && proxy->shapePhantom ? &proxy->shapePhantom->collidable : nullptr, proxyController);
++				Dig::SetSkyrimPlayer(proxy && proxy->shapePhantom ? &proxy->shapePhantom->collidable : nullptr);
 +			} else {
 +				Dig::SetSkyrimPlayer(nullptr);
 +				BlockCrates::Release();
@@ -5353,7 +4973,7 @@ index 3bb4d34..a0b7d81 100644
  				Perf::Scope timer(Perf::kDigMeshes);
  				Dig::UpdateMeshes(digSettled > 3.0f ? a_player : nullptr, a_delta, !dugChanged.empty());
 diff --git a/skse/src/Game.h b/skse/src/Game.h
-index 05788b1..233ea2b 100644
+index 05788b1..41dd31f 100644
 --- a/skse/src/Game.h
 +++ b/skse/src/Game.h
 @@ -17,6 +17,20 @@ namespace skycraft
@@ -5393,7 +5013,23 @@ index 05788b1..233ea2b 100644
  	}
  
  	namespace Input
-@@ -115,6 +134,9 @@ namespace skycraft
+@@ -108,6 +127,15 @@ namespace skycraft
+ 		void SetActivatePromptKey(bool a_minecraftControls);
+ 	}
+ 
++	namespace LockOn
++	{
++		// At kDataLoaded: finds True Directional Movement's virtual-target interface, if it has one.
++		void Install();
++		// Main thread, every frame: hands Minecraft's hostile mobs to True Directional Movement as lock-on targets while a_active (Skyrim's
++		// own control mode, Minecraft's world around the player), and takes them back when not.
++		void Update(RE::PlayerCharacter* a_player, bool a_active);
++	}
++
+ 	namespace Combat
+ 	{
+ 		void Install();
+@@ -115,6 +143,9 @@ namespace skycraft
  		void PerFrame(RE::PlayerCharacter* a_player, bool a_puppeting, float a_delta);
  		// Someone nearby is fighting the player (in combat with them as its target). Main thread.
  		bool PlayerEngaged();
@@ -5403,7 +5039,7 @@ index 05788b1..233ea2b 100644
  	}
  
  	namespace BlockLights
-@@ -146,6 +168,21 @@ namespace skycraft
+@@ -146,6 +177,21 @@ namespace skycraft
  		void OnSolids(const std::uint8_t* a_data, std::uint32_t a_bytes);
  		void Clear();
  		bool SolidAt(std::int32_t a_x, std::int32_t a_y, std::int32_t a_z);
@@ -5425,16 +5061,6 @@ index 05788b1..233ea2b 100644
  		// For the blocks' contact shadows (any thread): sets a_bit in a_out[x + w*(y + h*z)] for
  		// each solid block of the box at a_origin (Minecraft block coords) of a_size blocks. The
  		// generation changes whenever any section's blocks do.
-@@ -153,6 +190,9 @@ namespace skycraft
- 		std::uint32_t Generation();
- 		// Main thread, every frame: NPCs overlapping solid Minecraft blocks are pushed back out.
- 		void PushActorsOut(RE::PlayerCharacter* a_player, float a_delta);
-+		// Main thread, every frame in Skyrim's own control mode: the Skyrim player stands on, steps up onto and is stopped by
-+		// Minecraft's blocks (Minecraft's physics doesn't move the player then, and Skyrim's own know nothing of the blocks).
-+		void HoldPlayerUp(RE::PlayerCharacter* a_player, float a_delta);
- 	}
- 
- 	namespace WorldRender
 diff --git a/skse/src/Input.cpp b/skse/src/Input.cpp
 index 092862e..6b42d97 100644
 --- a/skse/src/Input.cpp
@@ -5848,18 +5474,148 @@ index 741fcca..7690cd8 100644
  }
  
  namespace skycraft::Launcher
+diff --git a/skse/src/LockOn.cpp b/skse/src/LockOn.cpp
+new file mode 100644
+index 0000000..69b13b7
+--- /dev/null
++++ b/skse/src/LockOn.cpp
+@@ -0,0 +1,125 @@
++#include "Game.h"
++#include "TDMApi.h"
++
++#include <SimpleIni.h>
++
++// Lock-on for Minecraft's mobs. They are not Skyrim actors, so True Directional Movement has nothing to lock on to; instead
++// every frame the hostile mobs Minecraft sent (proto::kWeMob) are handed to it as virtual targets, with TDM built from
++// TrueDirectionalMovement-VirtualTargets.patch. TDM's own lock-on key, target switching, camera, facing and strafing then work on them,
++// and it draws their name and health bar. Targets are only good to TDM for a second, so they are sent every frame while the
++// mobs are around, and withdrawn when Minecraft's world isn't (Minecraft's controls, a menu, a load).
++namespace skycraft::LockOn
++{
++	namespace
++	{
++		struct Config
++		{
++			bool  on{ true };
++			float aimHeight{ 0.6f };
++			float range{ 40.0f };
++		};
++
++		Config                 cfg;
++		TDM_API::IVTDM6*       api = nullptr;
++		bool                   installed = false;
++		bool                   sentAny = false;
++		std::uint32_t          lastLocked = 0;
++		proto::WorldEntities   entities{};
++		std::vector<TDM_API::VirtualTarget> targets;
++
++		std::uint32_t TargetId(std::uint32_t a_entityId)
++		{
++			return a_entityId + 1;  // not 0
++		}
++
++		void Withdraw()
++		{
++			if (api && sentAny) {
++				(void)api->SetVirtualTargets(SKSE::GetPluginHandle(), nullptr, 0);
++			}
++			sentAny = false;
++		}
++	}
++
++	void Install()
++	{
++		if (installed) {
++			return;
++		}
++		installed = true;
++		CSimpleIniA ini;
++		ini.SetUnicode();
++		ini.LoadFile("Data/SKSE/Plugins/SkyCraft.ini");
++		cfg.on = ini.GetBoolValue("LockOn", "bLockOnMobs", true);
++		cfg.aimHeight = static_cast<float>(std::clamp(ini.GetDoubleValue("LockOn", "fAimHeight", 0.6), 0.1, 1.0));
++		cfg.range = static_cast<float>(std::clamp(ini.GetDoubleValue("LockOn", "fRange", 40.0), 4.0, 200.0));
++		if (!cfg.on) {
++			logger::info("lock-on: Minecraft's mobs as lock-on targets are off (SkyCraft.ini [LockOn] bLockOnMobs)");
++			return;
++		}
++		auto* found = TDM_API::RequestPluginAPI(TDM_API::InterfaceVersion::V6);
++		api = static_cast<TDM_API::IVTDM6*>(found);
++		if (api) {
++			logger::info("lock-on: True Directional Movement's virtual-target interface found; Minecraft's mobs can be locked on to");
++		} else if (GetModuleHandleA("TrueDirectionalMovement.dll")) {
++			logger::warn("lock-on: True Directional Movement is installed but has no virtual-target interface. Install the TrueDirectionalMovement.dll built with "
++			             "TrueDirectionalMovement-VirtualTargets.patch over it; until then mobs can't be locked on to");
++		} else {
++			logger::warn("lock-on: True Directional Movement isn't installed, so there is no lock-on for Minecraft's mobs");
++		}
++	}
++
++	void Update(RE::PlayerCharacter* a_player, bool a_active)
++	{
++		if (!api) {
++			return;
++		}
++		if (!a_active || !a_player || !Link::Get().ReadWorldEntities(entities)) {
++			Withdraw();
++			return;
++		}
++
++		const auto playerMc = SkyToMc(a_player->GetPosition());
++		targets.clear();
++		for (std::uint32_t i = 0; i < entities.count; ++i) {
++			const auto& e = entities.entities[i];
++			if (e.kind != proto::kWeMob) {
++				continue;
++			}
++			const double dx = e.x - playerMc.x, dy = e.y - playerMc.y, dz = e.z - playerMc.z;
++			if (dx * dx + dy * dy + dz * dz > double(cfg.range) * cfg.range) {
++				continue;
++			}
++			TDM_API::VirtualTarget target{};
++			target.id = TargetId(e.id);
++			const float height = std::max(e.scale, 0.3f);
++			const auto  aim = McToSky(e.x, e.y + height * cfg.aimHeight, e.z);
++			target.x = aim.x;
++			target.y = aim.y;
++			target.z = aim.z;
++			target.health = e.ext[0] < 0.0f ? -1.0f : std::min(e.ext[0], 1.0f);
++			static_assert(sizeof(target.name) == proto::kMobNameBytes);
++			std::memcpy(target.name, e.uv, sizeof(target.name));
++			target.name[sizeof(target.name) - 1] = '\0';
++			targets.push_back(target);
++		}
++
++		(void)api->SetVirtualTargets(SKSE::GetPluginHandle(), targets.data(), static_cast<std::uint32_t>(targets.size()));
++		sentAny = true;
++
++		static int logged = 0;
++		if (!targets.empty() && logged < 3) {
++			++logged;
++			logger::info("lock-on: {} Minecraft mob(s) handed to True Directional Movement as targets (first: '{}')", targets.size(), targets.front().name);
++		}
++		const std::uint32_t locked = api->GetCurrentVirtualTarget();
++		if (locked != lastLocked) {
++			lastLocked = locked;
++			if (locked != 0) {
++				logger::info("lock-on: locked on to Minecraft mob {}", locked - 1);
++			} else {
++				logger::info("lock-on: released");
++			}
++		}
++	}
++}
 diff --git a/skse/src/NpcBlocks.cpp b/skse/src/NpcBlocks.cpp
-index 5e25a7d..41fccf0 100644
+index 5e25a7d..98d163b 100644
 --- a/skse/src/NpcBlocks.cpp
 +++ b/skse/src/NpcBlocks.cpp
-@@ -1,4 +1,6 @@
+@@ -1,4 +1,5 @@
  #include "Game.h"
-+#include "BlockMove.h"
 +#include "Dig.h"
  
  // Skyrim's NPCs don't walk through Minecraft's blocks: Minecraft sends which blocks of each section
  // have a collision shape (proto::kRenSolids), and every frame any NPC overlapping one is pushed
-@@ -12,6 +14,14 @@ namespace skycraft
+@@ -12,6 +13,14 @@ namespace skycraft
  		std::shared_mutex solidsLock;
  		std::atomic<std::uint32_t> solidsGeneration{ 0 };  // bumped on every change
  
@@ -5874,7 +5630,7 @@ index 5e25a7d..41fccf0 100644
  		std::uint64_t SectionKey(std::int32_t a_x, std::int32_t a_y, std::int32_t a_z)
  		{
  			return (std::uint64_t(std::uint32_t(a_x) & 0x3FFFFF) << 42) | (std::uint64_t(std::uint32_t(a_z) & 0x3FFFFF) << 20) |
-@@ -36,6 +46,29 @@ namespace skycraft
+@@ -36,6 +45,29 @@ namespace skycraft
  		std::unordered_map<RE::FormID, Detour> detours;
  
  		bool ColumnBlocked(int a_x, int a_z, int a_y0, int a_y1);
@@ -5904,7 +5660,7 @@ index 5e25a7d..41fccf0 100644
  	}
  
  	namespace NpcBlocks
-@@ -69,16 +102,18 @@ namespace skycraft
+@@ -69,16 +101,18 @@ namespace skycraft
  			++solidsGeneration;
  			if (hdr->count == 0 || a_bytes < sizeof(proto::RenSolids) + 512) {
  				solids.erase(key);
@@ -5924,7 +5680,7 @@ index 5e25a7d..41fccf0 100644
  		}
  
  		std::uint32_t Generation() { return solidsGeneration.load(); }
-@@ -120,6 +155,132 @@ namespace skycraft
+@@ -120,6 +154,132 @@ namespace skycraft
  			}
  		}
  
@@ -6057,7 +5813,7 @@ index 5e25a7d..41fccf0 100644
  		bool SolidAt(std::int32_t a_x, std::int32_t a_y, std::int32_t a_z)
  		{
  			std::shared_lock lock(solidsLock);
-@@ -169,37 +330,15 @@ namespace skycraft
+@@ -169,37 +329,15 @@ namespace skycraft
  				const int y0 = int(std::floor(mc.y + 0.3)), y1 = int(std::floor(mc.y + h - 0.1));
  				double    cx = mc.x, cz = mc.z;
  				bool      moved = false;
@@ -6103,245 +5859,6 @@ index 5e25a7d..41fccf0 100644
  					}
  					if (std::abs(pushX) < 1e-4 && std::abs(pushZ) < 1e-4) {
  						break;
-@@ -250,5 +389,238 @@ namespace skycraft
- 				detours.clear();
- 			}
- 		}
-+
-+		// Takes the downward speed off a character controller and leaves its sideways speed alone (if this CommonLib can read it).
-+		template <class C, class V = RE::hkVector4>
-+		void StopFalling(C* a_controller)
-+		{
-+			if constexpr (requires(V v) { a_controller->GetLinearVelocityImpl(v); v.quad.m128_f32[2]; a_controller->SetLinearVelocityImpl(v); }) {
-+				V v;
-+				a_controller->GetLinearVelocityImpl(v);
-+				if (v.quad.m128_f32[2] < 0.0f) {
-+					v.quad.m128_f32[2] = 0.0f;
-+					a_controller->SetLinearVelocityImpl(v);
-+				}
-+			}
-+		}
-+
-+		// How hard the player is pushing the movement keys/stick, 0..1 (if this CommonLib can read it). `a_known` is false if it can't.
-+		template <class P = RE::PlayerControls>
-+		float MoveInput(bool& a_known)
-+		{
-+			a_known = false;
-+			if constexpr (requires(P* p) { p->data.moveInputVec.x; p->data.moveInputVec.y; P::GetSingleton(); }) {
-+				if (const auto* controls = P::GetSingleton()) {
-+					a_known = true;
-+					const float x = controls->data.moveInputVec.x, y = controls->data.moveInputVec.y;
-+					return std::sqrt(x * x + y * y);
-+				}
-+			}
-+			return 0.0f;
-+		}
-+
-+		// Takes ALL the speed off a character controller (sideways too).
-+		template <class C>
-+		void StopMoving(C* a_controller)
-+		{
-+			if constexpr (requires(C* c) { c->SetLinearVelocityImpl(RE::hkVector4(0.0f, 0.0f, 0.0f, 0.0f)); }) {
-+				a_controller->SetLinearVelocityImpl(RE::hkVector4(0.0f, 0.0f, 0.0f, 0.0f));
-+			}
-+		}
-+
-+		// In Skyrim's own control mode Skyrim moves the player with its own physics, which has no idea Minecraft's blocks are
-+		// there. So every frame the move Skyrim made (from where this held the player last frame to where Skyrim put it) is run
-+		// through Minecraft's own movement collision (BlockMove.h: Entity.collide with its 0.6 step-up, on the exact boxes of
-+		// slabs, stairs, fences...), and the player is put where Minecraft would have left it. The player's Havok proxy only gets the planes of the blocks it stands on
-+		// (DigPhysics.cpp), so Skyrim really is standing and the two never fight.
-+		void HoldPlayerUp(RE::PlayerCharacter* a_player, float a_delta)
-+		{
-+			static bool                     haveLast = false, groundLast = false;
-+			static float                    airTime = 0.0f;  // seconds Skyrim has had the player in the air without Minecraft standing it on a block
-+			static BlockMove::Vec           last{ 0, 0, 0 };
-+			static const RE::TESObjectCELL* lastCell = nullptr;
-+
-+			if (!a_player || a_player->IsDead()) {
-+				haveLast = false;
-+				Dig::SetSkyrimPlayerResting(false);
-+				return;
-+			}
-+			{
-+				std::shared_lock lock(solidsLock);
-+				if (solids.empty()) {
-+					haveLast = false;
-+					Dig::SetSkyrimPlayerResting(false);
-+					return;
-+				}
-+			}
-+			static bool announced = false;
-+			if (!announced) {
-+				announced = true;
-+				logger::info("Skyrim control: Minecraft block collision");
-+			}
-+			// Minecraft's player is 0.6 wide, 1.8 tall. Skyrim's body is wider than 0.6 blocks, though: held to that, its head,
-+			// shoulders and arms sank into any wall it ran at and the corners it brushed past. So the box is as wide as the body
-+			// (SkyCraft.ini [Controls] fSkyrimBodyHalfWidth); the planes it stands on (DigPhysics.cpp) use the same width.
-+			const double kHalf = Dig::SkyrimPlayerHalfWidth();
-+			constexpr double kHeight = 1.8;
-+			const auto       sky = a_player->GetPosition();
-+			const auto       mc = SkyToMc(sky);
-+			const auto*      cell = a_player->GetParentCell();
-+			auto*            controller = a_player->GetCharController();
-+			const bool       skyGround = controller && controller->context.currentState == RE::hkpCharacterStateType::kOnGround;
-+
-+			BlockMove::Vec move{ 0, 0, 0 };
-+			if (haveLast && cell == lastCell) {
-+				move = { mc.x - last.x, mc.y - last.y, mc.z - last.z };
-+			}
-+			// First frame, a load door, fast travel or anything else that moved the player further than it can walk: start over here.
-+			if (!haveLast || cell != lastCell || std::abs(move.x) > 4.0 || std::abs(move.y) > 8.0 || std::abs(move.z) > 4.0) {
-+				last = { mc.x, mc.y, mc.z };
-+				move = { 0, 0, 0 };
-+				haveLast = true;
-+				lastCell = cell;
-+				groundLast = skyGround;
-+			}
-+
-+			const BlockMove::Aabb from{ { last.x - kHalf, last.y, last.z - kHalf }, { last.x + kHalf, last.y + kHeight, last.z + kHalf } };
-+			const double          x0 = std::min(from.lo[0], from.lo[0] + move.x), x1 = std::max(from.hi[0], from.hi[0] + move.x);
-+			const double          z0 = std::min(from.lo[2], from.lo[2] + move.z), z1 = std::max(from.hi[2], from.hi[2] + move.z);
-+			const double          y0 = std::min(from.lo[1], from.lo[1] + move.y), y1 = std::max(from.hi[1], from.hi[1] + move.y);
-+			// Minecraft's exact boxes around the whole move (the block below too: fences stand 1.5 tall; and a step up).
-+			std::vector<BlockBox> nearby;
-+			GatherBoxes(int(std::floor(x0 - 1.0)), int(std::floor(x1 + 1.0)), int(std::floor(y0 - 1.0)), int(std::floor(y1 + BlockMove::kStepHeight)) + 1,
-+				int(std::floor(z0 - 1.0)), int(std::floor(z1 + 1.0)), nearby);
-+			if (nearby.empty()) {
-+				last = { mc.x, mc.y, mc.z };
-+				groundLast = skyGround;
-+				Dig::SetSkyrimPlayerResting(false);
-+				return;
-+			}
-+
-+			const bool            onGround = groundLast || skyGround;
-+			const BlockMove::Vec  got = BlockMove::Collide(nearby, from, move, onGround);
-+			// Held up by a block under it: landing on one, or stepping up onto one.
-+			const bool            landed = got.y > move.y + 1e-6;
-+			BlockMove::Vec        end{ last.x + got.x, last.y + got.y, last.z + got.z };
-+
-+			// A block that ended up around the body (placed on it, or it was dropped in): out the shortest way.
-+			const BlockMove::Vec out = BlockMove::Depenetrate(nearby, { { end.x - kHalf, end.y, end.z - kHalf }, { end.x + kHalf, end.y + kHeight, end.z + kHalf } });
-+			end = { end.x + out.x, end.y + out.y, end.z + out.z };
-+			const bool stoodUp = out.y > 0.0;
-+
-+			// Pressed against a wall of blocks on the ground, Skyrim's capsule rode up the real crate beside it (0.03-0.06 blocks a frame
-+			// in the log, "standing false" while state 0), so walking along a wall bobbed the player up and down and dropped the standing
-+			// hold. A player Skyrim has on the ground is not climbing: an upward move that is not Minecraft's own step-up, made while the
-+			// move was held back sideways, is taken back.
-+			if (skyGround && !landed && !stoodUp && got.y > 0.002 && (std::abs(got.x - move.x) > 1e-6 || std::abs(got.z - move.z) > 1e-6)) {
-+				end.y -= got.y;
-+				static int announcedClimb = 0;
-+				if (announcedClimb < 5) {
-+					++announcedClimb;
-+					logger::info("Skyrim control: stopped the player riding up the side of a block ({:.3f} blocks)", got.y);
-+				}
-+			}
-+
-+			// Resting on a block: a short probe down from where it ends up is stopped at once. Not counted while Skyrim is
-+			// moving it up.
-+			const BlockMove::Aabb endBox{ { end.x - kHalf, end.y, end.z - kHalf }, { end.x + kHalf, end.y + kHeight, end.z + kHalf } };
-+			// Havok keeps the player's capsule keepDistance (0.05) clear of what it stands on, so Skyrim's feet hover about that far above a
-+			// block's top. A probe of exactly 0.05 reaches the top to the last digit and was counted as "not resting" half the time, so the
-+			// player flickered between standing and falling. Anything within 0.1 above a top counts as standing on it.
-+			constexpr double      kProbe = 0.10;
-+			const double          probe = BlockMove::ClipAxis(nearby, endBox, 1, -kProbe);
-+			// Skyrim's own step nudges the feet up a few thousandths of a block as it walks (penetration recovery, seams between blocks); at 0.002 that
-+			// read as "not resting" and the player went airborne (momentum, no steering) for a frame: the slipperiness.
-+			const bool resting = move.y <= 0.03 && probe > -kProbe + 1e-6;
-+
-+			const bool standing = landed || stoodUp || resting;
-+
-+			Dig::SetSkyrimPlayerResting(standing);
-+			groundLast = standing || (skyGround && std::abs(got.y - move.y) < 1e-6 && got.y >= -1e-6);
-+
-+			if (std::abs(end.x - mc.x) > 1e-4 || std::abs(end.y - mc.y) > 1e-4 || std::abs(end.z - mc.z) > 1e-4) {
-+				a_player->SetPosition(McToSky(end.x, end.y, end.z), true);
-+				if (DiagnosticsEnabled()) {
-+					static int logged = 0;
-+					if (logged < 400) {
-+						++logged;
-+						logger::info("block collision: skyrim moved ({:.3f} {:.3f} {:.3f}) -> held to ({:.3f} {:.3f} {:.3f}); skyGround {} groundLast {} standing {} state {}", move.x, move.y, move.z, got.x, got.y, got.z,
-+							skyGround, onGround, standing, controller ? int(controller->context.currentState) : -1);
-+					}
-+				}
-+			}
-+			last = end;
-+			if (!standing) {
-+				airTime = (skyGround || !controller) ? 0.0f : airTime + a_delta;
-+			}
-+			if (standing && controller) {
-+				// Skyrim's step moved the player as if airborne (momentum, slow air control) if the state was in the air when this frame
-+				// began, or if the plane hook had to put it back during the step (then it is on the ground by now, but moved like it was in the air).
-+				const int  stepFlips = Dig::TakeSkyrimPlayerFlips();
-+				const bool heldThisFrame = controller->context.currentState != RE::hkpCharacterStateType::kOnGround || stepFlips > 0;
-+				// It is standing, not falling: no fall to land from, no momentum to carry into the block.
-+				StopFalling(controller);  // (only the vertical speed: zeroing all of it stopped the player walking on a block)
-+				controller->fallStartHeight = float(end.y * proto::kUnitsPerBlock);
-+				controller->fallTime = 0.0f;
-+				controller->flags.set(RE::CHARACTER_FLAGS::kSupport);
-+				if (controller->context.currentState != RE::hkpCharacterStateType::kOnGround) {
-+					// Minecraft has it standing on a block but Skyrim's own physics still says it is in the air (its support check
-+					// does not always agree with Minecraft's, e.g. at a block's edge). Skyrim moves an airborne player slowly and in
-+					// the jump pose, so the ground state is put back at once, every frame it is needed, not after a wait: waiting
-+					// left the player in the air for most frames, and each forced landing replayed the landing animation (arms out).
-+					// The landing animation is only played for a real fall or jump (in the air for a while), not for a flicker.
-+					static int   announcedHold = 0;
-+					static float holdLogGap = 0.0f;
-+					holdLogGap -= a_delta;
-+					if (announcedHold < 40 && (announcedHold < 3 || holdLogGap <= 0.0f)) {
-+						++announcedHold;
-+						holdLogGap = 0.5f;
-+						int   calls = 0, planeCount = 0, ownPlanes = 0, manifold = 0;
-+						float nearest = 0, keep = 0, boxZ = 0;
-+						Dig::SkyrimPlayerSupportDebug(calls, planeCount, nearest, keep, boxZ, ownPlanes, manifold);
-+						logger::info("Skyrim control: held the player on the ground (Skyrim had it in the air, {:.2f} s) on a block; state was {}, resting {}, feet {:.3f}, capsule bottom {:.3f}; plane hook: {} calls, {} planes (Skyrim's own {}, manifold {}), nearest {:.3f}, keepDistance {:.3f}",
-+							airTime, int(controller->context.currentState), resting, end.y, boxZ, calls, planeCount, ownPlanes, manifold, nearest, keep);
-+					}
-+					controller->context.currentState = RE::hkpCharacterStateType::kOnGround;
-+					if (airTime >= 0.10f) {
-+						a_player->NotifyAnimationGraph("JumpLand");
-+						a_player->NotifyAnimationGraph("JumpLandEnd");
-+						static int announcedLand = 0;
-+						if (announcedLand < 5) {
-+							++announcedLand;
-+							logger::info("Skyrim control: landed on a block by hand (Skyrim still had the player in the air)");
-+						}
-+					}
-+				}
-+				// Skyrim keeps putting the player back in the air (state 2) every step even though it is resting on a block, and an
-+				// airborne player keeps its sideways speed: after a jump onto a block it slid across the top, and on to the next block, with
-+				// nothing to stop it. With no movement key held the player stands still, as it would on the ground.
-+				static bool wasAirborne = false;
-+				const bool  flipped = controller->context.currentState != RE::hkpCharacterStateType::kOnGround || heldThisFrame;
-+				// Every frame it stands on a block with no key held (not only after a flip): the planes carry no friction, so nothing
-+				// else brings it to rest, and it slid.
-+				{
-+					bool        known = false;
-+					const float input = MoveInput(known);
-+					Dig::SetSkyrimPlayerStill(known && input < 0.05f);
-+					if (known && input < 0.05f) {
-+						StopMoving(controller);
-+						static int announcedStop = 0;
-+						if (announcedStop < 5) {
-+							++announcedStop;
-+							logger::info("Skyrim control: no movement key held on a block; stopped the player's leftover speed (slide)");
-+						}
-+					} else if (!known) {
-+						static bool announcedUnknown = false;
-+						if (!announcedUnknown) {
-+							announcedUnknown = true;
-+							logger::warn("Skyrim control: this build can't read the movement keys; the leftover speed on a block isn't stopped");
-+						}
-+					}
-+				}
-+				wasAirborne = flipped;
-+				airTime = 0.0f;
-+			}
-+		}
- 	}
- }
 diff --git a/skse/src/Overlay.cpp b/skse/src/Overlay.cpp
 index 4a78706..ae60836 100644
 --- a/skse/src/Overlay.cpp
@@ -6356,8 +5873,296 @@ index 4a78706..ae60836 100644
  				return;
  			}
  			UploadLatestFrame();
+diff --git a/skse/src/TDMApi.h b/skse/src/TDMApi.h
+new file mode 100644
+index 0000000..e07ee11
+--- /dev/null
++++ b/skse/src/TDMApi.h
+@@ -0,0 +1,282 @@
++#pragma once
++#include <functional>
++#include <stdint.h>
++
++/*
++* For modders: Copy this file into your own project if you wish to use this API
++*
++* A copy of True Directional Movement's own header, with the virtual-target calls (interface V6) that
++* TrueDirectionalMovement-VirtualTargets.patch adds. Keep it in step with that patch.
++*/
++	namespace TDM_API
++{
++	constexpr const auto TDMPluginName = "TrueDirectionalMovement";
++
++	using PluginHandle = SKSE::PluginHandle;
++	using ActorHandle = RE::ActorHandle;
++
++	// Available True Directional Movement interface versions
++	enum class InterfaceVersion : uint8_t
++	{
++		V1,
++		V2,
++		V3,
++		V4,
++		V5,
++		V6
++	};
++
++	// Error types that may be returned by the True Directional Movement API
++	enum class APIResult : uint8_t
++	{
++		// Your API call was successful
++		OK,
++
++		// You tried to release a resource that was not allocated to you
++		// Do not attempt to manipulate the requested resource if you receive this response
++		NotOwner,
++
++		// True Directional Movement currently must keep control of this resource for proper functionality
++		// Do not attempt to manipulate the requested resource if you receive this response
++		MustKeep,
++
++		// You have already been given control of this resource
++		AlreadyGiven,
++
++		// Another mod has been given control of this resource at the present time
++		// Do not attempt to manipulate the requested resource if you receive this response
++		AlreadyTaken,
++
++		// You sent a command on a thread that could cause a data race were it to be processed
++		// Do not attempt to manipulate the requested resource if you receive this response
++		BadThread,
++	};
++
++	enum class DirectionalMovementMode : uint8_t
++	{
++		// Directional movement is disabled, the movement is vanilla
++		kDisabled,
++
++		// Directional movement is enabled, but the player is facing the crosshair
++		kVanillaStyle,
++
++		// Directional movement is enabled, and the player is facing the direction of movement
++		kDirectional,
++		
++		// Directional movement is enabled, and the player has a target locked
++		kTargetLock
++	};
++
++	// True Directional Movement's modder interface
++	class IVTDM1
++	{
++	public:
++		/// <summary>
++		/// Get the thread ID True Directional Movement is running in.
++		/// You may compare this with the result of GetCurrentThreadId() to help determine
++		/// if you are using the correct thread.
++		/// </summary>
++		/// <returns>TID</returns>
++		[[nodiscard]] virtual unsigned long GetTDMThreadId() const noexcept = 0;
++
++		/// <summary>
++		/// Get the current state (enabled / disabled) of directional movement.
++		/// </summary>
++		/// <returns>The current state (true / false) of directional movement</returns>
++		[[nodiscard]] virtual bool GetDirectionalMovementState() const noexcept = 0;
++
++		/// <summary>
++		/// Get the current state (enabled / disabled) of target lock.
++		/// </summary>
++		/// <returns>The current state (true / false) of target lock</returns>
++		[[nodiscard]] virtual bool GetTargetLockState() const noexcept = 0;
++
++		/// <summary>
++		/// Get the actor handle of the currently locked target.
++		/// </summary>
++		/// <returns>The actor handle of the currently locked target</returns>
++		[[nodiscard]] virtual ActorHandle GetCurrentTarget() const noexcept = 0;
++
++		/// <summary>
++		/// Request the plugin to forcibly disable directional movement.
++		/// If granted, directional movement will be disabled for the duration of your control.
++		/// </summary>
++		/// <param name="a_myPluginHandle">Your assigned plugin handle</param>
++		/// <returns>OK, MustKeep, AlreadyGiven, AlreadyTaken</returns>
++		[[nodiscard]] virtual APIResult RequestDisableDirectionalMovement(PluginHandle a_myPluginHandle) noexcept = 0;
++
++		/// <summary>
++		/// Request the plugin to forcibly disable headtracking.
++		/// If granted, this mod's headtracking will be disabled for the duration of your control.
++		/// </summary>
++		/// <param name="a_myPluginHandle">Your assigned plugin handle</param>
++		/// <returns>OK, MustKeep, AlreadyGiven, AlreadyTaken</returns>
++		[[nodiscard]] virtual APIResult RequestDisableHeadtracking(PluginHandle a_myPluginHandle) noexcept = 0;
++
++		/// <summary>
++		/// Returns the current owner of the forced disable of directional movement.
++		/// </summary>
++		/// <returns>Handle or kPluginHandle_Invalid if no one currently owns the resource</returns>
++		virtual PluginHandle GetDisableDirectionalMovementOwner() const noexcept = 0;
++
++		/// <summary>
++		/// Returns the current owner of the forced disable of headtracking.
++		/// </summary>
++		/// <returns>Handle or kPluginHandle_Invalid if no one currently owns the resource</returns>
++		virtual PluginHandle GetDisableHeadtrackingOwner() const noexcept = 0;
++
++		/// <summary>
++		/// Release your forced disable of directional movement.
++		/// </summary>
++		/// <param name="a_myPluginHandle">Your assigned plugin handle</param>
++		/// <returns>OK, NotOwner</returns>
++		virtual APIResult ReleaseDisableDirectionalMovement(PluginHandle a_myPluginHandle) noexcept = 0;
++
++		/// <summary>
++		/// Release your forced disable of headtracking.
++		/// </summary>
++		/// <param name="a_myPluginHandle">Your assigned plugin handle</param>
++		/// <returns>OK, NotOwner</returns>
++		virtual APIResult ReleaseDisableHeadtracking(PluginHandle a_myPluginHandle) noexcept = 0;
++	};
++
++	class IVTDM2 : public IVTDM1
++	{
++	public:
++		/// <summary>
++		/// Request the control over the player character's yaw.
++		/// If granted, you may use the SetPlayerYaw function and TDM will not adjust the yaw for the duration of your control.
++		/// </summary>
++		/// <param name="a_myPluginHandle">Your assigned plugin handle</param>
++		/// <param name="a_yawRotationSpeedMultiplier">The speed multiplier to use when smoothly rotating to the desired yaw. 0 is instant.</param>
++		/// <returns>OK, MustKeep, AlreadyGiven, AlreadyTaken</returns>
++		[[nodiscard]] virtual APIResult RequestYawControl(PluginHandle a_myPluginHandle, float a_yawRotationSpeedMultiplier) noexcept = 0;
++
++		/// <summary>
++		/// Tries to set the player character's desired yaw. Will only do so if granted control.
++		/// </summary>
++		/// <param name="a_myPluginHandle">Your assigned plugin handle</param>
++		/// <param name="a_desiredYaw">The desired yaw</param>
++		/// <returns>OK, NotOwner</returns>
++		virtual APIResult SetPlayerYaw(PluginHandle a_myPluginHandle, float a_desiredYaw) noexcept = 0;
++
++		/// <summary>
++		/// Release your control over the player character's yaw.
++		/// </summary>
++		/// <param name="a_myPluginHandle">Your assigned plugin handle</param>
++		/// <returns>OK, NotOwner</returns>
++		virtual APIResult ReleaseYawControl(PluginHandle a_myPluginHandle) noexcept = 0;
++	};
++
++	class IVTDM3 : public IVTDM2
++	{
++	public:
++		/// <summary>
++		/// Get the current directional movement mode
++		/// </summary>
++		/// <returns>The current directional movement mode</returns>
++		[[nodiscard]] virtual DirectionalMovementMode GetDirectionalMovementMode() const noexcept = 0;
++
++		/// <summary>
++		/// Gets the original movement input vector, unaltered by TDM
++		/// </summary>
++		/// <returns>The original input vector</returns>
++		[[nodiscard]] virtual RE::NiPoint2 GetActualMovementInput() const noexcept = 0;
++	};
++
++	class IVTDM4 : public IVTDM3
++	{
++	public:
++		/// <summary>
++		/// Check if the target position for the camera is behind the target when target lock is enabled.
++		/// </summary>
++		/// <returns>true if target lock is enabled AND the target position is behind the camera. False otherwise.</returns>
++		[[nodiscard]] virtual bool IsTargetLockBehindTarget() const noexcept = 0;
++	};
++
++	class IVTDM5 : public IVTDM4
++	{
++	public:
++		/// <summary>
++		/// Request the plugin to forcibly disable target lock reticle.
++		/// If granted, target lock reticle will be disabled for the duration of your control.
++		/// </summary>
++		/// <param name="a_myPluginHandle">Your assigned plugin handle</param>
++		/// <returns>OK, MustKeep, AlreadyGiven, AlreadyTaken</returns>
++		[[nodiscard]] virtual APIResult RequestDisableTargetLock(PluginHandle a_myPluginHandle) noexcept = 0;
++
++		/// <summary>
++		/// Release your forced disable of target lock reticle.
++		/// </summary>
++		/// <param name="a_myPluginHandle">Your assigned plugin handle</param>
++		/// <returns>OK, NotOwner</returns>
++		virtual APIResult ReleaseDisableTargetLock(PluginHandle a_myPluginHandle) noexcept = 0;
++
++		/// <summary>
++		/// Returns the current owner of the forced disable of target lock reticle.
++		/// </summary>
++		/// <returns>Handle or kPluginHandle_Invalid if no one currently owns the resource</returns>
++		virtual PluginHandle GetDisableTargetLockOwner() const noexcept = 0;
++	};
++
++	// A target another mod wants the player to be able to lock on to, though there is no actor behind it (a mob from another game's
++	// world, say). The position is the point to look at and to keep the camera on: the middle of the body.
++	struct VirtualTarget
++	{
++		uint32_t id;  // not 0; stays the same for as long as the target exists
++		float    x, y, z;  // world position, in Skyrim's units
++		float    health;  // 0..1 of its full health, or less than 0 if not known: the bar shown for it while it is locked on to
++		char     name[32];  // its name (zero-ended), shown above that bar; empty for none
++	};
++
++	class IVTDM6 : public IVTDM5
++	{
++	public:
++		/// <summary>
++		/// Replace the whole set of virtual targets. Call it again whenever they move (every frame is fine); a target that is left out of
++		/// the call is gone, and if it was locked on to, the lock is dropped. Target lock picks among them and the actors in the game.
++		/// </summary>
++		/// <param name="a_myPluginHandle">Your assigned plugin handle</param>
++		/// <param name="a_targets">The targets (may be null if a_count is 0)</param>
++		/// <param name="a_count">How many</param>
++		/// <returns>OK</returns>
++		virtual APIResult SetVirtualTargets(PluginHandle a_myPluginHandle, const VirtualTarget* a_targets, uint32_t a_count) noexcept = 0;
++
++		/// <summary>
++		/// Replace the set of actors target lock must never pick (the stand-ins you made for something that is locked on to by way of a virtual target).
++		/// An actor that is locked on to and then listed is let go.
++		/// </summary>
++		/// <param name="a_myPluginHandle">Your assigned plugin handle</param>
++		/// <param name="a_formIds">Their form ids (may be null if a_count is 0)</param>
++		/// <param name="a_count">How many</param>
++		/// <returns>OK</returns>
++		virtual APIResult SetIgnoredActors(PluginHandle a_myPluginHandle, const uint32_t* a_formIds, uint32_t a_count) noexcept = 0;
++
++		/// <summary>
++		/// The id of the virtual target that is locked on to now.
++		/// </summary>
++		/// <returns>The id, or 0 if none</returns>
++		[[nodiscard]] virtual uint32_t GetCurrentVirtualTarget() const noexcept = 0;
++	};
++
++	typedef void* (*_RequestPluginAPI)(const InterfaceVersion interfaceVersion);
++
++	/// <summary>
++	/// Request the True Directional Movement API interface.
++	/// Recommended: Send your request during or after SKSEMessagingInterface::kMessage_PostLoad to make sure the dll has already been loaded
++	/// </summary>
++	/// <param name="a_interfaceVersion">The interface version to request</param>
++	/// <returns>The pointer to the API singleton, or nullptr if request failed</returns>
++	[[nodiscard]] inline void* RequestPluginAPI(const InterfaceVersion a_interfaceVersion = InterfaceVersion::V5)
++	{
++		auto pluginHandle = GetModuleHandle("TrueDirectionalMovement.dll");
++		if (!pluginHandle) {
++			return nullptr;
++		}
++		_RequestPluginAPI requestAPIFunction = (_RequestPluginAPI)GetProcAddress(pluginHandle, "RequestPluginAPI");
++		if (requestAPIFunction) {
++			return requestAPIFunction(a_interfaceVersion);
++		}
++		return nullptr;
++	}
++}
 diff --git a/skse/src/WorldRender.cpp b/skse/src/WorldRender.cpp
-index b877ae5..22fc725 100644
+index b877ae5..36666dc 100644
 --- a/skse/src/WorldRender.cpp
 +++ b/skse/src/WorldRender.cpp
 @@ -1100,6 +1100,9 @@ float4 OverlayPS(float4 pos : SV_Position) : SV_Target
@@ -6370,6 +6175,17 @@ index b877ae5..22fc725 100644
  					case proto::kRenDug:
  						Dig::OnDug(a_data, a_bytes);
  						break;
+@@ -1279,8 +1282,8 @@ float4 OverlayPS(float4 pos : SV_Position) : SV_Target
+ 			for (std::uint32_t i = 0; i < entities.count; ++i) {
+ 				const auto& e = entities.entities[i];
+ 				const float px = float(e.x - a_o[0]), py = float(e.y - a_o[1]), pz = float(e.z - a_o[2]);
+-				if (e.kind == proto::kWeShadow) {
+-					continue;  // not geometry: see GatherContactShadows
++				if (e.kind == proto::kWeShadow || e.kind == proto::kWeMob) {
++					continue;  // not geometry: see GatherContactShadows; a mob for lock-on (LockOn.cpp), which Minecraft draws
+ 				}
+ 				if (e.kind == proto::kWeBlock) {
+ 					// A dropped block: a small cube spinning about its centre, like in Minecraft.
 @@ -1324,7 +1327,9 @@ float4 OverlayPS(float4 pos : SV_Position) : SV_Target
  
  		void BuildOutline(const double a_o[3])
@@ -6488,7 +6304,7 @@ index b877ae5..22fc725 100644
  				logger::info("in-frame block drawing: hooked after Main::RenderWorld");
  			}
 diff --git a/skse/src/main.cpp b/skse/src/main.cpp
-index eb548b4..bcd953c 100644
+index eb548b4..fbb0416 100644
 --- a/skse/src/main.cpp
 +++ b/skse/src/main.cpp
 @@ -21,6 +21,9 @@ namespace
@@ -6501,11 +6317,19 @@ index eb548b4..bcd953c 100644
  		case SKSE::MessagingInterface::kDataLoaded:
  			if (!skycraft::Link::Get().Create()) {
  				logger::error("SkyCraft disabled: could not create shared memory");
-@@ -50,6 +53,7 @@ SKSEPluginLoad(const SKSE::LoadInterface* a_skse)
+@@ -32,6 +35,7 @@ namespace
+ 			skycraft::WorldRender::Install();
+ 			skycraft::PathAvoid::Install();
+ 			skycraft::Dig::Install();
++			skycraft::LockOn::Install();
+ 			skycraft::CrashLog::Install();
+ 			break;
+ 		case SKSE::MessagingInterface::kPostLoadGame:
+@@ -50,6 +54,7 @@ SKSEPluginLoad(const SKSE::LoadInterface* a_skse)
  	SetupLog();
  	skycraft::CrashLog::Install();
  	logger::info("SkyCraft {} loading (runtime {})", "0.1.2", a_skse->RuntimeVersion().string());
-+	logger::info("patch revision 21 (mob stand-ins removed; block collision back to the box version, Minecraft no longer collides the player; the patch's own jump handling removed; revision 19: the by-hand jump is gone: Skyrim's own jump is all there is; revision 18: jump button logs and jumps by hand when Skyrim refuses while Minecraft has the player on a block; revision 17: crate sides and rim contacts no longer reach the player: edges, seams and corners; revision 16: ledge assist rises over several frames; revision 15: stand-in health follows the mob by more ways, logs for the stand-in switching off; revision 14: no riding up block sides, steadier landings; revision 13: walking no longer read as jumping, ledge assist only in the air; collision: standing hold, slide stop, jump off blocks, ledge assist, steadier standing, friction when still; starts in Skyrim mode; stand-ins last as long as their mob, health 1:1)");
++	logger::info("patch revision 22 (block collision is real crates only: the box simulation that held the Skyrim player is gone; Minecraft's hostile mobs are lock-on targets again, handed to True Directional Movement as virtual targets; revision 21: mob stand-ins removed)");
  	SKSE::GetMessagingInterface()->RegisterListener(OnMessage);
  	// As early as possible: Minecraft takes about as long to start as Skyrim does to reach its menu.
  	skycraft::Launcher::StartMinecraft();
