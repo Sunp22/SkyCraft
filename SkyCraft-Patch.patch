@@ -542,7 +542,7 @@ index 9f909ce..ebf2d1b 100644
 +	}
  }
 diff --git a/fabric/src/main/java/dev/skycraft/SkyCraft.java b/fabric/src/main/java/dev/skycraft/SkyCraft.java
-index 1670d74..8be5e03 100644
+index 1670d74..ee1ffeb 100644
 --- a/fabric/src/main/java/dev/skycraft/SkyCraft.java
 +++ b/fabric/src/main/java/dev/skycraft/SkyCraft.java
 @@ -24,6 +24,8 @@ public final class SkyCraft implements ModInitializer {
@@ -566,6 +566,27 @@ index 1670d74..8be5e03 100644
  	private static void configureServer(MinecraftServer server) {
  		GameRules rules = server.getGameRules();
  		rules.set(GameRules.ADVANCE_TIME, false, server);
+@@ -48,6 +53,20 @@ public final class SkyCraft implements ModInitializer {
+ 		rules.set(GameRules.SHOW_ADVANCEMENT_MESSAGES, false, server);
+ 		server.getCommands().performPrefixedCommand(server.createCommandSourceStack().withSuppressedOutput(), "time set noon");
+ 		LOG.info("SkyCraft: mirror world configured");
++
++		// The list of every distinct collision shape, for the collision model library (tools/make_collision_library.py). Written by
++		// itself the first time the world starts (and again if the game's blocks change, e.g. a mod was added); -Dskycraft.dumpShapes=false
++		// turns it off, -Dskycraft.dumpShapes=force writes it every start.
++		try {
++			String mode = System.getProperty("skycraft.dumpShapes", "auto");
++			java.nio.file.Path catalog = net.fabricmc.loader.api.FabricLoader.getInstance().getGameDir().resolve("skycraft").resolve("shape_catalog.json");
++			if (!"false".equalsIgnoreCase(mode) && ("force".equalsIgnoreCase(mode) || "true".equalsIgnoreCase(mode) || !java.nio.file.Files.exists(catalog)
++				|| !dev.skycraft.world.ShapeCatalog.upToDate(catalog))) {
++				dev.skycraft.world.ShapeCatalog.dump(catalog);
++			}
++		} catch (RuntimeException ex) {
++			LOG.warn("SkyCraft: shape catalog skipped", ex);
++		}
+ 	}
+ 
+ 	/**
 diff --git a/fabric/src/main/java/dev/skycraft/combat/AttackSkyrimActorsGoal.java b/fabric/src/main/java/dev/skycraft/combat/AttackSkyrimActorsGoal.java
 new file mode 100644
 index 0000000..f7aa8b9
@@ -2588,6 +2609,170 @@ index be1a22a..f8a8c68 100644
 +		SkyLink.pushEvent(Proto.EV_EXPLOSION, 0, (float) center.x, (float) center.y, (float) center.z, self.radius(), creeper ? 1 : 0);
  	}
  }
+diff --git a/fabric/src/main/java/dev/skycraft/world/ShapeCatalog.java b/fabric/src/main/java/dev/skycraft/world/ShapeCatalog.java
+new file mode 100644
+index 0000000..13b3a54
+--- /dev/null
++++ b/fabric/src/main/java/dev/skycraft/world/ShapeCatalog.java
+@@ -0,0 +1,158 @@
++package dev.skycraft.world;
++
++import dev.skycraft.SkyCraft;
++import java.io.IOException;
++import java.nio.charset.StandardCharsets;
++import java.nio.file.Files;
++import java.nio.file.Path;
++import java.util.ArrayList;
++import java.util.Comparator;
++import java.util.List;
++import java.util.Map;
++import java.util.TreeMap;
++import net.minecraft.core.BlockPos;
++import net.minecraft.core.registries.BuiltInRegistries;
++import net.minecraft.world.level.EmptyBlockGetter;
++import net.minecraft.world.level.block.Block;
++import net.minecraft.world.level.block.state.BlockState;
++import net.minecraft.world.phys.AABB;
++import net.minecraft.world.phys.shapes.VoxelShape;
++
++/**
++ * The list of every distinct collision shape in the game, for the pre-built collision model library.
++ *
++ * A shape is a list of boxes in sixteenths of a block (0..32; fences are 1.5 tall), sorted. Its key is the FNV-1a hash of
++ * {@link #canonical} written as 8 hex digits, and that key is the library file name ({@code shp_<key>.nif}). The SKSE side
++ * (ShapeKey in Game.h) must compute the same key from the boxes Minecraft sends, so {@link #canonical} is the one definition of it.
++ *
++ * Written by itself to {@code skycraft/shape_catalog.json} in the game folder the first time the world starts, and again when the registered
++ * blocks change ({@code -Dskycraft.dumpShapes=false} turns it off, {@code force} writes it every start); tools/make_collision_library.py turns that file into the .nif files.
++ */
++public final class ShapeCatalog {
++	private ShapeCatalog() {}
++
++	/** One box in sixteenths: x0 y0 z0 x1 y1 z1. */
++	public record Box(int x0, int y0, int z0, int x1, int y1, int z1) {}
++
++	public static int sixteenths(double v) {
++		return Math.max(0, Math.min(32, (int) Math.round(v * 16.0)));
++	}
++
++	/** The shape's boxes, quantised and sorted; empty boxes (thinner than a sixteenth) are dropped. */
++	public static List<Box> boxesOf(VoxelShape shape) {
++		List<Box> out = new ArrayList<>();
++		for (AABB b : shape.toAabbs()) {
++			Box box = new Box(sixteenths(b.minX), sixteenths(b.minY), sixteenths(b.minZ), sixteenths(b.maxX), sixteenths(b.maxY), sixteenths(b.maxZ));
++			if (box.x1 > box.x0 && box.y1 > box.y0 && box.z1 > box.z0) {
++				out.add(box);
++			}
++		}
++		out.sort(Comparator.comparingInt(Box::y0).thenComparingInt(Box::x0).thenComparingInt(Box::z0)
++			.thenComparingInt(Box::y1).thenComparingInt(Box::x1).thenComparingInt(Box::z1));
++		return out;
++	}
++
++	/** "x0,y0,z0,x1,y1,z1;..." of the sorted boxes. */
++	public static String canonical(List<Box> boxes) {
++		StringBuilder sb = new StringBuilder();
++		for (Box b : boxes) {
++			if (sb.length() > 0) {
++				sb.append(';');
++			}
++			sb.append(b.x0).append(',').append(b.y0).append(',').append(b.z0).append(',').append(b.x1).append(',').append(b.y1).append(',').append(b.z1);
++		}
++		return sb.toString();
++	}
++
++	public static String key(List<Box> boxes) {
++		int h = 0x811C9DC5;
++		for (byte c : canonical(boxes).getBytes(StandardCharsets.US_ASCII)) {
++			h ^= (c & 0xFF);
++			h *= 0x01000193;
++		}
++		return String.format("%08x", h);
++	}
++
++	private static final class Entry {
++		final List<Box> boxes;
++		int states;
++		final List<String> examples = new ArrayList<>();
++
++		Entry(List<Box> boxes) {
++			this.boxes = boxes;
++		}
++	}
++
++	/** The number of registered blocks, written into the catalogue so a later start can tell whether blocks were added or removed. */
++	private static int blockCount() {
++		int n = 0;
++		for (Block ignored : BuiltInRegistries.BLOCK) {
++			n++;
++		}
++		return n;
++	}
++
++	/** Whether the catalogue in a_file was made for the blocks that are registered now. */
++	public static boolean upToDate(Path a_file) {
++		try {
++			String text = Files.readString(a_file, StandardCharsets.UTF_8);
++			return text.contains("\"blocks\": " + blockCount() + ",");
++		} catch (IOException ex) {
++			return false;
++		}
++	}
++
++	/** Walks every state of every registered block (modded ones too) and writes the distinct collision shapes as JSON. */
++	public static void dump(Path file) {
++		Map<String, Entry> shapes = new TreeMap<>();
++		int states = 0;
++		for (Block block : BuiltInRegistries.BLOCK) {
++			String id = BuiltInRegistries.BLOCK.getKey(block).toString();
++			for (BlockState state : block.getStateDefinition().getPossibleStates()) {
++				VoxelShape shape = state.getCollisionShape(EmptyBlockGetter.INSTANCE, BlockPos.ZERO);
++				if (shape.isEmpty()) {
++					continue;
++				}
++				List<Box> boxes = boxesOf(shape);
++				if (boxes.isEmpty()) {
++					continue;
++				}
++				states++;
++				Entry e = shapes.computeIfAbsent(key(boxes), k -> new Entry(boxes));
++				e.states++;
++				if (e.examples.size() < 4 && !e.examples.contains(id)) {
++					e.examples.add(id);
++				}
++			}
++		}
++
++		StringBuilder json = new StringBuilder("{\n  \"blocks\": " + blockCount() + ",\n  \"unit\": \"sixteenths\",\n  \"shapes\": [\n");
++		boolean first = true;
++		int maxBoxes = 0;
++		for (Map.Entry<String, Entry> entry : shapes.entrySet()) {
++			Entry e = entry.getValue();
++			maxBoxes = Math.max(maxBoxes, e.boxes.size());
++			json.append(first ? "" : ",\n").append("    {\"key\": \"").append(entry.getKey()).append("\", \"states\": ").append(e.states).append(", \"examples\": [");
++			for (int i = 0; i < e.examples.size(); i++) {
++				json.append(i == 0 ? "" : ", ").append('"').append(e.examples.get(i)).append('"');
++			}
++			json.append("], \"boxes\": [");
++			for (int i = 0; i < e.boxes.size(); i++) {
++				Box b = e.boxes.get(i);
++				json.append(i == 0 ? "" : ", ").append('[').append(b.x0).append(", ").append(b.y0).append(", ").append(b.z0).append(", ")
++					.append(b.x1).append(", ").append(b.y1).append(", ").append(b.z1).append(']');
++			}
++			json.append("]}");
++			first = false;
++		}
++		json.append("\n  ]\n}\n");
++
++		try {
++			Files.createDirectories(file.toAbsolutePath().getParent());
++			Files.writeString(file, json.toString(), StandardCharsets.UTF_8);
++			SkyCraft.LOG.info("SkyCraft: shape catalog: {} distinct collision shapes over {} block states (most boxes in one: {}) -> {}", shapes.size(), states, maxBoxes, file);
++		} catch (IOException ex) {
++			SkyCraft.LOG.error("SkyCraft: couldn't write the shape catalog", ex);
++		}
++	}
++}
 diff --git a/fabric/src/main/java/dev/skycraft/world/SkyCollision.java b/fabric/src/main/java/dev/skycraft/world/SkyCollision.java
 index 0d32dc8..43600be 100644
 --- a/fabric/src/main/java/dev/skycraft/world/SkyCollision.java
@@ -3227,10 +3412,10 @@ index fce6cf8..a0775fd 100644
  	{
  		std::int32_t  sx, sy, sz;  // section coords, as in RenSection
 diff --git a/skse/SkyCraft.ini b/skse/SkyCraft.ini
-index 92b585a..0c1ab40 100644
+index 92b585a..afd435f 100644
 --- a/skse/SkyCraft.ini
 +++ b/skse/SkyCraft.ini
-@@ -14,7 +14,85 @@ sLauncher =
+@@ -14,7 +14,102 @@ sLauncher =
  ; What to pass to your own launcher. For Prism: --launch and the SkyCraft instance's folder name.
  sArguments = --launch SkyCraft
  
@@ -3268,9 +3453,26 @@ index 92b585a..0c1ab40 100644
 +; without collision on your install, SkyCraft.log says so and the block crates below hold you up instead. 0 = crates only.
 +bBlockMesh = 1
 +
-+; Off until the layout of the collision models is right: Skyrim crashed while loading them. While it is 0 the crates hold you up, and at
-+; the first Skyrim-mode session SkyCraft copies some of Skyrim's own models into Data/Meshes/SkyCraft/vanilla_dump to learn their layout.
-+bBlockMeshExperimental = 0
++; On by default: the section collision models are loaded, with the layout that matches Skyrim's own statics (patch revisions 30-32). The block
++; crates below stay under you until a model has been seen working in Skyrim's Havok world (SkyCraft.log says "works"), so there is always something
++; to stand on. If Skyrim ever crashes while loading them, the last "Block collision test: LOADING" line in SkyCraft.log names the file; set this to 0
++; to go back to crates only (a copy of some vanilla models is then made in Data/Meshes/SkyCraft/vanilla_dump to learn their layout).
++bBlockMeshExperimental = 1
++
++; The shape library: slabs, stairs, fences, doors and the other blocks that aren't whole cubes. Minecraft writes a catalogue of every distinct
++; collision shape (skycraft/shape_catalog.json in its folder) the first time its world starts, and at plugin load SkyCraft makes a model for
++; each into Data/Meshes/SkyCraft/BlockLibrary, which Skyrim has from its start. A block of such a shape is then a reference to its model
++; instead of boxes in the section's model, so changing one doesn't rewrite the section. Used once a section model has been seen working;
++; anything not in the library stays in the section models. The first session after installing has no catalogue yet, so it starts at the second.
++; 0 = odd shapes always in the section models.
++bShapeLibrary = 1
++
++; Where the catalogue is. Empty: where the Minecraft that comes with SkyCraft writes it (%LOCALAPPDATA%\SkyCraft\Prism\instances\SkyCraft\.minecraft\skycraft),
++; or Data\SKSE\Plugins\SkyCraft\shape_catalog.json. Set the full path of the file if you use your own launcher.
++sShapeCatalog =
++
++; The most library references at once (0 switches the library off).
++iMaxShapeRefs = 600
 +
 +; How many sections (16 blocks each) round you, sideways, get a model (1-8), and the most models at once.
 +iRadius = 4
@@ -3318,10 +3520,10 @@ index 92b585a..0c1ab40 100644
 +fRange = 40
 diff --git a/skse/src/BlockCollision.cpp b/skse/src/BlockCollision.cpp
 new file mode 100644
-index 0000000..425113a
+index 0000000..d188f10
 --- /dev/null
 +++ b/skse/src/BlockCollision.cpp
-@@ -0,0 +1,1079 @@
+@@ -0,0 +1,1307 @@
 +#include "Game.h"
 +#include "CollisionNif.h"
 +
@@ -3331,6 +3533,9 @@ index 0000000..425113a
 +#include <ctime>
 +#include <filesystem>
 +#include <fstream>
++#include <map>
++#include <array>
++#include <unordered_set>
 +
 +// Real collision for Minecraft's blocks, for everything in Skyrim: the player, NPCs, arrows and spells, over the whole area Minecraft has
 +// sent, not just the few blocks round the player that BlockCrates.cpp can keep crates on.
@@ -3356,7 +3561,10 @@ index 0000000..425113a
 +			float         overlap{ 0.02f }; // how much wider than a block (a fraction) so boxes that meet leave no seam to catch a foot on
 +			std::uint32_t material{ collisionnif::kMaterialStone };
 +			bool          cratesAlso{ false };  // keep the crates round the player even once the models are known to work
-+			bool          experimental{ false };  // load the collision models (Skyrim 1.6.1170 crashed on them while their layout was being worked out)
++			bool          library{ true };    // non-cube blocks whose shape is in the pre-made shape library are placed as references to its models
++			std::string   catalog;            // path of shape_catalog.json (empty: look where the Minecraft that comes with SkyCraft writes it)
++			int           maxShapeRefs{ 600 };  // most library references at once
++			bool          experimental{ true };  // load the collision models (off in SkyCraft.ini to use crates only, if Skyrim crashes on them)
 +		};
 +
 +		const CollisionCfg& Cfg()
@@ -3372,7 +3580,10 @@ index 0000000..425113a
 +				s.overlap = static_cast<float>(std::clamp(ini.GetDoubleValue("Collision", "fOverlap", 0.02), 0.0, 0.2));
 +				s.material = static_cast<std::uint32_t>(std::strtoul(ini.GetValue("Collision", "sMaterial", "3741512247"), nullptr, 0));
 +				s.cratesAlso = ini.GetBoolValue("Collision", "bCratesWithMesh", false);
-+				s.experimental = ini.GetBoolValue("Collision", "bBlockMeshExperimental", false);
++				s.library = ini.GetBoolValue("Collision", "bShapeLibrary", true);
++				s.catalog = ini.GetValue("Collision", "sShapeCatalog", "");
++				s.maxShapeRefs = static_cast<int>(std::clamp<long>(ini.GetLongValue("Collision", "iMaxShapeRefs", 600), 0, 5000));
++				s.experimental = ini.GetBoolValue("Collision", "bBlockMeshExperimental", true);
 +				return s;
 +			}();
 +			return settings;
@@ -3519,8 +3730,24 @@ index 0000000..425113a
 +			}
 +		}
 +
++		// ---- the shape library: Data/Meshes/SkyCraft/BlockLibrary/shp_<key>.nif, one model per distinct block collision shape (the origin is the
++		// block's low corner). Written at plugin load, so Skyrim has them from its start; never changed while it runs. ----
++		const std::filesystem::path kLibDir = "Data/Meshes/SkyCraft/BlockLibrary";
++		constexpr const char*       kLibModelDir = "SkyCraft\\BlockLibrary\\";
++		std::unordered_set<std::string>                           libraryKeys;
++		std::unordered_map<std::string, RE::TESObjectSTAT*>       libForms;
++		std::unordered_map<RE::FormID, std::vector<RE::FormID>>   libOf;  // a section's reference -> the library references that go with it
++		bool                                                      libBroken = false;
++		bool                                                      libWasOn = false;
++
 +		void PutAway(RE::FormID a_refId, const std::string& a_file)
 +		{
++			if (auto lib = libOf.find(a_refId); lib != libOf.end()) {
++				for (const auto id : lib->second) {
++					DeleteRef(RE::TESForm::LookupByID<RE::TESObjectREFR>(id));
++				}
++				libOf.erase(lib);
++			}
 +			if (a_refId != 0) {
 +				DeleteRef(RE::TESForm::LookupByID<RE::TESObjectREFR>(a_refId));
 +			}
@@ -3529,7 +3756,13 @@ index 0000000..425113a
 +
 +		// The solid blocks of a section as the boxes of a model whose origin is the section's min corner (Skyrim units, Skyrim's axes).
 +		// Whole cubes are merged (greedily: along x, then z, then y); other shapes (slabs, stairs, fences...) keep their own boxes.
-+		void BuildBoxes(int a_sx, int a_sy, int a_sz, float a_overlap, std::vector<collisionnif::Box>& a_out)
++		struct LibBlock
++		{
++			int         cell[3];  // the block, Minecraft coordinates
++			std::string key;
++		};
++
++		void BuildBoxes(int a_sx, int a_sy, int a_sz, float a_overlap, std::vector<collisionnif::Box>& a_out, std::vector<LibBlock>* a_lib = nullptr, int a_libCap = 0)
 +		{
 +			const int x0 = a_sx * 16, y0 = a_sy * 16, z0 = a_sz * 16;
 +			std::vector<NpcBlocks::BlockBox> all;
@@ -3620,8 +3853,34 @@ index 0000000..425113a
 +					}
 +				}
 +			}
++			// The other shapes, block by block: a block whose shape is in the library becomes a reference to its model (a_lib), the rest keep
++			// their boxes in the section's model.
++			std::map<std::array<int, 3>, std::vector<const NpcBlocks::BlockBox*>> byBlock;
 +			for (const auto& b : others) {
-+				emit(b.lo, b.hi, 0.0f);
++				byBlock[{ int(std::floor(b.lo[0] + 1e-3f)), int(std::floor(b.lo[1] + 1e-3f)), int(std::floor(b.lo[2] + 1e-3f)) }].push_back(&b);
++			}
++			for (const auto& [cell, list] : byBlock) {
++				if (a_lib && static_cast<int>(a_lib->size()) < a_libCap) {
++					std::vector<ShapeBox16> q;
++					for (const auto* b : list) {
++						ShapeBox16 box{};
++						for (int k = 0; k < 3; ++k) {
++							box.v[k] = std::clamp(int(std::lround((b->lo[k] - cell[k]) * 16.0f)), 0, 32);
++							box.v[k + 3] = std::clamp(int(std::lround((b->hi[k] - cell[k]) * 16.0f)), 0, 32);
++						}
++						if (box.v[3] > box.v[0] && box.v[4] > box.v[1] && box.v[5] > box.v[2]) {
++							q.push_back(box);
++						}
++					}
++					auto key = ShapeKey(q);
++					if (!q.empty() && libraryKeys.contains(key)) {
++						a_lib->push_back({ { cell[0], cell[1], cell[2] }, std::move(key) });
++						continue;
++					}
++				}
++				for (const auto* b : list) {
++					emit(b->lo, b->hi, 0.0f);
++				}
 +			}
 +		}
 +
@@ -3647,6 +3906,24 @@ index 0000000..425113a
 +			form->boundData.boundMax.y = 20;
 +			form->boundData.boundMax.z = s;
 +			return form;
++		}
++
++		// The base form of a library model (one per shape, shared by every block of it).
++		RE::TESObjectSTAT* LibForm(const std::string& a_key)
++		{
++			if (auto it = libForms.find(a_key); it != libForms.end()) {
++				return it->second;
++			}
++			auto* form = MakeStatic(std::string(kLibModelDir) + "shp_" + a_key + ".nif", float(2 * proto::kUnitsPerBlock));
++			libForms[a_key] = form;
++			return form;
++		}
++
++		bool DefaultOptions(const collisionnif::Options& a_o)
++		{
++			const collisionnif::Options d;
++			return a_o.plainNode == d.plainNode && a_o.rigidBodyT == d.rigidBodyT && a_o.collisionFlags == d.collisionFlags && a_o.bsxFlags == d.bsxFlags &&
++			       a_o.preambleExtra == d.preambleExtra && a_o.tailExtra == d.tailExtra && a_o.level == d.level;
 +		}
 +
 +		std::uint64_t CellKeyOf(RE::PlayerCharacter* a_player)
@@ -4055,6 +4332,111 @@ index 0000000..425113a
 +
 +	namespace BlockCollision
 +	{
++		// Reads shape_catalog.json (written by the Fabric side: ShapeCatalog.java) and writes a model for every shape in it. A catalogue whose
++		// keys don't match the ones computed here (the two sides disagree on ShapeCatalog.canonical) is not used at all.
++		void PrepareLibrary()
++		{
++			const auto& cfg = Cfg();
++			libraryKeys.clear();
++			if (!cfg.library || cfg.maxShapeRefs <= 0) {
++				return;
++			}
++			std::vector<std::filesystem::path> candidates;
++			if (!cfg.catalog.empty()) {
++				candidates.emplace_back(cfg.catalog);
++			} else {
++				if (const char* local = std::getenv("LOCALAPPDATA")) {
++					candidates.push_back(std::filesystem::path(local) / "SkyCraft" / "Prism" / "instances" / "SkyCraft" / ".minecraft" / "skycraft" / "shape_catalog.json");
++				}
++				candidates.emplace_back("Data/SKSE/Plugins/SkyCraft/shape_catalog.json");
++			}
++			std::string text;
++			std::filesystem::path used;
++			for (const auto& c : candidates) {
++				std::ifstream in(c, std::ios::binary);
++				if (in) {
++					text.assign(std::istreambuf_iterator<char>(in), std::istreambuf_iterator<char>());
++					used = c;
++					break;
++				}
++			}
++			if (text.empty()) {
++				logger::info("Block collision: no shape catalogue yet ({} places tried); Minecraft writes it the first time its world starts, and the shape library is made from it at the next start. Odd shapes are in the section models until then", candidates.size());
++				return;
++			}
++			std::error_code ec;
++			std::filesystem::create_directories(kLibDir, ec);
++			const float                    u = float(proto::kUnitsPerBlock);
++			std::unordered_set<std::string> keys;
++			std::size_t                    pos = 0;
++			int                            bad = 0;
++			while ((pos = text.find("\"key\": \"", pos)) != std::string::npos) {
++				pos += 8;
++				const std::string key = text.substr(pos, 8);
++				const auto        at = text.find("\"boxes\": [", pos);
++				if (at == std::string::npos) {
++					break;
++				}
++				std::size_t    i = at + 10;
++				int            depth = 1;
++				std::vector<int> nums;
++				while (i < text.size() && depth > 0) {
++					const char c = text[i];
++					if (c == '[') {
++						++depth;
++					} else if (c == ']') {
++						--depth;
++					} else if ((c >= '0' && c <= '9') || c == '-') {
++						char* end = nullptr;
++						nums.push_back(static_cast<int>(std::strtol(text.c_str() + i, &end, 10)));
++						i = static_cast<std::size_t>(end - text.c_str());
++						continue;
++					}
++					++i;
++				}
++				pos = i;
++				if (nums.empty() || nums.size() % 6 != 0) {
++					++bad;
++					continue;
++				}
++				std::vector<ShapeBox16>         q;
++				std::vector<collisionnif::Box>  boxes;
++				for (std::size_t n = 0; n < nums.size(); n += 6) {
++					ShapeBox16 b{};
++					for (int k = 0; k < 6; ++k) {
++						b.v[k] = nums[n + k];
++					}
++					q.push_back(b);
++				}
++				if (ShapeKey(q) != key) {
++					++bad;
++					continue;
++				}
++				for (const auto& b : q) {  // Minecraft (x, y up, z) in sixteenths -> the model's axes (x, y north = -z, z up), game units
++					collisionnif::Box box;
++					box.lo[0] = b.v[0] * u / 16.0f;
++					box.hi[0] = b.v[3] * u / 16.0f;
++					box.lo[1] = -b.v[5] * u / 16.0f;
++					box.hi[1] = -b.v[2] * u / 16.0f;
++					box.lo[2] = b.v[1] * u / 16.0f;
++					box.hi[2] = b.v[4] * u / 16.0f;
++					boxes.push_back(box);
++				}
++				const auto           bytes = collisionnif::Build(boxes, Cfg().material, 0.01f);
++				std::ofstream        out(kLibDir / ("shp_" + key + ".nif"), std::ios::binary | std::ios::trunc);
++				out.write(reinterpret_cast<const char*>(bytes.data()), static_cast<std::streamsize>(bytes.size()));
++				if (out.good()) {
++					keys.insert(key);
++				}
++			}
++			if (bad > 0 && keys.empty()) {
++				logger::warn("Block collision: shape catalogue {} isn't usable ({} entries whose keys or boxes don't match this plugin's); the library is off", used.string(), bad);
++				return;
++			}
++			libraryKeys = std::move(keys);
++			logger::info("Block collision: shape library: {} models in {} from {} ({} entries skipped); used once a section model has been seen working", libraryKeys.size(), AbsolutePath(kLibDir), used.string(), bad);
++		}
++
 +		void PrepareFiles()
 +		{
 +			if (!Cfg().on) {
@@ -4082,6 +4464,7 @@ index 0000000..425113a
 +			written += WriteFile("pre_bare.nif", placeholder) ? 1 : 0;
 +			written += WriteFile("pre_box.nif", collisionnif::Build(one, Cfg().material, 0.01f, box)) ? 1 : 0;
 +			written += WriteFile("pre_full.nif", collisionnif::Build(one, Cfg().material, 0.01f, O{})) ? 1 : 0;
++			PrepareLibrary();
 +			logger::info("Block collision: made {} model files in {} at plugin load ({} ms)", written, AbsolutePath(kDir),
 +				std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now() - started).count());
 +		}
@@ -4279,6 +4662,20 @@ index 0000000..425113a
 +			}
 +			std::ranges::sort(todo, {}, &Todo::dist);
 +
++			// The library is used once a section model has been seen working (so the layout is proven) and only with the default layout, which
++			// is what the library files are written in. At that moment the sections already made are made again, so their odd shapes move over.
++			const bool useLib = cfg.library && !libBroken && !libraryKeys.empty() && Verified() && DefaultOptions(activeOpts);
++			if (useLib && !libWasOn) {
++				libWasOn = true;
++				for (auto& entry : meshes) {
++					entry.second.stamp = 0;
++				}
++				logger::info("Block collision: shape library on ({} shapes)", libraryKeys.size());
++			}
++			int libTotal = 0;
++			for (const auto& entry : libOf) {
++				libTotal += static_cast<int>(entry.second.size());
++			}
 +			auto* handler = RE::TESDataHandler::GetSingleton();
 +			int   made = 0;
 +			for (const auto& t : todo) {
@@ -4292,7 +4689,12 @@ index 0000000..425113a
 +				}
 +
 +				std::vector<collisionnif::Box> boxes;
-+				BuildBoxes(s.sx, s.sy, s.sz, cfg.overlap, boxes);
++				std::vector<LibBlock> lib;
++				BuildBoxes(s.sx, s.sy, s.sz, cfg.overlap, boxes, useLib ? &lib : nullptr, useLib ? std::min(96, cfg.maxShapeRefs - libTotal) : 0);
++				if (boxes.empty() && !lib.empty()) {
++					lib.clear();  // only odd shapes in this section: a section model of their boxes is simpler than a reference for each
++					BuildBoxes(s.sx, s.sy, s.sz, cfg.overlap, boxes);
++				}
 +				if (boxes.empty()) {
 +					// Nothing solid after all: any old mesh goes.
 +					if (auto it = meshes.find(mapKey); it != meshes.end()) {
@@ -4355,6 +4757,31 @@ index 0000000..425113a
 +				ref->SetActivationBlocked(true);
 +				++made;
 +
++				// The odd shapes that come from the library: a reference to the model of each, at the block's low corner. They go (and are put
++				// away) with the section's reference. If one can't be made the library is given up and the section is made again without it.
++				bool libFailed = false;
++				if (!lib.empty()) {
++					auto& made_ids = libOf[ref->GetFormID()];
++					for (const auto& block : lib) {
++						auto* shapeForm = LibForm(block.key);
++						const RE::NiPoint3 at = McToSky(double(block.cell[0]), double(block.cell[1]), double(block.cell[2]));
++						RE::NiPointer<RE::TESObjectREFR> shapeRef;
++						if (shapeForm) {
++							shapeRef = handler->CreateReferenceAtLocation(shapeForm, at, RE::NiPoint3(), a_player->GetParentCell(), a_player->GetWorldspace(), nullptr, nullptr, RE::ObjectRefHandle(), false, true).get();
++						}
++						if (!shapeRef) {
++							libFailed = true;
++							break;
++						}
++						shapeRef->SetActivationBlocked(true);
++						made_ids.push_back(shapeRef->GetFormID());
++					}
++					if (libFailed) {
++						libBroken = true;
++						logger::warn("Block collision: can't place a shape library model; the library is given up and the odd shapes are in the section models again");
++					}
++				}
++
 +				if (!variantsStarted) {
 +					StartVariants(a_player, handler, pos, cfg.material);
 +				}
@@ -4396,6 +4823,9 @@ index 0000000..425113a
 +					it->second = std::move(fresh);
 +				} else {
 +					meshes.emplace(mapKey, std::move(fresh));
++				}
++				if (libFailed) {
++					meshes[mapKey].stamp = 0;  // made again, without the library, next pass
 +				}
 +			}
 +		}
@@ -6500,10 +6930,22 @@ index 3bb4d34..50eb9e4 100644
  				Perf::Scope timer(Perf::kDigMeshes);
  				Dig::UpdateMeshes(digSettled > 3.0f ? a_player : nullptr, a_delta, !dugChanged.empty());
 diff --git a/skse/src/Game.h b/skse/src/Game.h
-index 05788b1..ea35988 100644
+index 05788b1..4dee773 100644
 --- a/skse/src/Game.h
 +++ b/skse/src/Game.h
-@@ -17,6 +17,20 @@ namespace skycraft
+@@ -2,6 +2,11 @@
+ 
+ #include "Link.h"
+ 
++#include <algorithm>
++#include <cstdio>
++#include <string>
++#include <vector>
++
+ namespace skycraft
+ {
+ 	// Shared runtime state between the per-frame update, input sink and renderer hook.
+@@ -17,6 +22,20 @@ namespace skycraft
  		std::atomic<bool> mcScreenOpen{ false };
  		// A Skyrim menu (journal, dialogue, console, loading, ...) owns input.
  		std::atomic<bool> skyrimMenuOpen{ false };
@@ -6524,7 +6966,7 @@ index 05788b1..ea35988 100644
  		// MC reports its player is in a world (overlay should be drawn).
  		std::atomic<bool> mcInWorld{ false };
  
-@@ -96,10 +110,15 @@ namespace skycraft
+@@ -96,10 +115,15 @@ namespace skycraft
  	namespace Input
  	{
  		void Install();
@@ -6540,7 +6982,7 @@ index 05788b1..ea35988 100644
  	}
  
  	namespace Input
-@@ -108,6 +127,15 @@ namespace skycraft
+@@ -108,6 +132,15 @@ namespace skycraft
  		void SetActivatePromptKey(bool a_minecraftControls);
  	}
  
@@ -6556,7 +6998,7 @@ index 05788b1..ea35988 100644
  	namespace Combat
  	{
  		void Install();
-@@ -115,6 +143,9 @@ namespace skycraft
+@@ -115,6 +148,9 @@ namespace skycraft
  		void PerFrame(RE::PlayerCharacter* a_player, bool a_puppeting, float a_delta);
  		// Someone nearby is fighting the player (in combat with them as its target). Main thread.
  		bool PlayerEngaged();
@@ -6566,7 +7008,7 @@ index 05788b1..ea35988 100644
  	}
  
  	namespace BlockLights
-@@ -146,6 +177,28 @@ namespace skycraft
+@@ -146,6 +182,28 @@ namespace skycraft
  		void OnSolids(const std::uint8_t* a_data, std::uint32_t a_bytes);
  		void Clear();
  		bool SolidAt(std::int32_t a_x, std::int32_t a_y, std::int32_t a_z);
@@ -6595,10 +7037,44 @@ index 05788b1..ea35988 100644
  		// For the blocks' contact shadows (any thread): sets a_bit in a_out[x + w*(y + h*z)] for
  		// each solid block of the box at a_origin (Minecraft block coords) of a_size blocks. The
  		// generation changes whenever any section's blocks do.
-@@ -155,6 +208,25 @@ namespace skycraft
+@@ -155,6 +213,59 @@ namespace skycraft
  		void PushActorsOut(RE::PlayerCharacter* a_player, float a_delta);
  	}
  
++	// The key of a block's collision shape: FNV-1a over "x0,y0,z0,x1,y1,z1;..." (boxes in sixteenths of a block, sorted by y0, x0, z0, y1,
++	// x1, z1), as 8 hex digits. It is ShapeCatalog.canonical/key in the Fabric mod and fnv_key in tools/make_collision_library.py,
++	// and names the library file shp_<key>.nif.
++	struct ShapeBox16
++	{
++		int v[6];  // x0 y0 z0 x1 y1 z1
++	};
++	inline std::string ShapeKey(std::vector<ShapeBox16> a_boxes)
++	{
++		std::sort(a_boxes.begin(), a_boxes.end(), [](const ShapeBox16& a, const ShapeBox16& b) {
++			static constexpr int order[6] = { 1, 0, 2, 4, 3, 5 };
++			for (const int k : order) {
++				if (a.v[k] != b.v[k]) {
++					return a.v[k] < b.v[k];
++				}
++			}
++			return false;
++		});
++		std::uint32_t h = 0x811C9DC5u;
++		bool          first = true;
++		for (const auto& box : a_boxes) {
++			for (int k = 0; k < 6; ++k) {
++				const std::string part = std::to_string(box.v[k]) + (k == 5 ? "" : ",");
++				for (const char c : (first || k ? std::string() : std::string(";")) + part) {
++					h = (h ^ static_cast<std::uint8_t>(c)) * 0x01000193u;
++				}
++			}
++			first = false;
++		}
++		char out[9];
++		std::snprintf(out, sizeof out, "%08x", h);
++		return out;
++	}
++
 +	namespace BlockCollision
 +	{
 +		// Skyrim's own control mode: real collision for every Minecraft block Minecraft has sent, as models of merged boxes loaded as
@@ -7948,7 +8424,7 @@ index b877ae5..36666dc 100644
  				logger::info("in-frame block drawing: hooked after Main::RenderWorld");
  			}
 diff --git a/skse/src/main.cpp b/skse/src/main.cpp
-index eb548b4..7eb183a 100644
+index eb548b4..fc6103f 100644
 --- a/skse/src/main.cpp
 +++ b/skse/src/main.cpp
 @@ -21,6 +21,9 @@ namespace
@@ -7973,7 +8449,7 @@ index eb548b4..7eb183a 100644
  	SetupLog();
  	skycraft::CrashLog::Install();
  	logger::info("SkyCraft {} loading (runtime {})", "0.1.2", a_skse->RuntimeVersion().string());
-+	logger::info("patch revision 32 (collision test models are now loaded one at a time, smallest first, with a LOADING line logged before each; the byte-shifted variants are gone; revision 31: collision shapes: the array headers inside the list and convex shapes are empty like Skyrim's own, which was a null read at load; revision 30: collision model body now matches Skyrim's own statics: fixed motion system, flags 129 and 130; revision 29: collision models are off by default, a copy of vanilla models is made to see their layout; revision 28: section models are written into files made at plugin load, because Skyrim only loads model files that existed when it started; revision 27: smaller test models and copies of loose models tried too; revision 26: block model variants tried side by side, the first Skyrim loads is used; revision 25: exact block shapes: no padding on doors, stairs and other non-cube blocks, up to 16 boxes per block; a probe in the log tells a rejected .nif from a form that can't load models; revision 24: block collision models checked in the Havok world, crates kept until they work; lock-on survives a missing frame; revision 23: section models of merged boxes loaded as invisible statics over the whole area Minecraft sent; revision 22: crates only, the box simulation that held the Skyrim player is gone; Minecraft's mobs, passive ones too, are lock-on targets again, handed to True Directional Movement as virtual targets; revision 21: mob stand-ins removed)");
++	logger::info("patch revision 34 (the plugin makes the shape library models at load and places odd blocks as references to them once a section model is proven; collision models on by default, the crates stay under you until a model is seen working; tools/make_collision_library.py builds the shape library from the catalogue, which the Fabric side now writes by itself; ShapeKey in Game.h; revision 33: the Fabric side can list every distinct collision shape in the game with -Dskycraft.dumpShapes=true, ShapeCatalog.java; revision 32: collision test models are now loaded one at a time, smallest first, with a LOADING line logged before each; the byte-shifted variants are gone; revision 31: collision shapes: the array headers inside the list and convex shapes are empty like Skyrim's own, which was a null read at load; revision 30: collision model body now matches Skyrim's own statics: fixed motion system, flags 129 and 130; revision 29: collision models are off by default, a copy of vanilla models is made to see their layout; revision 28: section models are written into files made at plugin load, because Skyrim only loads model files that existed when it started; revision 27: smaller test models and copies of loose models tried too; revision 26: block model variants tried side by side, the first Skyrim loads is used; revision 25: exact block shapes: no padding on doors, stairs and other non-cube blocks, up to 16 boxes per block; a probe in the log tells a rejected .nif from a form that can't load models; revision 24: block collision models checked in the Havok world, crates kept until they work; lock-on survives a missing frame; revision 23: section models of merged boxes loaded as invisible statics over the whole area Minecraft sent; revision 22: crates only, the box simulation that held the Skyrim player is gone; Minecraft's mobs, passive ones too, are lock-on targets again, handed to True Directional Movement as virtual targets; revision 21: mob stand-ins removed)");
 +	skycraft::BlockCollision::PrepareFiles();
  	SKSE::GetMessagingInterface()->RegisterListener(OnMessage);
  	// As early as possible: Minecraft takes about as long to start as Skyrim does to reach its menu.
@@ -7991,3 +8467,161 @@ index 2402746..f352a35 100644
  NAME = os.environ.get("SKYCRAFT_LINK", "Local\\SkyCraft_v1")  # fake_guest.py runs one beside a real Skyrim
  OFF_SKY = 0x100
  OFF_MC = 0x200
+diff --git a/tools/make_collision_library.py b/tools/make_collision_library.py
+new file mode 100644
+index 0000000..e3180ea
+--- /dev/null
++++ b/tools/make_collision_library.py
+@@ -0,0 +1,152 @@
++#!/usr/bin/env python3
++"""Builds the pre-made collision model library: one shp_<key>.nif per distinct block collision shape.
++
++Input : shape_catalog.json, written by the Fabric side (ShapeCatalog.java; it is written by itself, once, into
++        <Minecraft folder>/skycraft/ the first time SkyCraft's world starts).
++Output: shp_<key>.nif files. The model's origin is the block's low corner; boxes are in Skyrim game units
++        (1 block = 70 units, Minecraft x/y/z -> Skyrim x/z/-y is applied when the model is placed, not here).
++
++The file layout is a port of skse/src/CollisionNif.h (level 3: BSFadeNode, BSXFlags, collision object, rigid body, list
++of convex-vertices boxes). `--selftest` compares it, byte for byte, with that header's output (needs g++).
++
++  python tools/make_collision_library.py shape_catalog.json out_dir
++  python tools/make_collision_library.py --selftest
++"""
++import json, os, struct, subprocess, sys, tempfile
++
++HAVOK = 69.99124
++UNITS_PER_BLOCK = 70.0
++STONE = 3741512247
++MAX_BOXES = 4000
++FLAGS_COLL, FLAGS_BSX = 129, 130
++
++
++def f32(v):
++    return struct.unpack("<f", struct.pack("<f", v))[0]
++
++
++def fnv_key(boxes):
++    s = ";".join(",".join(str(v) for v in b) for b in boxes).encode("ascii")
++    h = 0x811C9DC5
++    for c in s:
++        h = ((h ^ c) * 0x01000193) & 0xFFFFFFFF
++    return "%08x" % h
++
++
++def _filter():
++    return struct.pack("<BBH", 1, 0, 0)
++
++
++def _vec4(x, y, z, w):
++    return struct.pack("<4f", x, y, z, w)
++
++
++def _prop(n):
++    return struct.pack("<III", 0, n, 0x80000000 | n)
++
++
++def _rigid_body(shape_ref):
++    b = struct.pack("<i", shape_ref) + _filter() + struct.pack("<I", 0) + b"\x01\0\0\0" + _prop(0)
++    b += struct.pack("<BBHI", 1, 0, 0xFFFF, 0) + _filter() + bytes(12)
++    b += _vec4(0, 0, 0, 0) + _vec4(0, 0, 0, 1) + _vec4(0, 0, 0, 0) + _vec4(0, 0, 0, 0) + bytes(48) + _vec4(0, 0, 0, 0)
++    b += struct.pack("<11f", 0.0, 0.1, 0.05, 1.0, 1.0, 0.5, 1.0, 0.4, 104.4, 31.57, 0.15)
++    b += bytes([5, 1, 1, 0, 0, 0, 3, 0]) + bytes(12) + struct.pack("<IH", 0, 0)
++    return b
++
++
++def build(boxes, material=STONE, radius=0.01):
++    """boxes: [(x0,y0,z0,x1,y1,z1)] in game units."""
++    boxes = boxes[:MAX_BOXES]
++    n = len(boxes)
++    blocks = []
++    ident = (1, 0, 0, 0, 1, 0, 0, 0, 1)
++    blocks.append(struct.pack("<iIii", 0, 1, 1, -1) + struct.pack("<I", 14) + struct.pack("<3f", 0, 0, 0)
++                  + struct.pack("<9f", *ident) + struct.pack("<f", 1.0) + struct.pack("<iII", 2, 0, 0))
++    blocks.append(struct.pack("<iI", 1, FLAGS_BSX))
++    blocks.append(struct.pack("<iHi", 0, FLAGS_COLL, 3))
++    blocks.append(_rigid_body(4))
++    lst = struct.pack("<I", n) + b"".join(struct.pack("<i", 5 + i) for i in range(n)) + struct.pack("<I", material)
++    lst += bytes(12) + bytes(12) + struct.pack("<I", n) + _filter() * n
++    blocks.append(lst)
++    for x0, y0, z0, x1, y1, z1 in boxes:
++        # float32 arithmetic, as the C++ writer does it, so the bytes are identical
++        lo = tuple(f32(f32(v) / f32(HAVOK)) for v in (x0, y0, z0))
++        hi = tuple(f32(f32(v) / f32(HAVOK)) for v in (x1, y1, z1))
++        b = struct.pack("<If", material, radius) + bytes(24) + struct.pack("<I", 8)
++        for c in range(8):
++            b += _vec4(hi[0] if c & 1 else lo[0], hi[1] if c & 2 else lo[1], hi[2] if c & 4 else lo[2], 0.0)
++        b += struct.pack("<I", 6)
++        b += _vec4(1, 0, 0, -hi[0]) + _vec4(-1, 0, 0, lo[0]) + _vec4(0, 1, 0, -hi[1]) + _vec4(0, -1, 0, lo[1])
++        b += _vec4(0, 0, 1, -hi[2]) + _vec4(0, 0, -1, lo[2])
++        blocks.append(b)
++    types = ["BSFadeNode", "BSXFlags", "bhkCollisionObject", "bhkRigidBody", "bhkListShape", "bhkConvexVerticesShape"]
++    strings = ["SkyCraftCollision", "BSX"]
++    f = b"Gamebryo File Format, Version 20.2.0.7\n" + struct.pack("<IBIII", 0x14020007, 1, 12, len(blocks), 100)
++    for t in ("SkyCraft", "", ""):
++        f += struct.pack("<B", len(t) + 1) + t.encode() + b"\0"
++    f += struct.pack("<H", 6)
++    for t in types:
++        f += struct.pack("<I", len(t)) + t.encode()
++    for i in range(len(blocks)):
++        f += struct.pack("<H", i if i < 5 else 5)
++    for b in blocks:
++        f += struct.pack("<I", len(b))
++    f += struct.pack("<II", 2, len(strings[0]))
++    for s in strings:
++        f += struct.pack("<I", len(s)) + s.encode()
++    f += struct.pack("<I", 0) + b"".join(blocks) + struct.pack("<Ii", 1, 0)
++    return f
++
++
++def sixteenths_to_units(box):
++    # Minecraft (x, y up, z) in sixteenths -> the model's own axes (x, y north = -z, z up), game units.
++    x0, y0, z0, x1, y1, z1 = (v * UNITS_PER_BLOCK / 16.0 for v in box)
++    return (x0, -z1, y0, x1, -z0, y1)
++
++
++def make(catalog_path, out_dir):
++    with open(catalog_path, encoding="utf-8") as fh:
++        cat = json.load(fh)
++    os.makedirs(out_dir, exist_ok=True)
++    count = 0
++    for shape in cat["shapes"]:
++        boxes = [tuple(b) for b in shape["boxes"]]
++        if fnv_key(boxes) != shape["key"]:
++            sys.exit("key mismatch for %s: the catalog and this tool disagree on ShapeCatalog.canonical" % shape["key"])
++        data = build([sixteenths_to_units(b) for b in boxes])
++        with open(os.path.join(out_dir, "shp_%s.nif" % shape["key"]), "wb") as fh:
++            fh.write(data)
++        count += 1
++    print("wrote %d shape models to %s" % (count, out_dir))
++
++
++def selftest():
++    src = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "skse", "src")
++    cases = [[(0, 0, 0, 70, 70, 70)], [(0, 0, 0, 70, 70, 35), (0, 17.5, 35, 70, 52.5, 70)], [(1.5, 2.25, 3, 8, 9.5, 70)]]
++    with tempfile.TemporaryDirectory() as d:
++        cpp = os.path.join(d, "t.cpp")
++        with open(cpp, "w") as fh:
++            fh.write('#include "CollisionNif.h"\n#include <cstdio>\nint main(){using namespace skycraft::collisionnif;\n')
++            for i, c in enumerate(cases):
++                fh.write("{std::vector<Box> v{%s}; auto b=Build(v); FILE*f=fopen(\"%s/c%d.nif\",\"wb\"); fwrite(b.data(),1,b.size(),f); fclose(f);}\n"
++                         % (",".join("{{%g,%g,%g},{%g,%g,%g}}" % (x[0], x[1], x[2], x[3], x[4], x[5]) for x in c), d.replace("\\", "/"), i))
++            fh.write("}\n")
++        subprocess.check_call(["g++", "-std=c++20", "-I", src, cpp, "-o", os.path.join(d, "t")])
++        subprocess.check_call([os.path.join(d, "t")])
++        for i, c in enumerate(cases):
++            want = open(os.path.join(d, "c%d.nif" % i), "rb").read()
++            got = build(c)
++            print("case", i, "identical" if want == got else "DIFFERENT (%d vs %d bytes)" % (len(want), len(got)))
++            if want != got:
++                sys.exit(1)
++    print("selftest passed")
++
++
++if __name__ == "__main__":
++    if sys.argv[1:] == ["--selftest"]:
++        selftest()
++    elif len(sys.argv) == 3:
++        make(sys.argv[1], sys.argv[2])
++    else:
++        print(__doc__)
++        sys.exit(2)
