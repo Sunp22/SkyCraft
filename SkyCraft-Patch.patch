@@ -5265,10 +5265,10 @@ index 0000000..2b5b996
 +}
 diff --git a/skse/src/CollisionNif.h b/skse/src/CollisionNif.h
 new file mode 100644
-index 0000000..ed7e0b1
+index 0000000..e2e734d
 --- /dev/null
 +++ b/skse/src/CollisionNif.h
-@@ -0,0 +1,406 @@
+@@ -0,0 +1,366 @@
 +#pragma once
 +
 +// Writes a Skyrim SE .nif that holds nothing but collision: an invisible static (BSFadeNode) with a fixed rigid body whose shape is a list
@@ -5277,8 +5277,8 @@ index 0000000..ed7e0b1
 +//
 +// No Skyrim or CommonLib code in here: just bytes, so it can be (and was) checked on its own against an independent NIF reader.
 +//
-+// Layout (version 20.2.0.7, user version 12, user version 2 100), blocks in this order:
-+//   0 BSFadeNode (the root)   1 BSXFlags (havok)   2 bhkCollisionObject   3 bhkRigidBody   4 bhkListShape   5.. bhkConvexVerticesShape (one per box)
++// Layout (version 20.2.0.7, user version 12, user version 2 100), blocks in this order (children before the blocks that refer to them, as Skyrim's own files):
++//   0 BSFadeNode (the root)   1 BSXFlags (havok)   2.. bhkConvexVerticesShape (one per box)   then bhkListShape, bhkRigidBody, bhkCollisionObject
 +// A box is a convex-vertices shape rather than a bhkBoxShape because a list's children can't be moved without a transform shape, and a
 +// box with its own corners needs none.
 +
@@ -5507,20 +5507,18 @@ index 0000000..ed7e0b1
 +				RootNode(blocks[0], 1, -1);
 +				return Assemble(blocks, types, typeOf, strings);
 +			}
-+			RootNode(blocks[0], 1, 2);
-+			types.push_back("bhkCollisionObject");
-+			types.push_back(a_opt.rigidBodyT ? "bhkRigidBodyT" : "bhkRigidBody");
++			// Revision 35: blocks in Skyrim's own order, a shape before the body that holds it and the body before the collision object (the
++			// loader builds each Havok object as it links its block, so a block must come after everything it refers to).
++			RootNode(blocks[0], 1, 4);
 +			types.push_back("bhkBoxShape");
++			types.push_back(a_opt.rigidBodyT ? "bhkRigidBodyT" : "bhkRigidBody");
++			types.push_back("bhkCollisionObject");
 +			typeOf.push_back(2);
 +			typeOf.push_back(3);
 +			typeOf.push_back(4);
 +			blocks.resize(5);
-+			blocks[2].Put<std::int32_t>(0);
-+			blocks[2].Put<std::uint16_t>(a_opt.collisionFlags);
-+			blocks[2].Put<std::int32_t>(3);
-+			RigidBody(blocks[3], 4, a_opt);
 +			{
-+				Out& b = blocks[4];
++				Out& b = blocks[2];  // the box
 +				b.Put<std::uint32_t>(a_material);
 +				b.Put(a_radius);
 +				b.Zeros(8);
@@ -5529,12 +5527,21 @@ index 0000000..ed7e0b1
 +				b.Put((a_box.hi[2] - a_box.lo[2]) * 0.5f / a_scale);
 +				b.Put(0.0f);
 +			}
++			RigidBody(blocks[3], 2, a_opt);
++			blocks[4].Put<std::int32_t>(0);
++			blocks[4].Put<std::uint16_t>(a_opt.collisionFlags);
++			blocks[4].Put<std::int32_t>(3);
 +			return Assemble(blocks, types, typeOf, strings);
 +		}
 +
 +	}
 +
 +	// The file's bytes. a_radius is Havok's convex radius in Havok units (0.01 is what Skyrim's own meshes use); boxes beyond kMaxBoxes are dropped.
++	//
++	// Block order (revision 35; this is Skyrim's own order, checked on every list shape in vanilla_dump): 0 root, 1 BSXFlags, 2.. the convex
++	// shapes (one per box), then the list shape, the rigid body and the collision object. Skyrim builds each Havok object while linking its
++	// block, in file order, so a list shape placed BEFORE its children read their (still null) Havok shapes: the crash at SkyrimSE.exe+0EEE90F,
++	// `mov r8d, [rdx+0x18]` with rdx 0 (a shape's type), in the model loader thread, on every section model.
 +	inline std::vector<std::uint8_t> Build(const std::vector<Box>& a_boxes, std::uint32_t a_material = kMaterialStone, float a_radius = 0.01f, const Options& a_opt = {})
 +	{
 +		using namespace detail;
@@ -5546,28 +5553,14 @@ index 0000000..ed7e0b1
 +
 +		const std::uint32_t boxCount = static_cast<std::uint32_t>(a_boxes.size() > kMaxBoxes ? kMaxBoxes : a_boxes.size());
 +		const std::uint32_t blockCount = 5 + boxCount;
++		const std::int32_t  listAt = static_cast<std::int32_t>(2 + boxCount);
++		const std::int32_t  bodyAt = listAt + 1;
++		const std::int32_t  collisionAt = listAt + 2;
 +
-+		// ---- the blocks, one by one ----
 +		std::vector<Out> blocks(blockCount);
 +
-+		// 0: BSFadeNode (a NiNode with nothing in it but the collision)
-+		{
-+			Out& b = blocks[0];
-+			b.Put<std::int32_t>(0);   // name: string 0
-+			b.Put<std::uint32_t>(1);  // extra data: one,
-+			b.Put<std::int32_t>(1);   // BSXFlags
-+			b.Put<std::int32_t>(-1);  // no controller
-+			b.Put<std::uint32_t>(14); // flags
-+			b.Put(0.0f), b.Put(0.0f), b.Put(0.0f);  // translation
-+			const float identity[9] = { 1, 0, 0, 0, 1, 0, 0, 0, 1 };
-+			for (const float f : identity) {
-+				b.Put(f);
-+			}
-+			b.Put(1.0f);              // scale
-+			b.Put<std::int32_t>(2);   // collision object
-+			b.Put<std::uint32_t>(0);  // children
-+			b.Put<std::uint32_t>(0);  // effects
-+		}
++		// 0: the root (a BSFadeNode with nothing in it but the collision)
++		RootNode(blocks[0], 1, collisionAt);
 +
 +		// 1: BSXFlags: havok (bit 1), so the loader makes the collision
 +		{
@@ -5576,38 +5569,9 @@ index 0000000..ed7e0b1
 +			b.Put<std::uint32_t>(a_opt.bsxFlags);
 +		}
 +
-+		// 2: bhkCollisionObject
-+		{
-+			Out& b = blocks[2];
-+			b.Put<std::int32_t>(0);   // target: the root
-+			b.Put<std::uint16_t>(a_opt.collisionFlags);  // flags (1: active)
-+			b.Put<std::int32_t>(3);   // body
-+		}
-+
-+		// 3: bhkRigidBody
-+		RigidBody(blocks[3], 4, a_opt);
-+
-+		// 4: bhkListShape
-+		{
-+			Out& b = blocks[4];
-+			b.Put<std::uint32_t>(boxCount);
-+			for (std::uint32_t i = 0; i < boxCount; ++i) {
-+				b.Put<std::int32_t>(static_cast<std::int32_t>(5 + i));
-+			}
-+			b.Put<std::uint32_t>(a_material);
-+			// The two array headers are written empty (all zeros, as in vanilla's BasicTankard01): Skyrim reads them as live arrays, so a size
-+			// without a data pointer is a null read (the crash at SkyrimSE.exe+0EEE90F).
-+			b.Zeros(12);  // child shapes
-+			b.Zeros(12);  // child filters
-+			b.Put<std::uint32_t>(boxCount);
-+			for (std::uint32_t i = 0; i < boxCount; ++i) {
-+				Filter(b);
-+			}
-+		}
-+
-+		// 5..: one bhkConvexVerticesShape per box: its 8 corners and 6 planes (normal, then -distance: inside is where n.p + d <= 0)
++		// 2..: one bhkConvexVerticesShape per box: its 8 corners and 6 planes (normal, then -distance: inside is where n.p + d <= 0)
 +		for (std::uint32_t i = 0; i < boxCount; ++i) {
-+			Out&  b = blocks[5 + i];
++			Out&  b = blocks[2 + i];
 +			float lo[3], hi[3];
 +			for (int k = 0; k < 3; ++k) {
 +				lo[k] = a_boxes[i].lo[k] / kHavokScale;
@@ -5629,50 +5593,46 @@ index 0000000..ed7e0b1
 +			Vec4(b, 0, 0, -1, lo[2]);
 +		}
 +
-+		// ---- the header ----
-+		const char* const kTypeNames[6] = { a_opt.plainNode ? "NiNode" : "BSFadeNode", "BSXFlags", "bhkCollisionObject", a_opt.rigidBodyT ? "bhkRigidBodyT" : "bhkRigidBody", "bhkListShape", "bhkConvexVerticesShape" };
-+		const std::uint16_t      typeOf[6] = { 0, 1, 2, 3, 4, 5 };
-+		const std::string        strings[2] = { "SkyCraftCollision", "BSX" };
++		// the list shape
++		{
++			Out& b = blocks[static_cast<std::size_t>(listAt)];
++			b.Put<std::uint32_t>(boxCount);
++			for (std::uint32_t i = 0; i < boxCount; ++i) {
++				b.Put<std::int32_t>(static_cast<std::int32_t>(2 + i));
++			}
++			b.Put<std::uint32_t>(a_material);
++			// The two array headers are written empty (all zeros, as in vanilla's BasicTankard01).
++			b.Zeros(12);  // child shapes
++			b.Zeros(12);  // child filters
++			b.Put<std::uint32_t>(boxCount);
++			for (std::uint32_t i = 0; i < boxCount; ++i) {
++				Filter(b);
++			}
++		}
 +
-+		Out file;
-+		file.Text("Gamebryo File Format, Version 20.2.0.7\n");
-+		file.Put<std::uint32_t>(0x14020007);
-+		file.Put<std::uint8_t>(1);   // little endian
-+		file.Put<std::uint32_t>(12); // user version
-+		file.Put<std::uint32_t>(blockCount);
-+		file.Put<std::uint32_t>(100);  // user version 2 (Skyrim SE)
-+		for (const char* text : { "SkyCraft", "", "" }) {  // author, process script, export script: a length byte (with the zero) and the text
-+			const std::size_t n = std::strlen(text);
-+			file.Put<std::uint8_t>(static_cast<std::uint8_t>(n + 1));
-+			file.Text(text);
-+			file.Put<std::uint8_t>(0);
-+		}
-+		file.Put<std::uint16_t>(6);
-+		for (const char* name : kTypeNames) {
-+			file.Put<std::uint32_t>(static_cast<std::uint32_t>(std::strlen(name)));
-+			file.Text(name);
-+		}
-+		for (std::uint32_t i = 0; i < blockCount; ++i) {
-+			file.Put<std::uint16_t>(i < 5 ? typeOf[i] : typeOf[5]);
-+		}
-+		for (const auto& b : blocks) {
-+			file.Put<std::uint32_t>(static_cast<std::uint32_t>(b.bytes.size()));
-+		}
-+		file.Put<std::uint32_t>(2);  // strings
-+		file.Put<std::uint32_t>(static_cast<std::uint32_t>(strings[0].size()));  // the longest
-+		for (const auto& s : strings) {
-+			file.Put<std::uint32_t>(static_cast<std::uint32_t>(s.size()));
-+			file.Text(s);
-+		}
-+		file.Put<std::uint32_t>(0);  // groups
++		// the rigid body
++		RigidBody(blocks[static_cast<std::size_t>(bodyAt)], listAt, a_opt);
 +
-+		// ---- the blocks, then the footer ----
-+		for (const auto& b : blocks) {
-+			file.bytes.insert(file.bytes.end(), b.bytes.begin(), b.bytes.end());
++		// the collision object
++		{
++			Out& b = blocks[static_cast<std::size_t>(collisionAt)];
++			b.Put<std::int32_t>(0);   // target: the root
++			b.Put<std::uint16_t>(a_opt.collisionFlags);  // flags (1: active)
++			b.Put<std::int32_t>(bodyAt);
 +		}
-+		file.Put<std::uint32_t>(1);  // roots
-+		file.Put<std::int32_t>(0);
-+		return std::move(file.bytes);
++
++		// ---- the header, the blocks and the footer ----
++		std::vector<std::string>   typeNames{ a_opt.plainNode ? "NiNode" : "BSFadeNode", "BSXFlags", "bhkConvexVerticesShape", "bhkListShape", a_opt.rigidBodyT ? "bhkRigidBodyT" : "bhkRigidBody", "bhkCollisionObject" };
++		std::vector<std::uint16_t> typeOf(blockCount);
++		typeOf[0] = 0;
++		typeOf[1] = 1;
++		for (std::uint32_t i = 0; i < boxCount; ++i) {
++			typeOf[2 + i] = 2;
++		}
++		typeOf[static_cast<std::size_t>(listAt)] = 3;
++		typeOf[static_cast<std::size_t>(bodyAt)] = 4;
++		typeOf[static_cast<std::size_t>(collisionAt)] = 5;
++		return Assemble(blocks, typeNames, typeOf, { "SkyCraftCollision", "BSX" });
 +	}
 +}
 diff --git a/skse/src/Combat.cpp b/skse/src/Combat.cpp
@@ -8431,7 +8391,7 @@ index b877ae5..36666dc 100644
  				logger::info("in-frame block drawing: hooked after Main::RenderWorld");
  			}
 diff --git a/skse/src/main.cpp b/skse/src/main.cpp
-index eb548b4..08cf181 100644
+index eb548b4..248f0f0 100644
 --- a/skse/src/main.cpp
 +++ b/skse/src/main.cpp
 @@ -21,6 +21,9 @@ namespace
@@ -8456,7 +8416,7 @@ index eb548b4..08cf181 100644
  	SetupLog();
  	skycraft::CrashLog::Install();
  	logger::info("SkyCraft {} loading (runtime {})", "0.1.2", a_skse->RuntimeVersion().string());
-+	logger::info("patch revision 35 (collision body bytes now match Skyrim's own statics: the second collision response and callback delay were zero, which is response type INVALID, and the rolling friction was 1; revision 34: the plugin makes the shape library models at load and places odd blocks as references to them once a section model is proven; collision models on by default, the crates stay under you until a model is seen working; tools/make_collision_library.py builds the shape library from the catalogue, which the Fabric side now writes by itself; ShapeKey in Game.h; revision 33: the Fabric side can list every distinct collision shape in the game with -Dskycraft.dumpShapes=true, ShapeCatalog.java; revision 32: collision test models are now loaded one at a time, smallest first, with a LOADING line logged before each; the byte-shifted variants are gone; revision 31: collision shapes: the array headers inside the list and convex shapes are empty like Skyrim's own, which was a null read at load; revision 30: collision model body now matches Skyrim's own statics: fixed motion system, flags 129 and 130; revision 29: collision models are off by default, a copy of vanilla models is made to see their layout; revision 28: section models are written into files made at plugin load, because Skyrim only loads model files that existed when it started; revision 27: smaller test models and copies of loose models tried too; revision 26: block model variants tried side by side, the first Skyrim loads is used; revision 25: exact block shapes: no padding on doors, stairs and other non-cube blocks, up to 16 boxes per block; a probe in the log tells a rejected .nif from a form that can't load models; revision 24: block collision models checked in the Havok world, crates kept until they work; lock-on survives a missing frame; revision 23: section models of merged boxes loaded as invisible statics over the whole area Minecraft sent; revision 22: crates only, the box simulation that held the Skyrim player is gone; Minecraft's mobs, passive ones too, are lock-on targets again, handed to True Directional Movement as virtual targets; revision 21: mob stand-ins removed)");
++	logger::info("patch revision 35 (the collision model's blocks are now in Skyrim's own order, the shapes before the list that holds them: the list was built before its children existed, a null read at load in every section model; the body bytes now match Skyrim's own statics: the second collision response and callback delay were zero, which is response type INVALID, and the rolling friction was 1; revision 34: the plugin makes the shape library models at load and places odd blocks as references to them once a section model is proven; collision models on by default, the crates stay under you until a model is seen working; tools/make_collision_library.py builds the shape library from the catalogue, which the Fabric side now writes by itself; ShapeKey in Game.h; revision 33: the Fabric side can list every distinct collision shape in the game with -Dskycraft.dumpShapes=true, ShapeCatalog.java; revision 32: collision test models are now loaded one at a time, smallest first, with a LOADING line logged before each; the byte-shifted variants are gone; revision 31: collision shapes: the array headers inside the list and convex shapes are empty like Skyrim's own, which was a null read at load; revision 30: collision model body now matches Skyrim's own statics: fixed motion system, flags 129 and 130; revision 29: collision models are off by default, a copy of vanilla models is made to see their layout; revision 28: section models are written into files made at plugin load, because Skyrim only loads model files that existed when it started; revision 27: smaller test models and copies of loose models tried too; revision 26: block model variants tried side by side, the first Skyrim loads is used; revision 25: exact block shapes: no padding on doors, stairs and other non-cube blocks, up to 16 boxes per block; a probe in the log tells a rejected .nif from a form that can't load models; revision 24: block collision models checked in the Havok world, crates kept until they work; lock-on survives a missing frame; revision 23: section models of merged boxes loaded as invisible statics over the whole area Minecraft sent; revision 22: crates only, the box simulation that held the Skyrim player is gone; Minecraft's mobs, passive ones too, are lock-on targets again, handed to True Directional Movement as virtual targets; revision 21: mob stand-ins removed)");
 +	skycraft::BlockCollision::PrepareFiles();
  	SKSE::GetMessagingInterface()->RegisterListener(OnMessage);
  	// As early as possible: Minecraft takes about as long to start as Skyrim does to reach its menu.
@@ -8476,10 +8436,10 @@ index 2402746..f352a35 100644
  OFF_MC = 0x200
 diff --git a/tools/make_collision_library.py b/tools/make_collision_library.py
 new file mode 100644
-index 0000000..75bf994
+index 0000000..e2209dc
 --- /dev/null
 +++ b/tools/make_collision_library.py
-@@ -0,0 +1,152 @@
+@@ -0,0 +1,155 @@
 +#!/usr/bin/env python3
 +"""Builds the pre-made collision model library: one shp_<key>.nif per distinct block collision shape.
 +
@@ -8540,16 +8500,14 @@ index 0000000..75bf994
 +    """boxes: [(x0,y0,z0,x1,y1,z1)] in game units."""
 +    boxes = boxes[:MAX_BOXES]
 +    n = len(boxes)
++    # Revision 35: blocks in Skyrim's own order (children before the block that refers to them): 0 root, 1 BSXFlags, 2.. the convex
++    # shapes, then the list shape, the rigid body and the collision object. A list shape ahead of its children crashed the model loader.
++    list_at, body_at, coll_at = 2 + n, 3 + n, 4 + n
 +    blocks = []
 +    ident = (1, 0, 0, 0, 1, 0, 0, 0, 1)
 +    blocks.append(struct.pack("<iIii", 0, 1, 1, -1) + struct.pack("<I", 14) + struct.pack("<3f", 0, 0, 0)
-+                  + struct.pack("<9f", *ident) + struct.pack("<f", 1.0) + struct.pack("<iII", 2, 0, 0))
++                  + struct.pack("<9f", *ident) + struct.pack("<f", 1.0) + struct.pack("<iII", coll_at, 0, 0))
 +    blocks.append(struct.pack("<iI", 1, FLAGS_BSX))
-+    blocks.append(struct.pack("<iHi", 0, FLAGS_COLL, 3))
-+    blocks.append(_rigid_body(4))
-+    lst = struct.pack("<I", n) + b"".join(struct.pack("<i", 5 + i) for i in range(n)) + struct.pack("<I", material)
-+    lst += bytes(12) + bytes(12) + struct.pack("<I", n) + _filter() * n
-+    blocks.append(lst)
 +    for x0, y0, z0, x1, y1, z1 in boxes:
 +        # float32 arithmetic, as the C++ writer does it, so the bytes are identical
 +        lo = tuple(f32(f32(v) / f32(HAVOK)) for v in (x0, y0, z0))
@@ -8561,7 +8519,12 @@ index 0000000..75bf994
 +        b += _vec4(1, 0, 0, -hi[0]) + _vec4(-1, 0, 0, lo[0]) + _vec4(0, 1, 0, -hi[1]) + _vec4(0, -1, 0, lo[1])
 +        b += _vec4(0, 0, 1, -hi[2]) + _vec4(0, 0, -1, lo[2])
 +        blocks.append(b)
-+    types = ["BSFadeNode", "BSXFlags", "bhkCollisionObject", "bhkRigidBody", "bhkListShape", "bhkConvexVerticesShape"]
++    lst = struct.pack("<I", n) + b"".join(struct.pack("<i", 2 + i) for i in range(n)) + struct.pack("<I", material)
++    lst += bytes(12) + bytes(12) + struct.pack("<I", n) + _filter() * n
++    blocks.append(lst)
++    blocks.append(_rigid_body(list_at))
++    blocks.append(struct.pack("<iHi", 0, FLAGS_COLL, body_at))
++    types = ["BSFadeNode", "BSXFlags", "bhkConvexVerticesShape", "bhkListShape", "bhkRigidBody", "bhkCollisionObject"]
 +    strings = ["SkyCraftCollision", "BSX"]
 +    f = b"Gamebryo File Format, Version 20.2.0.7\n" + struct.pack("<IBIII", 0x14020007, 1, 12, len(blocks), 100)
 +    for t in ("SkyCraft", "", ""):
@@ -8570,7 +8533,7 @@ index 0000000..75bf994
 +    for t in types:
 +        f += struct.pack("<I", len(t)) + t.encode()
 +    for i in range(len(blocks)):
-+        f += struct.pack("<H", i if i < 5 else 5)
++        f += struct.pack("<H", 0 if i == 0 else 1 if i == 1 else 2 if i < list_at else i - list_at + 3)
 +    for b in blocks:
 +        f += struct.pack("<I", len(b))
 +    f += struct.pack("<II", 2, len(strings[0]))
