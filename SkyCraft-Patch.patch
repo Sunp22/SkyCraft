@@ -3318,10 +3318,10 @@ index 92b585a..0c1ab40 100644
 +fRange = 40
 diff --git a/skse/src/BlockCollision.cpp b/skse/src/BlockCollision.cpp
 new file mode 100644
-index 0000000..6bbc210
+index 0000000..425113a
 --- /dev/null
 +++ b/skse/src/BlockCollision.cpp
-@@ -0,0 +1,1064 @@
+@@ -0,0 +1,1062 @@
 +#include "Game.h"
 +#include "CollisionNif.h"
 +
@@ -3726,11 +3726,9 @@ index 0000000..6bbc210
 +			if (a_count == 0) {
 +				return true;
 +			}
-+			if constexpr (requires { a_stream.read(static_cast<void*>(nullptr), std::uint32_t(0)); }) {
-+				a_stream.read(static_cast<void*>(a_out.data() + at), static_cast<std::uint32_t>(a_count));
-+				return a_stream.good();
-+			} else if constexpr (requires { a_stream.binary_read(static_cast<void*>(nullptr), std::uint32_t(0)); }) {
-+				a_stream.binary_read(static_cast<void*>(a_out.data() + at), static_cast<std::uint32_t>(a_count));
++			// (NiBinaryStream::read is a template over the element type: with char, a count is a number of bytes)
++			if constexpr (requires { a_stream.read(static_cast<char*>(nullptr), std::uint32_t(0)); }) {
++				a_stream.read(reinterpret_cast<char*>(a_out.data() + at), static_cast<std::uint32_t>(a_count));
 +				return a_stream.good();
 +			} else {
 +				return false;
