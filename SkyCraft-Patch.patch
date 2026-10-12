@@ -4818,10 +4818,10 @@ index 0000000..2b5b996
 +}
 diff --git a/skse/src/CollisionNif.h b/skse/src/CollisionNif.h
 new file mode 100644
-index 0000000..e0b1b25
+index 0000000..2af6192
 --- /dev/null
 +++ b/skse/src/CollisionNif.h
-@@ -0,0 +1,398 @@
+@@ -0,0 +1,399 @@
 +#pragma once
 +
 +// Writes a Skyrim SE .nif that holds nothing but collision: an invisible static (BSFadeNode) with a fixed rigid body whose shape is a list
@@ -5141,8 +5141,10 @@ index 0000000..e0b1b25
 +				b.Put<std::int32_t>(static_cast<std::int32_t>(5 + i));
 +			}
 +			b.Put<std::uint32_t>(a_material);
-+			Property(b, boxCount);  // child shapes
-+			Property(b, boxCount);  // child filters
++			// The two array headers are written empty (all zeros, as in vanilla's BasicTankard01): Skyrim reads them as live arrays, so a size
++			// without a data pointer is a null read (the crash at SkyrimSE.exe+0EEE90F).
++			b.Zeros(12);  // child shapes
++			b.Zeros(12);  // child filters
 +			b.Put<std::uint32_t>(boxCount);
 +			for (std::uint32_t i = 0; i < boxCount; ++i) {
 +				Filter(b);
@@ -5159,8 +5161,7 @@ index 0000000..e0b1b25
 +			}
 +			b.Put<std::uint32_t>(a_material);
 +			b.Put(a_radius);
-+			Property(b, 8);
-+			Property(b, 6);
++			b.Zeros(24);  // both array headers empty, as vanilla's convex shapes have them
 +			b.Put<std::uint32_t>(8);
 +			for (int corner = 0; corner < 8; ++corner) {
 +				Vec4(b, (corner & 1) ? hi[0] : lo[0], (corner & 2) ? hi[1] : lo[1], (corner & 4) ? hi[2] : lo[2], 0.0f);
@@ -7930,7 +7931,7 @@ index b877ae5..36666dc 100644
  				logger::info("in-frame block drawing: hooked after Main::RenderWorld");
  			}
 diff --git a/skse/src/main.cpp b/skse/src/main.cpp
-index eb548b4..bcc6073 100644
+index eb548b4..7eb183a 100644
 --- a/skse/src/main.cpp
 +++ b/skse/src/main.cpp
 @@ -21,6 +21,9 @@ namespace
@@ -7955,7 +7956,7 @@ index eb548b4..bcc6073 100644
  	SetupLog();
  	skycraft::CrashLog::Install();
  	logger::info("SkyCraft {} loading (runtime {})", "0.1.2", a_skse->RuntimeVersion().string());
-+	logger::info("patch revision 30 (collision model body now matches Skyrim's own statics: fixed motion system, flags 129 and 130; revision 29: collision models are off by default, a copy of vanilla models is made to see their layout; revision 28: section models are written into files made at plugin load, because Skyrim only loads model files that existed when it started; revision 27: smaller test models and copies of loose models tried too; revision 26: block model variants tried side by side, the first Skyrim loads is used; revision 25: exact block shapes: no padding on doors, stairs and other non-cube blocks, up to 16 boxes per block; a probe in the log tells a rejected .nif from a form that can't load models; revision 24: block collision models checked in the Havok world, crates kept until they work; lock-on survives a missing frame; revision 23: section models of merged boxes loaded as invisible statics over the whole area Minecraft sent; revision 22: crates only, the box simulation that held the Skyrim player is gone; Minecraft's mobs, passive ones too, are lock-on targets again, handed to True Directional Movement as virtual targets; revision 21: mob stand-ins removed)");
++	logger::info("patch revision 31 (collision shapes: the array headers inside the list and convex shapes are empty like Skyrim's own, which was a null read at load; revision 30: collision model body now matches Skyrim's own statics: fixed motion system, flags 129 and 130; revision 29: collision models are off by default, a copy of vanilla models is made to see their layout; revision 28: section models are written into files made at plugin load, because Skyrim only loads model files that existed when it started; revision 27: smaller test models and copies of loose models tried too; revision 26: block model variants tried side by side, the first Skyrim loads is used; revision 25: exact block shapes: no padding on doors, stairs and other non-cube blocks, up to 16 boxes per block; a probe in the log tells a rejected .nif from a form that can't load models; revision 24: block collision models checked in the Havok world, crates kept until they work; lock-on survives a missing frame; revision 23: section models of merged boxes loaded as invisible statics over the whole area Minecraft sent; revision 22: crates only, the box simulation that held the Skyrim player is gone; Minecraft's mobs, passive ones too, are lock-on targets again, handed to True Directional Movement as virtual targets; revision 21: mob stand-ins removed)");
 +	skycraft::BlockCollision::PrepareFiles();
  	SKSE::GetMessagingInterface()->RegisterListener(OnMessage);
  	// As early as possible: Minecraft takes about as long to start as Skyrim does to reach its menu.
