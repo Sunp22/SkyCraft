@@ -3314,10 +3314,10 @@ index 92b585a..d5e586c 100644
 +fRange = 40
 diff --git a/skse/src/BlockCollision.cpp b/skse/src/BlockCollision.cpp
 new file mode 100644
-index 0000000..926da09
+index 0000000..5684d08
 --- /dev/null
 +++ b/skse/src/BlockCollision.cpp
-@@ -0,0 +1,761 @@
+@@ -0,0 +1,796 @@
 +#include "Game.h"
 +#include "CollisionNif.h"
 +
@@ -3421,6 +3421,8 @@ index 0000000..926da09
 +			bool                   forced{ false };
 +			bool                   done{ false };
 +			bool                   ok{ false };
++			bool                   usable{ true };  // a model of the real kind (not a smaller test file or a copy of someone else's)
++			std::filesystem::path  copyFrom;        // a loose .nif found in Data\\Meshes, copied to see if Skyrim loads any loose file that is new
 +		};
 +		std::vector<Variant>  variants;
 +		bool                  variantsStarted = false;
@@ -3675,6 +3677,9 @@ index 0000000..926da09
 +			variantsDone = false;
 +			using O = collisionnif::Options;
 +			std::vector<std::pair<std::string, O>> defs;
++			{ O o; o.level = 0; defs.emplace_back("TEST bare node only", o); }
++			{ O o; o.level = 1; defs.emplace_back("TEST node with BSXFlags", o); }
++			{ O o; o.level = 2; defs.emplace_back("TEST node, BSXFlags, collision object, body, one box shape", o); }
 +			defs.emplace_back("as written", O{});
 +			{ O o; o.preambleExtra = -4; defs.emplace_back("body: 4 bytes fewer before its translation", o); }
 +			{ O o; o.preambleExtra = 4; defs.emplace_back("body: 4 bytes more before its translation", o); }
@@ -3687,16 +3692,46 @@ index 0000000..926da09
 +			{ O o; o.rigidBodyT = true; defs.emplace_back("body named bhkRigidBodyT", o); }
 +			{ O o; o.rigidBodyT = true; o.collisionFlags = 129; o.bsxFlags = 3; defs.emplace_back("bhkRigidBodyT, flags 129, BSX 3", o); }
 +
++			// Loose models other mods put in Data\\Meshes, copied under new names: if Skyrim won't load those either, it isn't about our files.
++			std::vector<std::filesystem::path> loose;
++			{
++				std::error_code ec;
++				for (std::filesystem::recursive_directory_iterator it("Data/Meshes", std::filesystem::directory_options::skip_permission_denied, ec), end; !ec && it != end && loose.size() < 3; it.increment(ec)) {
++					if (!it->is_regular_file(ec) || it->path().extension() != ".nif" || it->path().string().find("SkyCraft") != std::string::npos) {
++						continue;
++					}
++					const auto size = it->file_size(ec);
++					if (!ec && size > 1000 && size < 150000) {
++						loose.push_back(it->path());
++					}
++				}
++			}
++			logger::info("Block collision test: Data/Meshes is at {}; {} loose models found to copy", std::filesystem::absolute(kDir.parent_path(), std::error_code{}).string(), loose.size());
++
 +			const float                          u = float(proto::kUnitsPerBlock);
 +			const std::vector<collisionnif::Box> one{ collisionnif::Box{ { 0.0f, 0.0f, 0.0f }, { u, u, u } } };
 +			int                                  index = 0;
++			for (const auto& path : loose) {
++				defs.emplace_back("TEST copy of a loose model: " + path.generic_string(), O{});
++			}
 +			for (auto& [label, opts] : defs) {
 +				Variant v;
 +				v.label = label;
 +				v.opts = opts;
++				v.usable = opts.level >= 3 && label.rfind("TEST", 0) != 0;
 +				v.file = fmt::format("v{}_{}.nif", index++, ++serial);
-+				const auto bytes = collisionnif::Build(one, a_material, 0.01f, opts);
-+				{
++				if (label.rfind("TEST copy", 0) == 0) {
++					const auto from = loose[static_cast<std::size_t>(index - 1) - (defs.size() - loose.size())];
++					std::error_code ec;
++					std::filesystem::copy_file(from, kDir / v.file, std::filesystem::copy_options::overwrite_existing, ec);
++					if (ec) {
++						v.file.clear();
++						v.done = true;
++						variants.push_back(std::move(v));
++						continue;
++					}
++				} else {
++					const auto bytes = collisionnif::Build(one, a_material, 0.01f, opts);
 +					std::ofstream out(kDir / v.file, std::ios::binary | std::ios::trunc);
 +					out.write(reinterpret_cast<const char*>(bytes.data()), static_cast<std::streamsize>(bytes.size()));
 +					if (!out.good()) {
@@ -3755,14 +3790,14 @@ index 0000000..926da09
 +			variantsDone = true;
 +			int first = -1;
 +			for (std::size_t i = 0; i < variants.size(); ++i) {
-+				if (variants[i].ok) {
++				if (variants[i].ok && variants[i].usable) {
 +					first = static_cast<int>(i);
 +					break;
 +				}
 +			}
 +			if (first < 0) {
-+				logger::warn("Block collision test: Skyrim loaded none of {} variants; Data/Meshes/SkyCraft/debug_default.nif is the file as written (NifSkope will say what is wrong with it)", variants.size());
-+			} else if (first == 0) {
++				logger::warn("Block collision test: Skyrim loaded none of the {} real-model variants (see the TEST lines above for what it does load); {} is the file as written (NifSkope will say what is wrong with it)", variants.size(), std::filesystem::absolute(kDir.parent_path() / "debug_default.nif", std::error_code{}).string());
++			} else if (variants[static_cast<std::size_t>(first)].label == "as written") {
 +				logger::info("Block collision test: the model as written loads; the section models should too");
 +			} else {
 +				activeOpts = variants[first].opts;
@@ -4513,10 +4548,10 @@ index 0000000..2b5b996
 +}
 diff --git a/skse/src/CollisionNif.h b/skse/src/CollisionNif.h
 new file mode 100644
-index 0000000..fc0062d
+index 0000000..fb306c0
 --- /dev/null
 +++ b/skse/src/CollisionNif.h
-@@ -0,0 +1,268 @@
+@@ -0,0 +1,396 @@
 +#pragma once
 +
 +// Writes a Skyrim SE .nif that holds nothing but collision: an invisible static (BSFadeNode) with a fixed rigid body whose shape is a list
@@ -4530,6 +4565,7 @@ index 0000000..fc0062d
 +// A box is a convex-vertices shape rather than a bhkBoxShape because a list's children can't be moved without a transform shape, and a
 +// box with its own corners needs none.
 +
++#include <algorithm>
 +#include <cstdint>
 +#include <cstring>
 +#include <string>
@@ -4558,6 +4594,7 @@ index 0000000..fc0062d
 +		std::uint32_t bsxFlags{ 2 };           // BSXFlags value (2: havok)
 +		int           preambleExtra{ 0 };      // bytes more (or fewer) in the body before its translation
 +		int           tailExtra{ 0 };          // bytes more (or fewer) in the body after its flags and before its constraints
++		int           level{ 3 };              // 0: a bare node, 1: with BSXFlags, 2: with a body whose shape is one box, 3: the real thing (a list of boxes)
 +	};
 +
 +	// Havok material of the whole shape (the hash of its name). 3741512247 is stone: its footsteps, its sounds, its impacts.
@@ -4606,12 +4643,180 @@ index 0000000..fc0062d
 +			a_out.Put(a_z);
 +			a_out.Put(a_w);
 +		}
++
++		// the bhkRigidBody block: fixed in place (a static), its shape the block a_shapeRef
++		inline void RigidBody(Out& b, std::int32_t a_shapeRef, const Options& a_opt)
++		{
++			b.Put<std::int32_t>(a_shapeRef);  // shape
++			Filter(b);
++			b.Put<std::uint32_t>(0);  // (unused)
++			b.Put<std::uint8_t>(1);   // broad phase: entity
++			b.Zeros(3);
++			Property(b, 0);
++			b.Put<std::uint8_t>(1);       // collision response: simple contact
++			b.Put<std::uint8_t>(0);
++			b.Put<std::uint16_t>(0xFFFF); // process contact callback delay
++			b.Put<std::uint32_t>(0);
++			Filter(b);                    // filter copy
++			b.Zeros(static_cast<std::size_t>(12 + a_opt.preambleExtra));
++			Vec4(b, 0, 0, 0, 0);          // translation
++			Vec4(b, 0, 0, 0, 1);          // rotation (x y z w)
++			Vec4(b, 0, 0, 0, 0);          // linear velocity
++			Vec4(b, 0, 0, 0, 0);          // angular velocity
++			b.Zeros(48);                  // inertia tensor
++			Vec4(b, 0, 0, 0, 0);          // centre
++			b.Put(0.0f);                  // mass (0: fixed)
++			b.Put(0.1f);                  // linear damping
++			b.Put(0.05f);                 // angular damping
++			b.Put(1.0f);                  // time factor
++			b.Put(1.0f);                  // gravity factor
++			b.Put(0.5f);                  // friction
++			b.Put(1.0f);                  // rolling friction multiplier
++			b.Put(0.4f);                  // restitution
++			b.Put(104.4f);                // max linear velocity
++			b.Put(31.57f);                // max angular velocity
++			b.Put(0.15f);                 // penetration depth
++			b.Put<std::uint8_t>(7);       // motion system: fixed
++			b.Put<std::uint8_t>(1);       // deactivator: never
++			b.Put<std::uint8_t>(1);       // solver deactivation: off
++			b.Put<std::uint8_t>(1);       // quality: fixed
++			b.Put<std::uint8_t>(0);       // auto remove level
++			b.Put<std::uint8_t>(0);       // response modifier
++			b.Put<std::uint8_t>(0);       // shape keys in contact point cache
++			b.Put<std::uint8_t>(0);       // force collided owner
++			b.Zeros(static_cast<std::size_t>(12 + a_opt.tailExtra));
++			b.Put<std::uint32_t>(0);      // constraints
++			b.Put<std::uint16_t>(0);      // body flags
++		}
++
++		// Header, blocks and footer of a file whose blocks are given (the layout of the header is the same whatever is in the blocks).
++		inline std::vector<std::uint8_t> Assemble(const std::vector<Out>& a_blocks, const std::vector<std::string>& a_typeNames, const std::vector<std::uint16_t>& a_typeOf, const std::vector<std::string>& a_strings)
++		{
++			Out file;
++			file.Text("Gamebryo File Format, Version 20.2.0.7\n");
++			file.Put<std::uint32_t>(0x14020007);
++			file.Put<std::uint8_t>(1);   // little endian
++			file.Put<std::uint32_t>(12); // user version
++			file.Put<std::uint32_t>(static_cast<std::uint32_t>(a_blocks.size()));
++			file.Put<std::uint32_t>(100);  // user version 2 (Skyrim SE)
++			for (const char* text : { "SkyCraft", "", "" }) {
++				const std::size_t n = std::strlen(text);
++				file.Put<std::uint8_t>(static_cast<std::uint8_t>(n + 1));
++				file.Text(text);
++				file.Put<std::uint8_t>(0);
++			}
++			file.Put<std::uint16_t>(static_cast<std::uint16_t>(a_typeNames.size()));
++			for (const auto& name : a_typeNames) {
++				file.Put<std::uint32_t>(static_cast<std::uint32_t>(name.size()));
++				file.Text(name);
++			}
++			for (const auto t : a_typeOf) {
++				file.Put<std::uint16_t>(t);
++			}
++			for (const auto& b : a_blocks) {
++				file.Put<std::uint32_t>(static_cast<std::uint32_t>(b.bytes.size()));
++			}
++			std::uint32_t longest = 0;
++			for (const auto& str : a_strings) {
++				longest = std::max<std::uint32_t>(longest, static_cast<std::uint32_t>(str.size()));
++			}
++			file.Put<std::uint32_t>(static_cast<std::uint32_t>(a_strings.size()));
++			file.Put<std::uint32_t>(longest);
++			for (const auto& str : a_strings) {
++				file.Put<std::uint32_t>(static_cast<std::uint32_t>(str.size()));
++				file.Text(str);
++			}
++			file.Put<std::uint32_t>(0);  // groups
++			for (const auto& b : a_blocks) {
++				file.bytes.insert(file.bytes.end(), b.bytes.begin(), b.bytes.end());
++			}
++			file.Put<std::uint32_t>(1);  // roots
++			file.Put<std::int32_t>(0);
++			return std::move(file.bytes);
++		}
++
++		// The root node: its extra data (a_extra, -1 for none) and collision object (a_collision, -1 for none).
++		inline void RootNode(Out& b, std::int32_t a_extra, std::int32_t a_collision)
++		{
++			b.Put<std::int32_t>(0);  // name: string 0
++			if (a_extra >= 0) {
++				b.Put<std::uint32_t>(1);
++				b.Put<std::int32_t>(a_extra);
++			} else {
++				b.Put<std::uint32_t>(0);
++			}
++			b.Put<std::int32_t>(-1);  // no controller
++			b.Put<std::uint32_t>(14); // flags
++			b.Put(0.0f), b.Put(0.0f), b.Put(0.0f);
++			const float identity[9] = { 1, 0, 0, 0, 1, 0, 0, 0, 1 };
++			for (const float f : identity) {
++				b.Put(f);
++			}
++			b.Put(1.0f);
++			b.Put<std::int32_t>(a_collision);
++			b.Put<std::uint32_t>(0);  // children
++			b.Put<std::uint32_t>(0);  // effects
++		}
++
++		// Smaller files for finding out which part Skyrim won't load: 0 a bare node, 1 plus BSXFlags, 2 plus a body of one box (a bhkBoxShape).
++		inline std::vector<std::uint8_t> Simple(const Box& a_box, std::uint32_t a_material, float a_radius, const Options& a_opt, float a_scale)
++		{
++			const std::string nodeType = a_opt.plainNode ? "NiNode" : "BSFadeNode";
++			std::vector<Out>           blocks;
++			std::vector<std::string>   types{ nodeType };
++			std::vector<std::uint16_t> typeOf{ 0 };
++			std::vector<std::string>   strings{ "SkyCraftCollision" };
++			blocks.resize(1);
++			if (a_opt.level <= 0) {
++				RootNode(blocks[0], -1, -1);
++				return Assemble(blocks, types, typeOf, strings);
++			}
++			strings.push_back("BSX");
++			types.push_back("BSXFlags");
++			typeOf.push_back(1);
++			blocks.resize(2);
++			blocks[1].Put<std::int32_t>(1);
++			blocks[1].Put<std::uint32_t>(a_opt.bsxFlags);
++			if (a_opt.level == 1) {
++				RootNode(blocks[0], 1, -1);
++				return Assemble(blocks, types, typeOf, strings);
++			}
++			RootNode(blocks[0], 1, 2);
++			types.push_back("bhkCollisionObject");
++			types.push_back(a_opt.rigidBodyT ? "bhkRigidBodyT" : "bhkRigidBody");
++			types.push_back("bhkBoxShape");
++			typeOf.push_back(2);
++			typeOf.push_back(3);
++			typeOf.push_back(4);
++			blocks.resize(5);
++			blocks[2].Put<std::int32_t>(0);
++			blocks[2].Put<std::uint16_t>(a_opt.collisionFlags);
++			blocks[2].Put<std::int32_t>(3);
++			RigidBody(blocks[3], 4, a_opt);
++			{
++				Out& b = blocks[4];
++				b.Put<std::uint32_t>(a_material);
++				b.Put(a_radius);
++				b.Zeros(8);
++				b.Put((a_box.hi[0] - a_box.lo[0]) * 0.5f / a_scale);  // half extents
++				b.Put((a_box.hi[1] - a_box.lo[1]) * 0.5f / a_scale);
++				b.Put((a_box.hi[2] - a_box.lo[2]) * 0.5f / a_scale);
++				b.Put(0.0f);
++			}
++			return Assemble(blocks, types, typeOf, strings);
++		}
++
 +	}
 +
 +	// The file's bytes. a_radius is Havok's convex radius in Havok units (0.01 is what Skyrim's own meshes use); boxes beyond kMaxBoxes are dropped.
 +	inline std::vector<std::uint8_t> Build(const std::vector<Box>& a_boxes, std::uint32_t a_material = kMaterialStone, float a_radius = 0.01f, const Options& a_opt = {})
 +	{
 +		using namespace detail;
++
++		if (a_opt.level < 3) {
++			const Box first = a_boxes.empty() ? Box{ { 0, 0, 0 }, { 70, 70, 70 } } : a_boxes[0];
++			return Simple(first, a_material, a_radius, a_opt, kHavokScale);
++		}
 +
 +		const std::uint32_t boxCount = static_cast<std::uint32_t>(a_boxes.size() > kMaxBoxes ? kMaxBoxes : a_boxes.size());
 +		const std::uint32_t blockCount = 5 + boxCount;
@@ -4653,50 +4858,8 @@ index 0000000..fc0062d
 +			b.Put<std::int32_t>(3);   // body
 +		}
 +
-+		// 3: bhkRigidBody: fixed in place (a static)
-+		{
-+			Out& b = blocks[3];
-+			b.Put<std::int32_t>(4);  // shape
-+			Filter(b);
-+			b.Put<std::uint32_t>(0);  // (unused)
-+			b.Put<std::uint8_t>(1);   // broad phase: entity
-+			b.Zeros(3);
-+			Property(b, 0);
-+			b.Put<std::uint8_t>(1);       // collision response: simple contact
-+			b.Put<std::uint8_t>(0);
-+			b.Put<std::uint16_t>(0xFFFF); // process contact callback delay
-+			b.Put<std::uint32_t>(0);
-+			Filter(b);                    // filter copy
-+			b.Zeros(static_cast<std::size_t>(12 + a_opt.preambleExtra));
-+			Vec4(b, 0, 0, 0, 0);          // translation
-+			Vec4(b, 0, 0, 0, 1);          // rotation (x y z w)
-+			Vec4(b, 0, 0, 0, 0);          // linear velocity
-+			Vec4(b, 0, 0, 0, 0);          // angular velocity
-+			b.Zeros(48);                  // inertia tensor
-+			Vec4(b, 0, 0, 0, 0);          // centre
-+			b.Put(0.0f);                  // mass (0: fixed)
-+			b.Put(0.1f);                  // linear damping
-+			b.Put(0.05f);                 // angular damping
-+			b.Put(1.0f);                  // time factor
-+			b.Put(1.0f);                  // gravity factor
-+			b.Put(0.5f);                  // friction
-+			b.Put(1.0f);                  // rolling friction multiplier
-+			b.Put(0.4f);                  // restitution
-+			b.Put(104.4f);                // max linear velocity
-+			b.Put(31.57f);                // max angular velocity
-+			b.Put(0.15f);                 // penetration depth
-+			b.Put<std::uint8_t>(7);       // motion system: fixed
-+			b.Put<std::uint8_t>(1);       // deactivator: never
-+			b.Put<std::uint8_t>(1);       // solver deactivation: off
-+			b.Put<std::uint8_t>(1);       // quality: fixed
-+			b.Put<std::uint8_t>(0);       // auto remove level
-+			b.Put<std::uint8_t>(0);       // response modifier
-+			b.Put<std::uint8_t>(0);       // shape keys in contact point cache
-+			b.Put<std::uint8_t>(0);       // force collided owner
-+			b.Zeros(static_cast<std::size_t>(12 + a_opt.tailExtra));
-+			b.Put<std::uint32_t>(0);      // constraints
-+			b.Put<std::uint16_t>(0);      // body flags
-+		}
++		// 3: bhkRigidBody
++		RigidBody(blocks[3], 4, a_opt);
 +
 +		// 4: bhkListShape
 +		{
@@ -7492,7 +7655,7 @@ index b877ae5..36666dc 100644
  				logger::info("in-frame block drawing: hooked after Main::RenderWorld");
  			}
 diff --git a/skse/src/main.cpp b/skse/src/main.cpp
-index eb548b4..474ec14 100644
+index eb548b4..2628d89 100644
 --- a/skse/src/main.cpp
 +++ b/skse/src/main.cpp
 @@ -21,6 +21,9 @@ namespace
@@ -7517,7 +7680,7 @@ index eb548b4..474ec14 100644
  	SetupLog();
  	skycraft::CrashLog::Install();
  	logger::info("SkyCraft {} loading (runtime {})", "0.1.2", a_skse->RuntimeVersion().string());
-+	logger::info("patch revision 26 (block model variants tried side by side, the first Skyrim loads is used; revision 25: exact block shapes: no padding on doors, stairs and other non-cube blocks, up to 16 boxes per block; a probe in the log tells a rejected .nif from a form that can't load models; revision 24: block collision models checked in the Havok world, crates kept until they work; lock-on survives a missing frame; revision 23: section models of merged boxes loaded as invisible statics over the whole area Minecraft sent; revision 22: crates only, the box simulation that held the Skyrim player is gone; Minecraft's mobs, passive ones too, are lock-on targets again, handed to True Directional Movement as virtual targets; revision 21: mob stand-ins removed)");
++	logger::info("patch revision 27 (smaller test models and copies of loose models tried too; revision 26: block model variants tried side by side, the first Skyrim loads is used; revision 25: exact block shapes: no padding on doors, stairs and other non-cube blocks, up to 16 boxes per block; a probe in the log tells a rejected .nif from a form that can't load models; revision 24: block collision models checked in the Havok world, crates kept until they work; lock-on survives a missing frame; revision 23: section models of merged boxes loaded as invisible statics over the whole area Minecraft sent; revision 22: crates only, the box simulation that held the Skyrim player is gone; Minecraft's mobs, passive ones too, are lock-on targets again, handed to True Directional Movement as virtual targets; revision 21: mob stand-ins removed)");
  	SKSE::GetMessagingInterface()->RegisterListener(OnMessage);
  	// As early as possible: Minecraft takes about as long to start as Skyrim does to reach its menu.
  	skycraft::Launcher::StartMinecraft();
