@@ -3227,10 +3227,10 @@ index fce6cf8..a0775fd 100644
  	{
  		std::int32_t  sx, sy, sz;  // section coords, as in RenSection
 diff --git a/skse/SkyCraft.ini b/skse/SkyCraft.ini
-index 92b585a..d5e586c 100644
+index 92b585a..0c1ab40 100644
 --- a/skse/SkyCraft.ini
 +++ b/skse/SkyCraft.ini
-@@ -14,7 +14,81 @@ sLauncher =
+@@ -14,7 +14,85 @@ sLauncher =
  ; What to pass to your own launcher. For Prism: --launch and the SkyCraft instance's folder name.
  sArguments = --launch SkyCraft
  
@@ -3267,6 +3267,10 @@ index 92b585a..d5e586c 100644
 +; merged boxes and put in the world as an invisible static, so Skyrim's own loader makes the collision. If the models can't be made or load
 +; without collision on your install, SkyCraft.log says so and the block crates below hold you up instead. 0 = crates only.
 +bBlockMesh = 1
++
++; Off until the layout of the collision models is right: Skyrim crashed while loading them. While it is 0 the crates hold you up, and at
++; the first Skyrim-mode session SkyCraft copies some of Skyrim's own models into Data/Meshes/SkyCraft/vanilla_dump to learn their layout.
++bBlockMeshExperimental = 0
 +
 +; How many sections (16 blocks each) round you, sideways, get a model (1-8), and the most models at once.
 +iRadius = 4
@@ -3314,10 +3318,10 @@ index 92b585a..d5e586c 100644
 +fRange = 40
 diff --git a/skse/src/BlockCollision.cpp b/skse/src/BlockCollision.cpp
 new file mode 100644
-index 0000000..fcd96ef
+index 0000000..6bbc210
 --- /dev/null
 +++ b/skse/src/BlockCollision.cpp
-@@ -0,0 +1,846 @@
+@@ -0,0 +1,1064 @@
 +#include "Game.h"
 +#include "CollisionNif.h"
 +
@@ -3352,6 +3356,7 @@ index 0000000..fcd96ef
 +			float         overlap{ 0.02f }; // how much wider than a block (a fraction) so boxes that meet leave no seam to catch a foot on
 +			std::uint32_t material{ collisionnif::kMaterialStone };
 +			bool          cratesAlso{ false };  // keep the crates round the player even once the models are known to work
++			bool          experimental{ false };  // load the collision models (Skyrim 1.6.1170 crashed on them while their layout was being worked out)
 +		};
 +
 +		const CollisionCfg& Cfg()
@@ -3367,6 +3372,7 @@ index 0000000..fcd96ef
 +				s.overlap = static_cast<float>(std::clamp(ini.GetDoubleValue("Collision", "fOverlap", 0.02), 0.0, 0.2));
 +				s.material = static_cast<std::uint32_t>(std::strtoul(ini.GetValue("Collision", "sMaterial", "3741512247"), nullptr, 0));
 +				s.cratesAlso = ini.GetBoolValue("Collision", "bCratesWithMesh", false);
++				s.experimental = ini.GetBoolValue("Collision", "bBlockMeshExperimental", false);
 +				return s;
 +			}();
 +			return settings;
@@ -3704,6 +3710,200 @@ index 0000000..fcd96ef
 +
 +	namespace
 +	{
++		bool variantsSafe = false;  // only models with no collision in them are tried (a bad collision model can crash Skyrim's loader)
++
++		// ---- vanilla models, copied out of Skyrim's own files, to see how its collision is laid out ----
++
++		// Reads exactly a_count bytes through Skyrim's stream (whatever the stream class calls its read), appending them to a_out.
++		template <class S>
++		bool ReadBytes(S& a_stream, std::vector<std::uint8_t>& a_out, std::size_t a_count)
++		{
++			if (a_count > (64u << 20)) {
++				return false;
++			}
++			const auto at = a_out.size();
++			a_out.resize(at + a_count);
++			if (a_count == 0) {
++				return true;
++			}
++			if constexpr (requires { a_stream.read(static_cast<void*>(nullptr), std::uint32_t(0)); }) {
++				a_stream.read(static_cast<void*>(a_out.data() + at), static_cast<std::uint32_t>(a_count));
++				return a_stream.good();
++			} else if constexpr (requires { a_stream.binary_read(static_cast<void*>(nullptr), std::uint32_t(0)); }) {
++				a_stream.binary_read(static_cast<void*>(a_out.data() + at), static_cast<std::uint32_t>(a_count));
++				return a_stream.good();
++			} else {
++				return false;
++			}
++		}
++
++		// A whole .nif from Skyrim's files (loose or in an archive): the header says how long everything is, so it is read piece by piece.
++		bool ReadNif(const std::string& a_path, std::vector<std::uint8_t>& a_out)
++		{
++			RE::BSResourceNiBinaryStream stream(a_path);
++			if (!stream.good()) {
++				return false;
++			}
++			a_out.clear();
++			auto u32at = [&](std::size_t a_at) {
++				std::uint32_t v = 0;
++				std::memcpy(&v, a_out.data() + a_at, 4);
++				return v;
++			};
++			// the first line
++			for (int i = 0; i < 80; ++i) {
++				if (!ReadBytes(stream, a_out, 1)) {
++					return false;
++				}
++				if (a_out.back() == '\n') {
++					break;
++				}
++				if (i == 79) {
++					return false;
++				}
++			}
++			std::size_t p = a_out.size();
++			if (!ReadBytes(stream, a_out, 4 + 1 + 4 + 4 + 4)) {  // version, endian, user version, blocks, bethesda version
++				return false;
++			}
++			const std::uint32_t blocks = u32at(p + 9);
++			for (int i = 0; i < 3; ++i) {  // author, process script, export script (short strings)
++				if (!ReadBytes(stream, a_out, 1) || !ReadBytes(stream, a_out, a_out.back())) {
++					return false;
++				}
++			}
++			p = a_out.size();
++			if (blocks > 100000 || !ReadBytes(stream, a_out, 2)) {
++				return false;
++			}
++			std::uint16_t types = 0;
++			std::memcpy(&types, a_out.data() + p, 2);
++			for (std::uint16_t i = 0; i < types; ++i) {
++				p = a_out.size();
++				if (!ReadBytes(stream, a_out, 4)) {
++					return false;
++				}
++				if (!ReadBytes(stream, a_out, u32at(p))) {
++					return false;
++				}
++			}
++			if (!ReadBytes(stream, a_out, std::size_t(blocks) * 2)) {  // block type of each block
++				return false;
++			}
++			p = a_out.size();
++			if (!ReadBytes(stream, a_out, std::size_t(blocks) * 4)) {  // size of each block
++				return false;
++			}
++			std::uint64_t total = 0;
++			for (std::uint32_t i = 0; i < blocks; ++i) {
++				total += u32at(p + std::size_t(i) * 4);
++			}
++			p = a_out.size();
++			if (!ReadBytes(stream, a_out, 8)) {  // number of strings, longest
++				return false;
++			}
++			const std::uint32_t strings = u32at(p);
++			for (std::uint32_t i = 0; i < strings && i < 100000; ++i) {
++				p = a_out.size();
++				if (!ReadBytes(stream, a_out, 4) || !ReadBytes(stream, a_out, u32at(p))) {
++					return false;
++				}
++			}
++			p = a_out.size();
++			if (!ReadBytes(stream, a_out, 4)) {  // groups
++				return false;
++			}
++			if (!ReadBytes(stream, a_out, std::size_t(u32at(p)) * 4)) {
++				return false;
++			}
++			if (total > (32u << 20) || !ReadBytes(stream, a_out, static_cast<std::size_t>(total))) {
++				return false;
++			}
++			p = a_out.size();
++			if (!ReadBytes(stream, a_out, 4)) {  // roots
++				return false;
++			}
++			return ReadBytes(stream, a_out, std::size_t(u32at(p)) * 4);
++		}
++
++		template <class T>
++		RE::TESObjectREFR* AsRef(T&& a_ref)
++		{
++			if constexpr (std::is_pointer_v<std::remove_cvref_t<T>>) {
++				return a_ref;
++			} else {
++				return &a_ref;
++			}
++		}
++
++		// Copies the models of what is around the player (a crate first) into Data/Meshes/SkyCraft/vanilla_dump, to be looked at.
++		void DumpVanillaModels(RE::PlayerCharacter* a_player)
++		{
++			static bool dumped = false;
++			if (dumped) {
++				return;
++			}
++			dumped = true;
++			const std::filesystem::path dir = kDir.parent_path() / "vanilla_dump";
++			std::error_code             ec;
++			std::filesystem::create_directories(dir, ec);
++
++			std::vector<std::string> paths;
++			auto                     add = [&](const char* a_model) {
++                if (!a_model || !*a_model || paths.size() >= 40) {
++                    return;
++                }
++                std::string m = a_model;
++                std::string lower = m;
++                std::ranges::transform(lower, lower.begin(), [](unsigned char ch) { return static_cast<char>(std::tolower(ch)); });
++                if (lower.find("skycraft") != std::string::npos || lower.find(".nif") == std::string::npos) {
++                    return;
++                }
++                for (const auto& have : paths) {
++                    std::string h = have;
++                    std::ranges::transform(h, h.begin(), [](unsigned char ch) { return static_cast<char>(std::tolower(ch)); });
++                    if (h == lower) {
++                        return;
++                    }
++                }
++                paths.push_back(m);
++			};
++			if (auto* crate = RE::TESForm::LookupByID(0x0007A617)) {
++				if (auto* model = skyrim_cast<RE::TESModel*>(crate)) {
++					add(model->GetModel());
++				}
++			}
++			if (auto* cell = a_player->GetParentCell()) {
++				cell->ForEachReference([&](auto&& a_ref) {
++					auto* ref = AsRef(a_ref);
++					auto* base = ref ? ref->GetBaseObject() : nullptr;
++					auto* model = base ? skyrim_cast<RE::TESModel*>(base) : nullptr;
++					if (model) {
++						add(model->GetModel());
++					}
++					return paths.size() >= 40 ? RE::BSContainer::ForEachResult::kStop : RE::BSContainer::ForEachResult::kContinue;
++				});
++			}
++
++			int copied = 0;
++			for (const auto& path : paths) {
++				std::vector<std::uint8_t> bytes;
++				if (!ReadNif(std::string("Meshes\\") + path, bytes) || bytes.size() > 400000) {
++					continue;
++				}
++				std::string name = path;
++				for (auto& ch : name) {
++					if (ch == '\\' || ch == '/' || ch == ':') {
++						ch = '_';
++					}
++				}
++				std::ofstream out(dir / name, std::ios::binary | std::ios::trunc);
++				out.write(reinterpret_cast<const char*>(bytes.data()), static_cast<std::streamsize>(bytes.size()));
++				++copied;
++			}
++			logger::info("Block collision: copied {} of {} nearby vanilla models into {} (for looking at their collision layout)", copied, paths.size(), AbsolutePath(dir));
++		}
++
 +		void StartVariants(RE::PlayerCharacter* a_player, RE::TESDataHandler* a_handler, const RE::NiPoint3& a_pos, std::uint32_t a_material)
 +		{
 +			variantsStarted = true;
@@ -3734,6 +3934,10 @@ index 0000000..fcd96ef
 +			{ O o; o.rigidBodyT = true; defs.push_back({ "body named bhkRigidBodyT", o, "", true }); }
 +			{ O o; o.rigidBodyT = true; o.collisionFlags = 129; o.bsxFlags = 3; defs.push_back({ "bhkRigidBodyT, flags 129, BSX 3", o, "", true }); }
 +
++			{ O o; o.level = 1; defs.insert(defs.begin() + 3, Def{ "TEST node with BSXFlags, written over a slot just now", o, "", false }); }
++			if (variantsSafe) {
++				std::erase_if(defs, [](const Def& d) { return d.opts.level >= 2; });  // nothing with collision in it
++			}
 +			const float                          u = float(proto::kUnitsPerBlock);
 +			const std::vector<collisionnif::Box> one{ collisionnif::Box{ { 0.0f, 0.0f, 0.0f }, { u, u, u } } };
 +			logger::info("Block collision test: model files are in {}", AbsolutePath(kDir));
@@ -3808,6 +4012,11 @@ index 0000000..fcd96ef
 +				return;
 +			}
 +			variantsDone = true;
++			if (variantsSafe) {
++				logger::info("Block collision test: finished (models with no collision in them only; see which of them loaded above)");
++				EndVariants();
++				return;
++			}
 +			int first = -1;
 +			for (std::size_t i = 0; i < variants.size(); ++i) {
 +				if (variants[i].ok && variants[i].usable) {
@@ -3989,6 +4198,19 @@ index 0000000..fcd96ef
 +					logger::warn("Block collision probe: a vanilla model did NOT load through a runtime-made static form either, so the cause is the form or the reference (not the .nif files)");
 +					EndProbe();
 +				}
++			}
++
++			if (!cfg.experimental) {
++				// Collision models are off until their layout is right (a wrong one crashed Skyrim): the crates hold the player up, and what
++				// can be learnt without risk is done here: a copy of some vanilla models, and a few models with no collision in them.
++				DumpVanillaModels(a_player);
++				if (!variantsStarted) {
++					variantsSafe = true;
++					if (auto* handler = RE::TESDataHandler::GetSingleton()) {
++						StartVariants(a_player, handler, a_player->GetPosition(), cfg.material);
++					}
++				}
++				return;
 +			}
 +
 +			sincePass += a_delta;
@@ -7708,7 +7930,7 @@ index b877ae5..36666dc 100644
  				logger::info("in-frame block drawing: hooked after Main::RenderWorld");
  			}
 diff --git a/skse/src/main.cpp b/skse/src/main.cpp
-index eb548b4..2e1cc7d 100644
+index eb548b4..32fc42d 100644
 --- a/skse/src/main.cpp
 +++ b/skse/src/main.cpp
 @@ -21,6 +21,9 @@ namespace
@@ -7733,7 +7955,7 @@ index eb548b4..2e1cc7d 100644
  	SetupLog();
  	skycraft::CrashLog::Install();
  	logger::info("SkyCraft {} loading (runtime {})", "0.1.2", a_skse->RuntimeVersion().string());
-+	logger::info("patch revision 28 (section models are written into files made at plugin load, because Skyrim only loads model files that existed when it started; revision 27: smaller test models and copies of loose models tried too; revision 26: block model variants tried side by side, the first Skyrim loads is used; revision 25: exact block shapes: no padding on doors, stairs and other non-cube blocks, up to 16 boxes per block; a probe in the log tells a rejected .nif from a form that can't load models; revision 24: block collision models checked in the Havok world, crates kept until they work; lock-on survives a missing frame; revision 23: section models of merged boxes loaded as invisible statics over the whole area Minecraft sent; revision 22: crates only, the box simulation that held the Skyrim player is gone; Minecraft's mobs, passive ones too, are lock-on targets again, handed to True Directional Movement as virtual targets; revision 21: mob stand-ins removed)");
++	logger::info("patch revision 29 (collision models are off by default, a copy of vanilla models is made to see their layout; revision 28: section models are written into files made at plugin load, because Skyrim only loads model files that existed when it started; revision 27: smaller test models and copies of loose models tried too; revision 26: block model variants tried side by side, the first Skyrim loads is used; revision 25: exact block shapes: no padding on doors, stairs and other non-cube blocks, up to 16 boxes per block; a probe in the log tells a rejected .nif from a form that can't load models; revision 24: block collision models checked in the Havok world, crates kept until they work; lock-on survives a missing frame; revision 23: section models of merged boxes loaded as invisible statics over the whole area Minecraft sent; revision 22: crates only, the box simulation that held the Skyrim player is gone; Minecraft's mobs, passive ones too, are lock-on targets again, handed to True Directional Movement as virtual targets; revision 21: mob stand-ins removed)");
 +	skycraft::BlockCollision::PrepareFiles();
  	SKSE::GetMessagingInterface()->RegisterListener(OnMessage);
  	// As early as possible: Minecraft takes about as long to start as Skyrim does to reach its menu.
