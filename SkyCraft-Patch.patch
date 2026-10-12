@@ -401,11 +401,45 @@ index 3127e6e..6929eed 100644
  
  		if ((flags & Proto.MC_IN_WORLD) != 0) {
  			try {
+diff --git a/fabric/src/client/java/dev/skycraft/client/mixin/ClientLevelDigMixin.java b/fabric/src/client/java/dev/skycraft/client/mixin/ClientLevelDigMixin.java
+index 9f3b180..3853275 100644
+--- a/fabric/src/client/java/dev/skycraft/client/mixin/ClientLevelDigMixin.java
++++ b/fabric/src/client/java/dev/skycraft/client/mixin/ClientLevelDigMixin.java
+@@ -1,6 +1,7 @@
+ package dev.skycraft.client.mixin;
+ 
+ import dev.skycraft.client.SkyDigClient;
++import dev.skycraft.client.render.WorldExporter;
+ import net.minecraft.client.multiplayer.ClientLevel;
+ import net.minecraft.core.BlockPos;
+ import net.minecraft.world.level.block.state.BlockState;
+@@ -9,11 +10,12 @@ import org.spongepowered.asm.mixin.injection.At;
+ import org.spongepowered.asm.mixin.injection.Inject;
+ import org.spongepowered.asm.mixin.injection.callback.CallbackInfo;
+ 
+-/** A dug block breaking reveals what's around it (SkyDigClient). */
++/** A dug block breaking reveals what's around it (SkyDigClient); any block change sends its section to Skyrim again (WorldExporter). */
+ @Mixin(ClientLevel.class)
+ public abstract class ClientLevelDigMixin {
+ 	@Inject(method = "setBlocksDirty", at = @At("HEAD"))
+ 	private void skycraft$blockChanged(BlockPos pos, BlockState oldState, BlockState newState, CallbackInfo ci) {
+ 		SkyDigClient.blockChanged((ClientLevel) (Object) this, pos, oldState, newState);
++		WorldExporter.blockChanged(pos, oldState, newState);
+ 	}
+ }
 diff --git a/fabric/src/client/java/dev/skycraft/client/render/WorldExporter.java b/fabric/src/client/java/dev/skycraft/client/render/WorldExporter.java
-index 9f909ce..ebf2d1b 100644
+index 9f909ce..4dad626 100644
 --- a/fabric/src/client/java/dev/skycraft/client/render/WorldExporter.java
 +++ b/fabric/src/client/java/dev/skycraft/client/render/WorldExporter.java
-@@ -62,11 +62,14 @@ import net.minecraft.world.phys.shapes.VoxelShape;
+@@ -44,6 +44,7 @@ import net.minecraft.world.level.CardinalLighting;
+ import net.minecraft.world.level.block.Block;
+ import net.minecraft.world.level.block.RenderShape;
+ import net.minecraft.world.level.block.state.BlockState;
++import net.minecraft.world.level.block.state.properties.BlockStateProperties;
+ import net.minecraft.world.level.chunk.LevelChunk;
+ import net.minecraft.world.level.chunk.LevelChunkSection;
+ import net.minecraft.world.level.chunk.status.ChunkStatus;
+@@ -62,14 +63,20 @@ import net.minecraft.world.phys.shapes.VoxelShape;
   */
  public final class WorldExporter {
  	private static final int SECTIONS_PER_FRAME = 12;
@@ -420,26 +454,138 @@ index 9f909ce..ebf2d1b 100644
  	private static final LongOpenHashSet SOLID = new LongOpenHashSet(); // sections Skyrim holds NPC collision for
  	private static final long[] SOLID_BITS = new long[64]; // 4096 blocks: bit x + 16z + 256y
  	private static final LongOpenHashSet DUG = new LongOpenHashSet(); // sections Skyrim holds dug cells for
-@@ -136,6 +139,7 @@ public final class WorldExporter {
++	// Doors, trapdoors, fence gates and the like (anything with an "open" state), per section, with the state each had when the section was
++	// last sent. Checked every frame (watchOpenable): whatever way a change reaches the client, Skyrim hears of it.
++	private static final it.unimi.dsi.fastutil.longs.Long2ObjectOpenHashMap<Openables> OPENABLES = new it.unimi.dsi.fastutil.longs.Long2ObjectOpenHashMap<>();
+ 	private static final ByteBuffer LIGHTS = ByteBuffer.allocate(16 * 16 * 16 * 8).order(ByteOrder.LITTLE_ENDIAN);
+ 	private static int sentGeneration = Integer.MIN_VALUE;
+ 	private static int meshesSent;
+@@ -87,6 +94,73 @@ public final class WorldExporter {
+ 	private WorldExporter() {
+ 	}
+ 
++	/** The openable blocks of one section and the state each was in when the section was sent. */
++	private static final class Openables {
++		final BlockPos[] pos;
++		final BlockState[] state;
++
++		Openables(List<BlockPos> a_pos, List<BlockState> a_state) {
++			this.pos = a_pos.toArray(new BlockPos[0]);
++			this.state = a_state.toArray(new BlockState[0]);
++		}
++	}
++
++	private static boolean isOpenable(BlockState state) {
++		return state.hasProperty(BlockStateProperties.OPEN);
++	}
++
++	/** Any block change on this client (ClientLevelDigMixin): its section, and the one next door if it is on the edge, is sent again at once. */
++	public static void blockChanged(BlockPos pos, BlockState before, BlockState after) {
++		if (before == after) {
++			return;
++		}
++		int sx = pos.getX() >> 4, sy = pos.getY() >> 4, sz = pos.getZ() >> 4;
++		markDirtyNow(sx, sy, sz);
++		int lx = pos.getX() & 15, ly = pos.getY() & 15, lz = pos.getZ() & 15;
++		if (lx == 0) {
++			markDirtyNow(sx - 1, sy, sz);
++		} else if (lx == 15) {
++			markDirtyNow(sx + 1, sy, sz);
++		}
++		if (ly == 0) {
++			markDirtyNow(sx, sy - 1, sz);
++		} else if (ly == 15) {
++			markDirtyNow(sx, sy + 1, sz);
++		}
++		if (lz == 0) {
++			markDirtyNow(sx, sy, sz - 1);
++		} else if (lz == 15) {
++			markDirtyNow(sx, sy, sz + 1);
++		}
++	}
++
++	/**
++	 * Opening or closing a door, trapdoor or fence gate changes its collision shape and its model, but it can reach the client in ways that
++	 * don't mark the section for Skyrim. So every openable block in the sections sent is looked at each frame; one that is not in the state
++	 * it was sent in sends its section again, ahead of everything else (the mesh for the picture, and the solid and shape lists, which
++	 * rebuild Skyrim's collision model of the section).
++	 */
++	private static void watchOpenable(ClientLevel level) {
++		if (OPENABLES.isEmpty()) {
++			return;
++		}
++		for (it.unimi.dsi.fastutil.longs.Long2ObjectMap.Entry<Openables> entry : OPENABLES.long2ObjectEntrySet()) {
++			Openables o = entry.getValue();
++			boolean changed = false;
++			for (int i = 0; i < o.pos.length; i++) {
++				BlockState now = level.getBlockState(o.pos[i]);
++				if (now != o.state[i]) {
++					o.state[i] = now;
++					changed = true;
++				}
++			}
++			if (changed) {
++				long key = entry.getLongKey();
++				markDirtyNow(SectionPos.x(key), SectionPos.y(key), SectionPos.z(key));
++			}
++		}
++	}
++
+ 	public static void markDirty(int sx, int sy, int sz) {
+ 		synchronized (DIRTY) {
+ 			DIRTY.add(SectionPos.asLong(sx, sy, sz));
+@@ -108,6 +182,7 @@ public final class WorldExporter {
+ 		if (sentGeneration != SkyLink.generation() || sentLevel != level || atlas == null || atlas.stale(minecraft)) {
+ 			resendEverything(minecraft, level);
+ 		}
++		watchOpenable(level);
+ 		meshDirtySections(level);
+ 		// Animated textures (water, lava, fire, ...): the frame for this game tick.
+ 		atlas.animate(level.getGameTime(), region -> {
+@@ -136,7 +211,9 @@ public final class WorldExporter {
  		SENT.clear();
  		LIT.clear();
  		SOLID.clear();
 +		SHAPE.clear();
  		DUG.clear();
++		OPENABLES.clear();
  		dev.skycraft.client.SkyDigClient.resendAll();
  		// Everything already loaded needs meshing again; later chunk loads mark themselves dirty.
-@@ -205,6 +209,8 @@ public final class WorldExporter {
+ 		int radius = minecraft.options.getEffectiveRenderDistance() + 1;
+@@ -190,6 +267,9 @@ public final class WorldExporter {
+ 		}
+ 		LevelChunkSection section = sectionAt(level, chunk, sy);
+ 		boolean empty = section == null || section.hasOnlyAir();
++		if (empty) {
++			OPENABLES.remove(key);
++		}
+ 		long[] dug = dev.skycraft.client.SkyDigClient.dugBits(chunk, sy);
+ 		int dugCount = 0;
+ 		if (dug != null) {
+@@ -205,7 +285,11 @@ public final class WorldExporter {
  		int lightCount = 0;
  		java.util.Arrays.fill(SOLID_BITS, 0L);
  		int solidCount = 0;
 +		SHAPES.clear();
 +		int shapeCount = 0;
  		MESH.cardinal = level.cardinalLighting();
++		List<BlockPos> openPos = null;
++		List<BlockState> openState = null;
  		if (!empty) {
  			BlockPos origin = SectionPos.of(sx, sy, sz).origin();
-@@ -218,10 +224,25 @@ public final class WorldExporter {
+ 			BlockPos.MutableBlockPos pos = new BlockPos.MutableBlockPos();
+@@ -217,11 +301,34 @@ public final class WorldExporter {
+ 						if (state.isAir()) {
  							continue;
  						}
++						if (isOpenable(state)) {
++							if (openPos == null) {
++								openPos = new ArrayList<>();
++								openState = new ArrayList<>();
++							}
++							openPos.add(pos.immutable());
++							openState.add(state);
++						}
  						// Blocks Skyrim's NPCs can't walk through (anything with a collision shape).
 -						if (!state.getCollisionShape(level, pos).isEmpty()) {
 +						var collision = state.getCollisionShape(level, pos);
@@ -464,7 +610,19 @@ index 9f909ce..ebf2d1b 100644
  						}
  						// Light-emitting blocks (torches, lava, glowstone, ...) light Skyrim's world too.
  						int emission = state.getLightEmission();
-@@ -288,6 +309,17 @@ public final class WorldExporter {
+@@ -245,6 +352,11 @@ public final class WorldExporter {
+ 				}
+ 			}
+ 		}
++		if (openPos != null) {
++			OPENABLES.put(key, new Openables(openPos, openState));
++		} else {
++			OPENABLES.remove(key);
++		}
+ 		// Holes dug into Skyrim's ground: Minecraft walls where its surface still runs above them.
+ 		var digLookup = dev.skycraft.world.SkyDig.clientDug;
+ 		if (dugCount > 0 && digLookup != null) {
+@@ -288,6 +400,17 @@ public final class WorldExporter {
  					SOLID.remove(key);
  				}
  			}
@@ -482,7 +640,7 @@ index 9f909ce..ebf2d1b 100644
  			// Cells dug out of Skyrim's world: its geometry there goes.
  			if (dugCount > 0 || DUG.contains(key)) {
  				ByteBuffer dugHeader = ByteBuffer.allocate(24).order(ByteOrder.LITTLE_ENDIAN).putInt(sx).putInt(sy).putInt(sz).putInt(dugCount)
-@@ -315,8 +347,33 @@ public final class WorldExporter {
+@@ -315,8 +438,33 @@ public final class WorldExporter {
  		return true;
  	}
  
@@ -516,7 +674,7 @@ index 9f909ce..ebf2d1b 100644
  		Vec3 eye = minecraft.player.getEyePosition(partialTick);
  		for (Entity e : level.entitiesForRendering()) {
  			if (ENTITIES.size() >= Proto.MAX_WORLD_ENTITIES || e.distanceToSqr(eye) > ENTITY_RANGE * ENTITY_RANGE) {
-@@ -344,6 +401,14 @@ public final class WorldExporter {
+@@ -344,6 +492,14 @@ public final class WorldExporter {
  				&& (e != minecraft.player || minecraft.gameRenderer.mainCamera().isDetached())) {
  				// Players and mobs: Skyrim darkens the ground softly under their feet.
  				ENTITIES.add(new SkyLink.WorldEntity(Proto.WE_SHADOW, e.getId(), (float) p.x, (float) p.y, (float) p.z, 0.0F, 0.0F, e.getBbWidth(), null, null, 0));
@@ -531,7 +689,7 @@ index 9f909ce..ebf2d1b 100644
  			}
  		}
  		addCracks(level);
-@@ -651,4 +716,9 @@ public final class WorldExporter {
+@@ -651,4 +807,9 @@ public final class WorldExporter {
  			return this;
  		}
  	}
@@ -3412,10 +3570,10 @@ index fce6cf8..a0775fd 100644
  	{
  		std::int32_t  sx, sy, sz;  // section coords, as in RenSection
 diff --git a/skse/SkyCraft.ini b/skse/SkyCraft.ini
-index 92b585a..afd435f 100644
+index 92b585a..1c90aef 100644
 --- a/skse/SkyCraft.ini
 +++ b/skse/SkyCraft.ini
-@@ -14,7 +14,102 @@ sLauncher =
+@@ -14,7 +14,111 @@ sLauncher =
  ; What to pass to your own launcher. For Prism: --launch and the SkyCraft instance's folder name.
  sArguments = --launch SkyCraft
  
@@ -3483,6 +3641,15 @@ index 92b585a..afd435f 100644
 +
 +; Havok material of the blocks (their footsteps and impact sounds): 3741512247 is stone.
 +sMaterial = 3741512247
++
++; Walking up steps like Minecraft: in Skyrim's mode, walking into a block (a stair, a slab, a carpet) no higher than fStepHeight (blocks; Minecraft's
++; own is 0.6) lifts you onto it without a jump. fStepRadius is how wide your body is from its middle, and fStepReach how far from it a step is looked for;
++; if you still stop at a stair, raise fStepReach a little (0.2); if you are lifted before you touch it, lower it. SkyCraft.log says "Step up: ..." each time
++; (the first twelve).
++bStepUp = 1
++fStepHeight = 0.6
++fStepRadius = 0.3
++fStepReach = 0.14
 +
 +; The block crates round you (see [Crates]) are kept until a section model has been seen working on your install (its collision in Skyrim's
 +; Havok world; SkyCraft.log says "works"), so there is always something to stand on. 1 = keep them even then.
@@ -6641,7 +6808,7 @@ index 4ce955a..41f51a0 100644
  	{
  		REL::Relocation<std::uintptr_t> collector{ RE::VTABLE_bhkCharacterPointCollector[0] };
 diff --git a/skse/src/Game.cpp b/skse/src/Game.cpp
-index 3bb4d34..50eb9e4 100644
+index 3bb4d34..1527bc2 100644
 --- a/skse/src/Game.cpp
 +++ b/skse/src/Game.cpp
 @@ -4,6 +4,14 @@
@@ -6821,7 +6988,7 @@ index 3bb4d34..50eb9e4 100644
  			if (puppet) {
  				EnsureControlsEnabled();
  				Game::NoteFrameStep('P');
-@@ -654,9 +775,33 @@ namespace skycraft
+@@ -654,9 +775,34 @@ namespace skycraft
  			st.mcGuiScale = haveMc ? static_cast<int>(mc.guiScale) : 0;
  			Input::SetActivatePromptKey(puppet);
  			Combat::PerFrame(a_player, puppet, a_delta);
@@ -6834,6 +7001,7 @@ index 3bb4d34..50eb9e4 100644
 +			} else if (skyrimMode && haveMc && st.mcInWorld && !loading && !a_player->IsDead()) {
 +				// Skyrim's own control mode: the blocks are still there, for NPCs and for the player.
 +				NpcBlocks::PushActorsOut(a_player, a_delta);
++				NpcBlocks::StepUpPlayer(a_player, a_delta);
 +				if (BlockCollision::Wanted()) {
 +					BlockCollision::Update(a_player, a_delta);
 +					if (BlockCollision::NeedCrates()) {
@@ -6855,7 +7023,7 @@ index 3bb4d34..50eb9e4 100644
  			}
  
  			// Interpolate Minecraft's 20 Hz physics ticks on our own clock (what MC's renderer does
-@@ -976,7 +1121,8 @@ namespace skycraft
+@@ -976,7 +1122,8 @@ namespace skycraft
  
  			// Tell Minecraft where Skyrim's player is and where they're looking.
  			proto::SkyState sky{};
@@ -6865,7 +7033,7 @@ index 3bb4d34..50eb9e4 100644
  			const auto skyMc = SkyToMc(current);
  			sky.worldId = worldId;
  			sky.collisionEpoch = epoch;
-@@ -991,6 +1137,10 @@ namespace skycraft
+@@ -991,6 +1138,10 @@ namespace skycraft
  			if (auto* calendar = RE::Calendar::GetSingleton()) {
  				sky.gameHour = calendar->GetHour();
  			}
@@ -6876,7 +7044,7 @@ index 3bb4d34..50eb9e4 100644
  			link.WriteSkyState(sky);
  
  			settleTimer -= a_delta;
-@@ -1009,7 +1159,8 @@ namespace skycraft
+@@ -1009,7 +1160,8 @@ namespace skycraft
  			const McVec lightCentre = puppet ? McVec{ mc.x, mc.y, mc.z } : skyMc;
  			{
  				Perf::Scope timer(Perf::kLights);
@@ -6886,7 +7054,7 @@ index 3bb4d34..50eb9e4 100644
  			}
  
  			// Blocks dug out of Skyrim's world: its collision around them goes to Minecraft again, and
-@@ -1023,7 +1174,8 @@ namespace skycraft
+@@ -1023,7 +1175,8 @@ namespace skycraft
  			}
  			// Not while the world is still settling after a load (its cells are still being attached).
  			static float digSettled = 0.0f;
@@ -6897,7 +7065,7 @@ index 3bb4d34..50eb9e4 100644
  				Perf::Scope timer(Perf::kDigMeshes);
  				Dig::UpdateMeshes(digSettled > 3.0f ? a_player : nullptr, a_delta, !dugChanged.empty());
 diff --git a/skse/src/Game.h b/skse/src/Game.h
-index 05788b1..4dee773 100644
+index 05788b1..b9d3067 100644
 --- a/skse/src/Game.h
 +++ b/skse/src/Game.h
 @@ -2,6 +2,11 @@
@@ -7004,10 +7172,15 @@ index 05788b1..4dee773 100644
  		// For the blocks' contact shadows (any thread): sets a_bit in a_out[x + w*(y + h*z)] for
  		// each solid block of the box at a_origin (Minecraft block coords) of a_size blocks. The
  		// generation changes whenever any section's blocks do.
-@@ -155,6 +213,59 @@ namespace skycraft
+@@ -153,6 +211,62 @@ namespace skycraft
+ 		std::uint32_t Generation();
+ 		// Main thread, every frame: NPCs overlapping solid Minecraft blocks are pushed back out.
  		void PushActorsOut(RE::PlayerCharacter* a_player, float a_delta);
- 	}
- 
++		// Main thread, every frame in Skyrim's control mode: the player walking into a block no higher than Minecraft's step (0.6) is lifted onto it,
++		// as Minecraft's player is (stairs, slabs, carpets), without a jump.
++		void StepUpPlayer(RE::PlayerCharacter* a_player, float a_delta);
++	}
++
 +	// The key of a block's collision shape: FNV-1a over "x0,y0,z0,x1,y1,z1;..." (boxes in sixteenths of a block, sorted by y0, x0, z0, y1,
 +	// x1, z1), as 8 hex digits. It is ShapeCatalog.canonical/key in the Fabric mod and fnv_key in tools/make_collision_library.py,
 +	// and names the library file shp_<key>.nif.
@@ -7059,11 +7232,9 @@ index 05788b1..4dee773 100644
 +		void Update(RE::PlayerCharacter* a_player, float a_delta);
 +		// Puts every section model away (leaving Skyrim's control mode, another cell).
 +		void Release();
-+	}
-+
+ 	}
+ 
  	namespace WorldRender
- 	{
- 		// Hooks Skyrim's frame so blocks are drawn into its scene before post-processing.
 diff --git a/skse/src/Input.cpp b/skse/src/Input.cpp
 index 092862e..6b42d97 100644
 --- a/skse/src/Input.cpp
@@ -7672,16 +7843,18 @@ index 0000000..179ccfe
 +	}
 +}
 diff --git a/skse/src/NpcBlocks.cpp b/skse/src/NpcBlocks.cpp
-index 5e25a7d..80d891a 100644
+index 5e25a7d..218c058 100644
 --- a/skse/src/NpcBlocks.cpp
 +++ b/skse/src/NpcBlocks.cpp
-@@ -1,4 +1,5 @@
+@@ -1,4 +1,7 @@
  #include "Game.h"
 +#include "Dig.h"
++
++#include <SimpleIni.h>
  
  // Skyrim's NPCs don't walk through Minecraft's blocks: Minecraft sends which blocks of each section
  // have a collision shape (proto::kRenSolids), and every frame any NPC overlapping one is pushed
-@@ -8,10 +9,20 @@ namespace skycraft
+@@ -8,10 +11,20 @@ namespace skycraft
  	namespace
  	{
  		std::unordered_map<std::uint64_t, std::array<std::uint64_t, 64>> solids;  // section -> bit x + 16z + 256y
@@ -7702,7 +7875,7 @@ index 5e25a7d..80d891a 100644
  		std::uint64_t SectionKey(std::int32_t a_x, std::int32_t a_y, std::int32_t a_z)
  		{
  			return (std::uint64_t(std::uint32_t(a_x) & 0x3FFFFF) << 42) | (std::uint64_t(std::uint32_t(a_z) & 0x3FFFFF) << 20) |
-@@ -36,6 +47,29 @@ namespace skycraft
+@@ -36,6 +49,29 @@ namespace skycraft
  		std::unordered_map<RE::FormID, Detour> detours;
  
  		bool ColumnBlocked(int a_x, int a_z, int a_y0, int a_y1);
@@ -7732,7 +7905,7 @@ index 5e25a7d..80d891a 100644
  	}
  
  	namespace NpcBlocks
-@@ -69,16 +103,30 @@ namespace skycraft
+@@ -69,16 +105,30 @@ namespace skycraft
  			++solidsGeneration;
  			if (hdr->count == 0 || a_bytes < sizeof(proto::RenSolids) + 512) {
  				solids.erase(key);
@@ -7764,7 +7937,7 @@ index 5e25a7d..80d891a 100644
  		}
  
  		std::uint32_t Generation() { return solidsGeneration.load(); }
-@@ -120,6 +168,135 @@ namespace skycraft
+@@ -120,6 +170,135 @@ namespace skycraft
  			}
  		}
  
@@ -7900,7 +8073,7 @@ index 5e25a7d..80d891a 100644
  		bool SolidAt(std::int32_t a_x, std::int32_t a_y, std::int32_t a_z)
  		{
  			std::shared_lock lock(solidsLock);
-@@ -169,37 +346,15 @@ namespace skycraft
+@@ -169,37 +348,15 @@ namespace skycraft
  				const int y0 = int(std::floor(mc.y + 0.3)), y1 = int(std::floor(mc.y + h - 0.1));
  				double    cx = mc.x, cz = mc.z;
  				bool      moved = false;
@@ -7946,6 +8119,196 @@ index 5e25a7d..80d891a 100644
  					}
  					if (std::abs(pushX) < 1e-4 && std::abs(pushZ) < 1e-4) {
  						break;
+@@ -251,4 +408,189 @@ namespace skycraft
+ 			}
+ 		}
+ 	}
++
++	// ---- walking up steps the way Minecraft does ----------------------------------------------------------------------------
++	//
++	// Minecraft lifts a walking player over anything up to 0.6 of a block (a stair, a slab, a carpet) without a jump. Skyrim's character
++	// controller can't: it stops at the riser, which is what made stairs feel wrong in Skyrim's control mode though their collision is
++	// exact. So each frame, when the player stands on the ground and is walking into a Minecraft block whose top is within that step,
++	// with room above it for the whole body, the player is set on top of it, as Minecraft would. The block data is the same as the
++	// collision models are made from (the exact boxes of every block), so it is the same stairs the model has.
++	namespace
++	{
++		struct StepCfg
++		{
++			bool  on{ true };
++			float height{ 0.6f };   // blocks: the highest step taken without a jump (Minecraft: 0.6)
++			float radius{ 0.3f };   // blocks: how wide the player's body is, from its middle
++			float reach{ 0.14f };   // blocks: how far from the body a step is looked for (the controller stops a little short of a wall)
++			float bodyHeight{ 1.8f };  // blocks: room needed above the step
++		};
++
++		const StepCfg& StepSettings()
++		{
++			static const StepCfg settings = [] {
++				CSimpleIniA ini;
++				ini.SetUnicode();
++				ini.LoadFile("Data/SKSE/Plugins/SkyCraft.ini");
++				StepCfg c;
++				c.on = ini.GetBoolValue("Collision", "bStepUp", true);
++				c.height = static_cast<float>(std::clamp(ini.GetDoubleValue("Collision", "fStepHeight", 0.6), 0.0, 1.0));
++				c.radius = static_cast<float>(std::clamp(ini.GetDoubleValue("Collision", "fStepRadius", 0.3), 0.1, 0.6));
++				c.reach = static_cast<float>(std::clamp(ini.GetDoubleValue("Collision", "fStepReach", 0.14), 0.0, 0.5));
++				return c;
++			}();
++			return settings;
++		}
++
++		// The way the player is pushing to move, from Skyrim's own movement input (relative to the way the body faces, as Skyrim reads it).
++		// False when this build of the game library doesn't expose it.
++		template <class Controls>
++		bool ReadMoveInput(Controls* a_controls, float& a_x, float& a_y)
++		{
++			if constexpr (requires { a_controls->data.moveInputVec.x; a_controls->data.moveInputVec.y; }) {
++				if (!a_controls) {
++					return false;
++				}
++				a_x = a_controls->data.moveInputVec.x;
++				a_y = a_controls->data.moveInputVec.y;
++				return true;
++			} else {
++				return false;
++			}
++		}
++	}
++
++	namespace NpcBlocks
++	{
++		void StepUpPlayer(RE::PlayerCharacter* a_player, float a_delta)
++		{
++			const auto& cfg = StepSettings();
++			if (!cfg.on || !a_player || a_player->IsDead()) {
++				return;
++			}
++
++			static double lastX = 0.0, lastZ = 0.0, memX = 0.0, memZ = 0.0;
++			static bool   haveLast = false;
++			static float  memory = 0.0f, cooldown = 0.0f;
++			static int    logged = 0;
++			static bool   inputKnown = true, inputNoted = false;
++
++			const auto sky = a_player->GetPosition();
++			const auto mc = SkyToMc(sky);
++			cooldown = std::max(0.0f, cooldown - a_delta);
++
++			// Where the player has really been going lately (used when the movement input can't be read).
++			if (haveLast) {
++				const double dx = mc.x - lastX, dz = mc.z - lastZ;
++				const double len = std::sqrt(dx * dx + dz * dz);
++				if (len > 0.01 && len < 3.0) {
++					memX = dx / len;
++					memZ = dz / len;
++					memory = 0.35f;
++				} else {
++					memory = std::max(0.0f, memory - a_delta);
++				}
++			}
++			lastX = mc.x;
++			lastZ = mc.z;
++			haveLast = true;
++
++			auto* controller = a_player->GetCharController();
++			if (!controller || controller->context.currentState != RE::hkpCharacterStateType::kOnGround || cooldown > 0.0f) {
++				return;
++			}
++
++			// The way it is trying to go, in Minecraft's horizontal axes (x east, z south).
++			double wantX = 0.0, wantZ = 0.0;
++			float  inX = 0.0f, inY = 0.0f;
++			if (ReadMoveInput(RE::PlayerControls::GetSingleton(), inX, inY)) {
++				if (!inputNoted) {
++					inputNoted = true;
++					logger::info("Step up: the movement input is readable, so the step is taken in the way the player is pushing");
++				}
++				if (std::sqrt(inX * inX + inY * inY) < 0.2f) {
++					return;
++				}
++				const double h = a_player->GetAngleZ();
++				// forward is (sin h, -cos h) and right is (cos h, sin h) in Minecraft's x, z (Skyrim's y is Minecraft's -z)
++				wantX = std::sin(h) * inY + std::cos(h) * inX;
++				wantZ = -std::cos(h) * inY + std::sin(h) * inX;
++			} else {
++				inputKnown = false;
++				if (!inputNoted) {
++					inputNoted = true;
++					logger::info("Step up: the movement input can't be read in this build, so the step is taken in the way the player has just been moving");
++				}
++				if (memory <= 0.0f) {
++					return;
++				}
++				wantX = memX;
++				wantZ = memZ;
++			}
++			const double wantLen = std::sqrt(wantX * wantX + wantZ * wantZ);
++			if (wantLen < 1e-3) {
++				return;
++			}
++			wantX /= wantLen;
++			wantZ /= wantLen;
++
++			// Every box near the body, from a block under the feet (fences and walls are 1.5 tall) to the head after a step.
++			std::vector<BlockBox> boxes;
++			GatherBoxes(int(std::floor(mc.x - 1.0)), int(std::floor(mc.x + 1.0)), int(std::floor(mc.y)) - 1, int(std::floor(mc.y + cfg.height + cfg.bodyHeight)),
++				int(std::floor(mc.z - 1.0)), int(std::floor(mc.z + 1.0)), boxes);
++			if (boxes.empty()) {
++				return;
++			}
++
++			const double feet = mc.y;
++			double       bestTop = -1.0;
++			for (const auto& b : boxes) {
++				const double top = b.hi[1];
++				if (top <= feet + 0.02 || top > feet + cfg.height + 1e-3 || top <= bestTop) {
++					continue;  // not higher than where the feet are, or higher than a step, or no better than one already found
++				}
++				// Is the box close to the body, and in the way the player is going?
++				const double qx = std::clamp(mc.x, double(b.lo[0]), double(b.hi[0]));
++				const double qz = std::clamp(mc.z, double(b.lo[2]), double(b.hi[2]));
++				const double vx = qx - mc.x, vz = qz - mc.z;
++				const double dist = std::sqrt(vx * vx + vz * vz);
++				if (dist < 1e-4 || dist >= cfg.radius + cfg.reach) {
++					continue;
++				}
++				if ((vx * wantX + vz * wantZ) / dist < 0.5) {
++					continue;  // beside the body (sliding along it), not ahead
++				}
++				// Room for the whole body standing on it, where the body is now?
++				const double newFeet = top + 0.01;
++				const double half = cfg.radius - 0.02;
++				bool         roomy = true;
++				for (const auto& o : boxes) {
++					if (o.lo[0] < mc.x + half && o.hi[0] > mc.x - half && o.lo[2] < mc.z + half && o.hi[2] > mc.z - half && o.lo[1] < newFeet + cfg.bodyHeight &&
++						o.hi[1] > newFeet + 0.001) {
++						roomy = false;
++						break;
++					}
++				}
++				if (roomy) {
++					bestTop = top;
++				}
++			}
++			if (bestTop < 0.0) {
++				return;
++			}
++
++			auto up = sky;
++			up.z = McToSky(mc.x, bestTop + 0.01, mc.z).z;
++			a_player->SetPosition(up, true);
++			controller->fallStartHeight = up.z;
++			controller->fallTime = 0.0f;
++			cooldown = 0.05f;
++			if (logged < 12) {
++				++logged;
++				logger::info("Step up: lifted the player {:.2f} blocks onto a step (feet {:.2f} -> {:.2f}), going ({:.2f}, {:.2f}), input {}", bestTop + 0.01 - feet, feet, bestTop + 0.01,
++					wantX, wantZ, inputKnown ? "read" : "not readable");
++			}
++		}
++	}
+ }
 diff --git a/skse/src/Overlay.cpp b/skse/src/Overlay.cpp
 index 4a78706..ae60836 100644
 --- a/skse/src/Overlay.cpp
@@ -8391,7 +8754,7 @@ index b877ae5..36666dc 100644
  				logger::info("in-frame block drawing: hooked after Main::RenderWorld");
  			}
 diff --git a/skse/src/main.cpp b/skse/src/main.cpp
-index eb548b4..248f0f0 100644
+index eb548b4..d5cdce8 100644
 --- a/skse/src/main.cpp
 +++ b/skse/src/main.cpp
 @@ -21,6 +21,9 @@ namespace
@@ -8416,7 +8779,7 @@ index eb548b4..248f0f0 100644
  	SetupLog();
  	skycraft::CrashLog::Install();
  	logger::info("SkyCraft {} loading (runtime {})", "0.1.2", a_skse->RuntimeVersion().string());
-+	logger::info("patch revision 35 (the collision model's blocks are now in Skyrim's own order, the shapes before the list that holds them: the list was built before its children existed, a null read at load in every section model; the body bytes now match Skyrim's own statics: the second collision response and callback delay were zero, which is response type INVALID, and the rolling friction was 1; revision 34: the plugin makes the shape library models at load and places odd blocks as references to them once a section model is proven; collision models on by default, the crates stay under you until a model is seen working; tools/make_collision_library.py builds the shape library from the catalogue, which the Fabric side now writes by itself; ShapeKey in Game.h; revision 33: the Fabric side can list every distinct collision shape in the game with -Dskycraft.dumpShapes=true, ShapeCatalog.java; revision 32: collision test models are now loaded one at a time, smallest first, with a LOADING line logged before each; the byte-shifted variants are gone; revision 31: collision shapes: the array headers inside the list and convex shapes are empty like Skyrim's own, which was a null read at load; revision 30: collision model body now matches Skyrim's own statics: fixed motion system, flags 129 and 130; revision 29: collision models are off by default, a copy of vanilla models is made to see their layout; revision 28: section models are written into files made at plugin load, because Skyrim only loads model files that existed when it started; revision 27: smaller test models and copies of loose models tried too; revision 26: block model variants tried side by side, the first Skyrim loads is used; revision 25: exact block shapes: no padding on doors, stairs and other non-cube blocks, up to 16 boxes per block; a probe in the log tells a rejected .nif from a form that can't load models; revision 24: block collision models checked in the Havok world, crates kept until they work; lock-on survives a missing frame; revision 23: section models of merged boxes loaded as invisible statics over the whole area Minecraft sent; revision 22: crates only, the box simulation that held the Skyrim player is gone; Minecraft's mobs, passive ones too, are lock-on targets again, handed to True Directional Movement as virtual targets; revision 21: mob stand-ins removed)");
++	logger::info("patch revision 36 (doors, trapdoors and fence gates send their section to Skyrim again the moment their state changes, by any route, and the Fabric side watches every openable block each frame; walking up stairs, slabs and carpets lifts the player onto the step as Minecraft does, bStepUp in SkyCraft.ini; revision 35: the collision model's blocks are now in Skyrim's own order, the shapes before the list that holds them: the list was built before its children existed, a null read at load in every section model; the body bytes now match Skyrim's own statics: the second collision response and callback delay were zero, which is response type INVALID, and the rolling friction was 1; revision 34: the plugin makes the shape library models at load and places odd blocks as references to them once a section model is proven; collision models on by default, the crates stay under you until a model is seen working; tools/make_collision_library.py builds the shape library from the catalogue, which the Fabric side now writes by itself; ShapeKey in Game.h; revision 33: the Fabric side can list every distinct collision shape in the game with -Dskycraft.dumpShapes=true, ShapeCatalog.java; revision 32: collision test models are now loaded one at a time, smallest first, with a LOADING line logged before each; the byte-shifted variants are gone; revision 31: collision shapes: the array headers inside the list and convex shapes are empty like Skyrim's own, which was a null read at load; revision 30: collision model body now matches Skyrim's own statics: fixed motion system, flags 129 and 130; revision 29: collision models are off by default, a copy of vanilla models is made to see their layout; revision 28: section models are written into files made at plugin load, because Skyrim only loads model files that existed when it started; revision 27: smaller test models and copies of loose models tried too; revision 26: block model variants tried side by side, the first Skyrim loads is used; revision 25: exact block shapes: no padding on doors, stairs and other non-cube blocks, up to 16 boxes per block; a probe in the log tells a rejected .nif from a form that can't load models; revision 24: block collision models checked in the Havok world, crates kept until they work; lock-on survives a missing frame; revision 23: section models of merged boxes loaded as invisible statics over the whole area Minecraft sent; revision 22: crates only, the box simulation that held the Skyrim player is gone; Minecraft's mobs, passive ones too, are lock-on targets again, handed to True Directional Movement as virtual targets; revision 21: mob stand-ins removed)");
 +	skycraft::BlockCollision::PrepareFiles();
  	SKSE::GetMessagingInterface()->RegisterListener(OnMessage);
  	// As early as possible: Minecraft takes about as long to start as Skyrim does to reach its menu.
