@@ -5265,10 +5265,10 @@ index 0000000..2b5b996
 +}
 diff --git a/skse/src/CollisionNif.h b/skse/src/CollisionNif.h
 new file mode 100644
-index 0000000..2af6192
+index 0000000..ed7e0b1
 --- /dev/null
 +++ b/skse/src/CollisionNif.h
-@@ -0,0 +1,399 @@
+@@ -0,0 +1,406 @@
 +#pragma once
 +
 +// Writes a Skyrim SE .nif that holds nothing but collision: an invisible static (BSFadeNode) with a fixed rigid body whose shape is a list
@@ -5375,7 +5375,14 @@ index 0000000..2af6192
 +			b.Put<std::uint16_t>(0xFFFF); // process contact callback delay
 +			b.Put<std::uint32_t>(0);
 +			Filter(b);                    // filter copy
-+			b.Zeros(static_cast<std::size_t>(12 + a_opt.preambleExtra));
++			// Revision 35: these twelve bytes were all zeros. In every one of Skyrim's own bodies (58 checked in vanilla_dump) the last four are
++			// 01 xx FF FF: the SECOND collision response and callback delay, the pair Havok really builds the body from. Zero there is response
++			// type INVALID, which has no contact handler, and the first thing to touch the body (the player's controller standing in the section)
++			// calls through it.
++			b.Zeros(static_cast<std::size_t>(8 + a_opt.preambleExtra));
++			b.Put<std::uint8_t>(1);       // collision response 2: simple contact
++			b.Put<std::uint8_t>(0);
++			b.Put<std::uint16_t>(0xFFFF); // process contact callback delay 2
 +			Vec4(b, 0, 0, 0, 0);          // translation
 +			Vec4(b, 0, 0, 0, 1);          // rotation (x y z w)
 +			Vec4(b, 0, 0, 0, 0);          // linear velocity
@@ -5388,7 +5395,7 @@ index 0000000..2af6192
 +			b.Put(1.0f);                  // time factor
 +			b.Put(1.0f);                  // gravity factor
 +			b.Put(0.5f);                  // friction
-+			b.Put(1.0f);                  // rolling friction multiplier
++			b.Put(0.0f);                  // rolling friction multiplier (0 in every vanilla body; 1.0 was written before)
 +			b.Put(0.4f);                  // restitution
 +			b.Put(104.4f);                // max linear velocity
 +			b.Put(31.57f);                // max angular velocity
@@ -8424,7 +8431,7 @@ index b877ae5..36666dc 100644
  				logger::info("in-frame block drawing: hooked after Main::RenderWorld");
  			}
 diff --git a/skse/src/main.cpp b/skse/src/main.cpp
-index eb548b4..fc6103f 100644
+index eb548b4..08cf181 100644
 --- a/skse/src/main.cpp
 +++ b/skse/src/main.cpp
 @@ -21,6 +21,9 @@ namespace
@@ -8449,7 +8456,7 @@ index eb548b4..fc6103f 100644
  	SetupLog();
  	skycraft::CrashLog::Install();
  	logger::info("SkyCraft {} loading (runtime {})", "0.1.2", a_skse->RuntimeVersion().string());
-+	logger::info("patch revision 34 (the plugin makes the shape library models at load and places odd blocks as references to them once a section model is proven; collision models on by default, the crates stay under you until a model is seen working; tools/make_collision_library.py builds the shape library from the catalogue, which the Fabric side now writes by itself; ShapeKey in Game.h; revision 33: the Fabric side can list every distinct collision shape in the game with -Dskycraft.dumpShapes=true, ShapeCatalog.java; revision 32: collision test models are now loaded one at a time, smallest first, with a LOADING line logged before each; the byte-shifted variants are gone; revision 31: collision shapes: the array headers inside the list and convex shapes are empty like Skyrim's own, which was a null read at load; revision 30: collision model body now matches Skyrim's own statics: fixed motion system, flags 129 and 130; revision 29: collision models are off by default, a copy of vanilla models is made to see their layout; revision 28: section models are written into files made at plugin load, because Skyrim only loads model files that existed when it started; revision 27: smaller test models and copies of loose models tried too; revision 26: block model variants tried side by side, the first Skyrim loads is used; revision 25: exact block shapes: no padding on doors, stairs and other non-cube blocks, up to 16 boxes per block; a probe in the log tells a rejected .nif from a form that can't load models; revision 24: block collision models checked in the Havok world, crates kept until they work; lock-on survives a missing frame; revision 23: section models of merged boxes loaded as invisible statics over the whole area Minecraft sent; revision 22: crates only, the box simulation that held the Skyrim player is gone; Minecraft's mobs, passive ones too, are lock-on targets again, handed to True Directional Movement as virtual targets; revision 21: mob stand-ins removed)");
++	logger::info("patch revision 35 (collision body bytes now match Skyrim's own statics: the second collision response and callback delay were zero, which is response type INVALID, and the rolling friction was 1; revision 34: the plugin makes the shape library models at load and places odd blocks as references to them once a section model is proven; collision models on by default, the crates stay under you until a model is seen working; tools/make_collision_library.py builds the shape library from the catalogue, which the Fabric side now writes by itself; ShapeKey in Game.h; revision 33: the Fabric side can list every distinct collision shape in the game with -Dskycraft.dumpShapes=true, ShapeCatalog.java; revision 32: collision test models are now loaded one at a time, smallest first, with a LOADING line logged before each; the byte-shifted variants are gone; revision 31: collision shapes: the array headers inside the list and convex shapes are empty like Skyrim's own, which was a null read at load; revision 30: collision model body now matches Skyrim's own statics: fixed motion system, flags 129 and 130; revision 29: collision models are off by default, a copy of vanilla models is made to see their layout; revision 28: section models are written into files made at plugin load, because Skyrim only loads model files that existed when it started; revision 27: smaller test models and copies of loose models tried too; revision 26: block model variants tried side by side, the first Skyrim loads is used; revision 25: exact block shapes: no padding on doors, stairs and other non-cube blocks, up to 16 boxes per block; a probe in the log tells a rejected .nif from a form that can't load models; revision 24: block collision models checked in the Havok world, crates kept until they work; lock-on survives a missing frame; revision 23: section models of merged boxes loaded as invisible statics over the whole area Minecraft sent; revision 22: crates only, the box simulation that held the Skyrim player is gone; Minecraft's mobs, passive ones too, are lock-on targets again, handed to True Directional Movement as virtual targets; revision 21: mob stand-ins removed)");
 +	skycraft::BlockCollision::PrepareFiles();
  	SKSE::GetMessagingInterface()->RegisterListener(OnMessage);
  	// As early as possible: Minecraft takes about as long to start as Skyrim does to reach its menu.
@@ -8469,7 +8476,7 @@ index 2402746..f352a35 100644
  OFF_MC = 0x200
 diff --git a/tools/make_collision_library.py b/tools/make_collision_library.py
 new file mode 100644
-index 0000000..e3180ea
+index 0000000..75bf994
 --- /dev/null
 +++ b/tools/make_collision_library.py
 @@ -0,0 +1,152 @@
@@ -8522,9 +8529,9 @@ index 0000000..e3180ea
 +
 +def _rigid_body(shape_ref):
 +    b = struct.pack("<i", shape_ref) + _filter() + struct.pack("<I", 0) + b"\x01\0\0\0" + _prop(0)
-+    b += struct.pack("<BBHI", 1, 0, 0xFFFF, 0) + _filter() + bytes(12)
++    b += struct.pack("<BBHI", 1, 0, 0xFFFF, 0) + _filter() + bytes(8) + struct.pack("<BBH", 1, 0, 0xFFFF)
 +    b += _vec4(0, 0, 0, 0) + _vec4(0, 0, 0, 1) + _vec4(0, 0, 0, 0) + _vec4(0, 0, 0, 0) + bytes(48) + _vec4(0, 0, 0, 0)
-+    b += struct.pack("<11f", 0.0, 0.1, 0.05, 1.0, 1.0, 0.5, 1.0, 0.4, 104.4, 31.57, 0.15)
++    b += struct.pack("<11f", 0.0, 0.1, 0.05, 1.0, 1.0, 0.5, 0.0, 0.4, 104.4, 31.57, 0.15)
 +    b += bytes([5, 1, 1, 0, 0, 0, 3, 0]) + bytes(12) + struct.pack("<IH", 0, 0)
 +    return b
 +
