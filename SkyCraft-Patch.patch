@@ -3314,15 +3314,16 @@ index 92b585a..d5e586c 100644
 +fRange = 40
 diff --git a/skse/src/BlockCollision.cpp b/skse/src/BlockCollision.cpp
 new file mode 100644
-index 0000000..937cdcb
+index 0000000..fcd96ef
 --- /dev/null
 +++ b/skse/src/BlockCollision.cpp
-@@ -0,0 +1,803 @@
+@@ -0,0 +1,846 @@
 +#include "Game.h"
 +#include "CollisionNif.h"
 +
 +#include <SimpleIni.h>
 +
++#include <chrono>
 +#include <ctime>
 +#include <filesystem>
 +#include <fstream>
@@ -3373,6 +3374,37 @@ index 0000000..937cdcb
 +
 +		const std::filesystem::path kDir = "Data/Meshes/SkyCraft/BlockCollision";
 +		constexpr const char*       kModelDir = "SkyCraft\\BlockCollision\\";  // as a model path is written (relative to Data\Meshes)
++
++		// Skyrim loads only model files that existed when it started (a file made while it runs opens fine but never gets a 3D). So
++		// PrepareFiles() makes this many placeholder files at plugin load; a section model is written over the next unused one just before its
++		// reference is made. A file is used once: Skyrim keeps a model it has loaded, so a changed section takes a fresh file.
++		constexpr int kSlots = 3000;
++		int           slotNext = 0;
++
++		bool IsFixedFile(const std::string& a_file)
++		{
++			return a_file.rfind("slot", 0) == 0 || a_file.rfind("pre_", 0) == 0;
++		}
++
++		void RemoveFile(const std::string& a_file)
++		{
++			if (!a_file.empty() && !IsFixedFile(a_file)) {
++				std::error_code ec;
++				std::filesystem::remove(kDir / a_file, ec);
++			}
++		}
++
++		std::string TakeSlot()
++		{
++			return slotNext < kSlots ? fmt::format("slot{:04d}.nif", slotNext++) : std::string();
++		}
++
++		bool WriteFile(const std::string& a_file, const std::vector<std::uint8_t>& a_bytes)
++		{
++			std::ofstream out(kDir / a_file, std::ios::binary | std::ios::trunc);
++			out.write(reinterpret_cast<const char*>(a_bytes.data()), static_cast<std::streamsize>(a_bytes.size()));
++			return out.good();
++		}
 +
 +		struct Mesh
 +		{
@@ -3470,11 +3502,8 @@ index 0000000..937cdcb
 +					DeleteRef(RE::TESForm::LookupByID<RE::TESObjectREFR>(v.refId));
 +					v.refId = 0;
 +				}
-+				if (!v.file.empty()) {
-+					std::error_code ec;
-+					std::filesystem::remove(kDir / v.file, ec);
-+					v.file.clear();
-+				}
++				RemoveFile(v.file);
++				v.file.clear();
 +			}
 +			variants.clear();
 +			if (!variantsDone) {
@@ -3487,10 +3516,7 @@ index 0000000..937cdcb
 +			if (a_refId != 0) {
 +				DeleteRef(RE::TESForm::LookupByID<RE::TESObjectREFR>(a_refId));
 +			}
-+			if (!a_file.empty()) {
-+				std::error_code ec;
-+				std::filesystem::remove(kDir / a_file, ec);
-+			}
++			RemoveFile(a_file);
 +		}
 +
 +		// The solid blocks of a section as the boxes of a model whose origin is the section's min corner (Skyrim units, Skyrim's axes).
@@ -3683,70 +3709,57 @@ index 0000000..937cdcb
 +			variantsStarted = true;
 +			variantsDone = false;
 +			using O = collisionnif::Options;
-+			std::vector<std::pair<std::string, O>> defs;
-+			{ O o; o.level = 0; defs.emplace_back("TEST bare node only", o); }
-+			{ O o; o.level = 1; defs.emplace_back("TEST node with BSXFlags", o); }
-+			{ O o; o.level = 2; defs.emplace_back("TEST node, BSXFlags, collision object, body, one box shape", o); }
-+			defs.emplace_back("as written", O{});
-+			{ O o; o.preambleExtra = -4; defs.emplace_back("body: 4 bytes fewer before its translation", o); }
-+			{ O o; o.preambleExtra = 4; defs.emplace_back("body: 4 bytes more before its translation", o); }
-+			{ O o; o.tailExtra = -4; defs.emplace_back("body: 4 bytes fewer after its flags", o); }
-+			{ O o; o.tailExtra = 4; defs.emplace_back("body: 4 bytes more after its flags", o); }
-+			{ O o; o.tailExtra = -12; defs.emplace_back("body: 12 bytes fewer after its flags", o); }
-+			{ O o; o.preambleExtra = -4; o.tailExtra = -4; defs.emplace_back("body: 4 fewer before and 4 fewer after", o); }
-+			{ O o; o.plainNode = true; defs.emplace_back("root is a NiNode", o); }
-+			{ O o; o.collisionFlags = 129; defs.emplace_back("collision object flags 129", o); }
-+			{ O o; o.rigidBodyT = true; defs.emplace_back("body named bhkRigidBodyT", o); }
-+			{ O o; o.rigidBodyT = true; o.collisionFlags = 129; o.bsxFlags = 3; defs.emplace_back("bhkRigidBodyT, flags 129, BSX 3", o); }
-+
-+			// Loose models other mods put in Data\\Meshes, copied under new names: if Skyrim won't load those either, it isn't about our files.
-+			std::vector<std::filesystem::path> loose;
++			struct Def
 +			{
-+				std::error_code ec;
-+				for (std::filesystem::recursive_directory_iterator it("Data/Meshes", std::filesystem::directory_options::skip_permission_denied, ec), end; !ec && it != end && loose.size() < 3; it.increment(ec)) {
-+					if (!it->is_regular_file(ec) || it->path().extension() != ".nif" || it->path().string().find("SkyCraft") != std::string::npos) {
-+						continue;
-+					}
-+					const auto size = it->file_size(ec);
-+					if (!ec && size > 1000 && size < 150000) {
-+						loose.push_back(it->path());
-+					}
-+				}
-+			}
-+			logger::info("Block collision test: Data/Meshes is at {}; {} loose models found to copy", AbsolutePath(kDir.parent_path()), loose.size());
++				std::string label;
++				O           opts;
++				std::string fixedFile;  // a file made at plugin load and left as it was (else a slot, written now), or "new": a file made now under a new name
++				bool        usable{ false };
++			};
++			std::vector<Def> defs;
++			{ O o; o.level = 0; defs.push_back({ "TEST bare node, a file made at plugin load", o, "pre_bare.nif", false }); }
++			{ O o; o.level = 2; defs.push_back({ "TEST body with one box, a file made at plugin load", o, "pre_box.nif", false }); }
++			{ O o; defs.push_back({ "TEST list of boxes, a file made at plugin load", o, "pre_full.nif", false }); }
++			{ O o; o.level = 0; defs.push_back({ "TEST bare node, a file made just now under a new name", o, "new", false }); }
++			{ O o; o.level = 0; defs.push_back({ "TEST bare node, written over a slot just now", o, "", false }); }
++			defs.push_back({ "as written", O{}, "", true });
++			{ O o; o.preambleExtra = -4; defs.push_back({ "body: 4 bytes fewer before its translation", o, "", true }); }
++			{ O o; o.preambleExtra = 4; defs.push_back({ "body: 4 bytes more before its translation", o, "", true }); }
++			{ O o; o.tailExtra = -4; defs.push_back({ "body: 4 bytes fewer after its flags", o, "", true }); }
++			{ O o; o.tailExtra = 4; defs.push_back({ "body: 4 bytes more after its flags", o, "", true }); }
++			{ O o; o.tailExtra = -12; defs.push_back({ "body: 12 bytes fewer after its flags", o, "", true }); }
++			{ O o; o.preambleExtra = -4; o.tailExtra = -4; defs.push_back({ "body: 4 fewer before and 4 fewer after", o, "", true }); }
++			{ O o; o.plainNode = true; defs.push_back({ "root is a NiNode", o, "", true }); }
++			{ O o; o.collisionFlags = 129; defs.push_back({ "collision object flags 129", o, "", true }); }
++			{ O o; o.rigidBodyT = true; defs.push_back({ "body named bhkRigidBodyT", o, "", true }); }
++			{ O o; o.rigidBodyT = true; o.collisionFlags = 129; o.bsxFlags = 3; defs.push_back({ "bhkRigidBodyT, flags 129, BSX 3", o, "", true }); }
 +
 +			const float                          u = float(proto::kUnitsPerBlock);
 +			const std::vector<collisionnif::Box> one{ collisionnif::Box{ { 0.0f, 0.0f, 0.0f }, { u, u, u } } };
-+			int                                  index = 0;
-+			for (const auto& path : loose) {
-+				defs.emplace_back("TEST copy of a loose model: " + path.generic_string(), O{});
-+			}
-+			for (auto& [label, opts] : defs) {
++			logger::info("Block collision test: model files are in {}", AbsolutePath(kDir));
++			for (auto& d : defs) {
 +				Variant v;
-+				v.label = label;
-+				v.opts = opts;
-+				v.usable = opts.level >= 3 && label.rfind("TEST", 0) != 0;
-+				v.file = fmt::format("v{}_{}.nif", index++, ++serial);
-+				if (label.rfind("TEST copy", 0) == 0) {
-+					const auto from = loose[static_cast<std::size_t>(index - 1) - (defs.size() - loose.size())];
-+					std::error_code ec;
-+					std::filesystem::copy_file(from, kDir / v.file, std::filesystem::copy_options::overwrite_existing, ec);
-+					if (ec) {
++				v.label = d.label;
++				v.opts = d.opts;
++				v.usable = d.usable;
++				const auto bytes = collisionnif::Build(one, a_material, 0.01f, d.opts);
++				if (!d.fixedFile.empty() && d.fixedFile != "new") {
++					v.file = d.fixedFile;  // as PrepareFiles left it
++				} else if (d.fixedFile == "new") {
++					v.file = fmt::format("rt{}.nif", ++serial);
++					if (!WriteFile(v.file, bytes)) {
 +						v.file.clear();
-+						v.done = true;
-+						variants.push_back(std::move(v));
-+						continue;
 +					}
 +				} else {
-+					const auto bytes = collisionnif::Build(one, a_material, 0.01f, opts);
-+					std::ofstream out(kDir / v.file, std::ios::binary | std::ios::trunc);
-+					out.write(reinterpret_cast<const char*>(bytes.data()), static_cast<std::streamsize>(bytes.size()));
-+					if (!out.good()) {
++					v.file = TakeSlot();
++					if (!v.file.empty() && !WriteFile(v.file, bytes)) {
 +						v.file.clear();
-+						v.done = true;
-+						variants.push_back(std::move(v));
-+						continue;
 +					}
++				}
++				if (v.file.empty()) {
++					v.done = true;
++					variants.push_back(std::move(v));
++					continue;
 +				}
 +				if (auto* form = MakeStatic(std::string(kModelDir) + v.file, float(16 * proto::kUnitsPerBlock))) {
 +					auto ref = a_handler->CreateReferenceAtLocation(form, a_pos, RE::NiPoint3(), a_player->GetParentCell(), a_player->GetWorldspace(), nullptr, nullptr, RE::ObjectRefHandle(), false, true).get();
@@ -3818,6 +3831,37 @@ index 0000000..937cdcb
 +
 +	namespace BlockCollision
 +	{
++		void PrepareFiles()
++		{
++			if (!Cfg().on) {
++				return;
++			}
++			const auto started = std::chrono::steady_clock::now();
++			std::error_code ec;
++			std::filesystem::remove_all(kDir, ec);  // models left by an earlier session
++			std::filesystem::create_directories(kDir, ec);
++			if (ec || !std::filesystem::is_directory(kDir)) {
++				logger::warn("Block collision: can't make the folder {}", kDir.string());
++				return;
++			}
++			using O = collisionnif::Options;
++			const float                          u = float(proto::kUnitsPerBlock);
++			const std::vector<collisionnif::Box> one{ collisionnif::Box{ { 0.0f, 0.0f, 0.0f }, { u, u, u } } };
++			O                                    bare, box;
++			bare.level = 0;
++			box.level = 2;
++			const auto placeholder = collisionnif::Build(one, Cfg().material, 0.01f, bare);
++			int        written = 0;
++			for (int i = 0; i < kSlots; ++i) {
++				written += WriteFile(fmt::format("slot{:04d}.nif", i), placeholder) ? 1 : 0;
++			}
++			written += WriteFile("pre_bare.nif", placeholder) ? 1 : 0;
++			written += WriteFile("pre_box.nif", collisionnif::Build(one, Cfg().material, 0.01f, box)) ? 1 : 0;
++			written += WriteFile("pre_full.nif", collisionnif::Build(one, Cfg().material, 0.01f, O{})) ? 1 : 0;
++			logger::info("Block collision: made {} model files in {} at plugin load ({} ms)", written, AbsolutePath(kDir),
++				std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now() - started).count());
++		}
++
 +		bool Wanted()
 +		{
 +			return Cfg().on && !failed;
@@ -3852,13 +3896,16 @@ index 0000000..937cdcb
 +			if (!started) {
 +				started = true;
 +				std::error_code ec;
-+				std::filesystem::remove_all(kDir, ec);  // models left by an earlier session
-+				std::filesystem::create_directories(kDir, ec);
++				std::filesystem::create_directories(kDir, ec);  // (the files in it were made by PrepareFiles at plugin load)
++				slotNext = 0;
 +				if (ec || !std::filesystem::is_directory(kDir)) {
 +					GiveUp("can't make the folder Data/Meshes/SkyCraft/BlockCollision");
 +					return;
 +				}
 +				serial = static_cast<std::uint32_t>(std::time(nullptr)) & 0xFFFFFF;
++				if (!std::filesystem::exists(kDir / "slot0000.nif")) {
++					logger::warn("Block collision: the model files weren't made at plugin load; the models will probably not load");
++				}
 +				logger::info("Block collision: on, {} sections out ({} blocks), up to {} section meshes", cfg.radius, cfg.radius * 16, cfg.maxMeshes);
 +			}
 +
@@ -4029,14 +4076,14 @@ index 0000000..937cdcb
 +					std::ofstream dump(kDir.parent_path() / "debug_default.nif", std::ios::binary | std::ios::trunc);
 +					dump.write(reinterpret_cast<const char*>(bytes.data()), static_cast<std::streamsize>(bytes.size()));
 +				}
-+				const auto file = fmt::format("s{:06x}_{}.nif", serial & 0xFFFFFF, ++serial);
-+				{
-+					std::ofstream out(kDir / file, std::ios::binary | std::ios::trunc);
-+					out.write(reinterpret_cast<const char*>(bytes.data()), static_cast<std::streamsize>(bytes.size()));
-+					if (!out.good()) {
-+						GiveUp("can't write a section model into Data/Meshes/SkyCraft/BlockCollision");
-+						return;
-+					}
++				const auto file = TakeSlot();
++				if (file.empty()) {
++					GiveUp("all the model files made at plugin load are used up (restart the game to get more)");
++					return;
++				}
++				if (!WriteFile(file, bytes)) {
++					GiveUp("can't write a section model into Data/Meshes/SkyCraft/BlockCollision");
++					return;
 +				}
 +
 +				static bool checkedVisible = false;
@@ -4048,8 +4095,6 @@ index 0000000..937cdcb
 +
 +				auto* form = MakeStatic(std::string(kModelDir) + file, float(16 * proto::kUnitsPerBlock));
 +				if (!form) {
-+					std::error_code ec;
-+					std::filesystem::remove(kDir / file, ec);
 +					GiveUp("can't make a form for a section model");
 +					return;
 +				}
@@ -4067,8 +4112,6 @@ index 0000000..937cdcb
 +					ref = handler->CreateReferenceAtLocation(form, pos, RE::NiPoint3(), a_player->GetParentCell(), a_player->GetWorldspace(), nullptr, nullptr, RE::ObjectRefHandle(), false, true).get();
 +				}
 +				if (!ref) {
-+					std::error_code ec;
-+					std::filesystem::remove(kDir / file, ec);
 +					GiveUp("can't place a section model");
 +					return;
 +				}
@@ -6217,7 +6260,7 @@ index 3bb4d34..50eb9e4 100644
  				Perf::Scope timer(Perf::kDigMeshes);
  				Dig::UpdateMeshes(digSettled > 3.0f ? a_player : nullptr, a_delta, !dugChanged.empty());
 diff --git a/skse/src/Game.h b/skse/src/Game.h
-index 05788b1..726596a 100644
+index 05788b1..ea35988 100644
 --- a/skse/src/Game.h
 +++ b/skse/src/Game.h
 @@ -17,6 +17,20 @@ namespace skycraft
@@ -6312,7 +6355,7 @@ index 05788b1..726596a 100644
  		// For the blocks' contact shadows (any thread): sets a_bit in a_out[x + w*(y + h*z)] for
  		// each solid block of the box at a_origin (Minecraft block coords) of a_size blocks. The
  		// generation changes whenever any section's blocks do.
-@@ -155,6 +208,22 @@ namespace skycraft
+@@ -155,6 +208,25 @@ namespace skycraft
  		void PushActorsOut(RE::PlayerCharacter* a_player, float a_delta);
  	}
  
@@ -6326,6 +6369,9 @@ index 05788b1..726596a 100644
 +		// BlockCrates.cpp makes round the player are kept as well, so there is always something to stand on.
 +		bool Verified();
 +		bool NeedCrates();
++		// At plugin load, before the game reads its files: Skyrim loads only model files that existed when it started, so the files the
++		// section models will be written into are made now (BlockCollision.cpp).
++		void PrepareFiles();
 +		// Main thread, every frame, while Skyrim's controls are on.
 +		void Update(RE::PlayerCharacter* a_player, float a_delta);
 +		// Puts every section model away (leaving Skyrim's control mode, another cell).
@@ -7662,7 +7708,7 @@ index b877ae5..36666dc 100644
  				logger::info("in-frame block drawing: hooked after Main::RenderWorld");
  			}
 diff --git a/skse/src/main.cpp b/skse/src/main.cpp
-index eb548b4..2628d89 100644
+index eb548b4..2e1cc7d 100644
 --- a/skse/src/main.cpp
 +++ b/skse/src/main.cpp
 @@ -21,6 +21,9 @@ namespace
@@ -7683,11 +7729,12 @@ index eb548b4..2628d89 100644
  			skycraft::CrashLog::Install();
  			break;
  		case SKSE::MessagingInterface::kPostLoadGame:
-@@ -50,6 +54,7 @@ SKSEPluginLoad(const SKSE::LoadInterface* a_skse)
+@@ -50,6 +54,8 @@ SKSEPluginLoad(const SKSE::LoadInterface* a_skse)
  	SetupLog();
  	skycraft::CrashLog::Install();
  	logger::info("SkyCraft {} loading (runtime {})", "0.1.2", a_skse->RuntimeVersion().string());
-+	logger::info("patch revision 27 (smaller test models and copies of loose models tried too; revision 26: block model variants tried side by side, the first Skyrim loads is used; revision 25: exact block shapes: no padding on doors, stairs and other non-cube blocks, up to 16 boxes per block; a probe in the log tells a rejected .nif from a form that can't load models; revision 24: block collision models checked in the Havok world, crates kept until they work; lock-on survives a missing frame; revision 23: section models of merged boxes loaded as invisible statics over the whole area Minecraft sent; revision 22: crates only, the box simulation that held the Skyrim player is gone; Minecraft's mobs, passive ones too, are lock-on targets again, handed to True Directional Movement as virtual targets; revision 21: mob stand-ins removed)");
++	logger::info("patch revision 28 (section models are written into files made at plugin load, because Skyrim only loads model files that existed when it started; revision 27: smaller test models and copies of loose models tried too; revision 26: block model variants tried side by side, the first Skyrim loads is used; revision 25: exact block shapes: no padding on doors, stairs and other non-cube blocks, up to 16 boxes per block; a probe in the log tells a rejected .nif from a form that can't load models; revision 24: block collision models checked in the Havok world, crates kept until they work; lock-on survives a missing frame; revision 23: section models of merged boxes loaded as invisible statics over the whole area Minecraft sent; revision 22: crates only, the box simulation that held the Skyrim player is gone; Minecraft's mobs, passive ones too, are lock-on targets again, handed to True Directional Movement as virtual targets; revision 21: mob stand-ins removed)");
++	skycraft::BlockCollision::PrepareFiles();
  	SKSE::GetMessagingInterface()->RegisterListener(OnMessage);
  	// As early as possible: Minecraft takes about as long to start as Skyrim does to reach its menu.
  	skycraft::Launcher::StartMinecraft();
