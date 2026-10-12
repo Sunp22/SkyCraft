@@ -3314,10 +3314,10 @@ index 92b585a..d5e586c 100644
 +fRange = 40
 diff --git a/skse/src/BlockCollision.cpp b/skse/src/BlockCollision.cpp
 new file mode 100644
-index 0000000..5684d08
+index 0000000..937cdcb
 --- /dev/null
 +++ b/skse/src/BlockCollision.cpp
-@@ -0,0 +1,796 @@
+@@ -0,0 +1,803 @@
 +#include "Game.h"
 +#include "CollisionNif.h"
 +
@@ -3454,6 +3454,13 @@ index 0000000..5684d08
 +				DeleteRef(RE::TESForm::LookupByID<RE::TESObjectREFR>(probe.refId));
 +				probe.refId = 0;
 +			}
++		}
++
++		std::string AbsolutePath(const std::filesystem::path& a_path)
++		{
++			std::error_code ec;
++			const auto      full = std::filesystem::absolute(a_path, ec);
++			return (ec ? a_path : full).string();
 +		}
 +
 +		void EndVariants()
@@ -3706,7 +3713,7 @@ index 0000000..5684d08
 +					}
 +				}
 +			}
-+			logger::info("Block collision test: Data/Meshes is at {}; {} loose models found to copy", std::filesystem::absolute(kDir.parent_path(), std::error_code{}).string(), loose.size());
++			logger::info("Block collision test: Data/Meshes is at {}; {} loose models found to copy", AbsolutePath(kDir.parent_path()), loose.size());
 +
 +			const float                          u = float(proto::kUnitsPerBlock);
 +			const std::vector<collisionnif::Box> one{ collisionnif::Box{ { 0.0f, 0.0f, 0.0f }, { u, u, u } } };
@@ -3796,7 +3803,7 @@ index 0000000..5684d08
 +				}
 +			}
 +			if (first < 0) {
-+				logger::warn("Block collision test: Skyrim loaded none of the {} real-model variants (see the TEST lines above for what it does load); {} is the file as written (NifSkope will say what is wrong with it)", variants.size(), std::filesystem::absolute(kDir.parent_path() / "debug_default.nif", std::error_code{}).string());
++				logger::warn("Block collision test: Skyrim loaded none of the {} real-model variants (see the TEST lines above for what it does load); {} is the file as written (NifSkope will say what is wrong with it)", variants.size(), AbsolutePath(kDir.parent_path() / "debug_default.nif"));
 +			} else if (variants[static_cast<std::size_t>(first)].label == "as written") {
 +				logger::info("Block collision test: the model as written loads; the section models should too");
 +			} else {
