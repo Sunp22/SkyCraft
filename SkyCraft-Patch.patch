@@ -921,10 +921,10 @@ index 0000000..f7aa8b9
 +}
 diff --git a/fabric/src/main/java/dev/skycraft/combat/MobProxies.java b/fabric/src/main/java/dev/skycraft/combat/MobProxies.java
 new file mode 100644
-index 0000000..ee78fb4
+index 0000000..9804d7c
 --- /dev/null
 +++ b/fabric/src/main/java/dev/skycraft/combat/MobProxies.java
-@@ -0,0 +1,216 @@
+@@ -0,0 +1,191 @@
 +package dev.skycraft.combat;
 +
 +import dev.skycraft.link.Proto;
@@ -976,8 +976,6 @@ index 0000000..ee78fb4
 +	/** Mob id -> game time its name was last sent. Skyrim names each stand-in after its mob (it would otherwise show as a skeever). */
 +	private static final Map<Integer, Long> NAME_SENT = new HashMap<>();
 +	private static final long NAME_RESEND_TICKS = 100L;
-+	/** The mobs of the last full scan, so odd ticks can send their positions without scanning. */
-+	private static List<Want> CACHE = new ArrayList<>();
 +
 +	private MobProxies() {
 +	}
@@ -996,10 +994,6 @@ index 0000000..ee78fb4
 +	}
 +
 +	static void tick(ServerLevel level, Collection<SkyrimActorEntity> actors, List<ServerPlayer> players) {
-+		if (level.getGameTime() % 2 != 0) {
-+			positionsOnly(level);
-+			return;
-+		}
 +		final boolean forPlayer = !"off".equals(TARGETS) && !players.isEmpty();
 +		if (!ENABLED || !SkyLink.active() || (actors.isEmpty() && !forPlayer)) {
 +			if (SkyLink.active()) {
@@ -1009,7 +1003,6 @@ index 0000000..ee78fb4
 +			}
 +			LIVE.clear();
 +			NAME_SENT.clear();
-+			CACHE = new ArrayList<>();
 +			return;
 +		}
 +		Map<Mob, Want> found = new LinkedHashMap<>();
@@ -1051,11 +1044,12 @@ index 0000000..ee78fb4
 +				if (!(level.getEntity(id) instanceof Mob mob) || !mob.isAlive() || found.containsKey(mob)) {
 +					continue;
 +				}
++				// A mob that has a stand-in keeps it for as long as it lives and is loaded, however far it has wandered: the stand-in goes
++				// when the mob does, not when it passes some distance. (Distance only decides who is dropped if there are more than MAX.)
++				Want want = found.computeIfAbsent(mob, Want::new);
 +				for (ServerPlayer player : players) {
-+					double d2 = mob.distanceToSqr(player);
-+					if (player.level() == level && d2 < (PLAYER_RANGE * 1.3) * (PLAYER_RANGE * 1.3)) {
-+						Want want = found.computeIfAbsent(mob, Want::new);
-+						want.near = Math.min(want.near, d2);
++					if (player.level() == level) {
++						want.near = Math.min(want.near, mob.distanceToSqr(player));
 +					}
 +				}
 +			}
@@ -1085,7 +1079,8 @@ index 0000000..ee78fb4
 +				NAME_SENT.put(mob.getId(), now);
 +			}
 +			// The mob's height goes in the weapon field (the stand-in is sized to it, so the head is where the mob's is).
-+			pushPosition(mob, want.npcFight);
++			SkyLink.pushEvent(Proto.EV_MOB_PROXY, mob.getId(), (float) mob.getX(), (float) mob.getY(), (float) mob.getZ(), mob.getYRot(),
++				want.npcFight ? 0 : Proto.MOB_PROXY_TARGET_ONLY, Float.floatToRawIntBits(mob.getBbHeight()));
 +			// Its health (1:1: Skyrim's lock-on bar shows exactly this), where its eyes are, and which way it is moving.
 +			if (!roomy) {
 +				continue;
@@ -1094,7 +1089,6 @@ index 0000000..ee78fb4
 +			SkyLink.pushEvent(Proto.EV_MOB_VITALS, mob.getId(), mob.getHealth(), mob.getMaxHealth(), mob.getEyeHeight(), 0.0F,
 +				Float.floatToRawIntBits((float) (motion.x * 20.0)), Float.floatToRawIntBits((float) (motion.z * 20.0)));
 +		}
-+		CACHE = new ArrayList<>(wanted.values());
 +		for (Integer id : new ArrayList<>(LIVE)) {
 +			if (!wanted.containsKey(id)) {
 +				SkyLink.pushEvent(Proto.EV_MOB_PROXY, id, 0.0F, 0.0F, 0.0F, 0.0F, Proto.MOB_PROXY_GONE); // dead or out of range: Skyrim drops the stand-in
@@ -1103,25 +1097,6 @@ index 0000000..ee78fb4
 +		LIVE.clear();
 +		LIVE.addAll(wanted.keySet());
 +		NAME_SENT.keySet().retainAll(wanted.keySet());
-+	}
-+
-+	private static void pushPosition(Mob mob, boolean npcFight) {
-+		// The mob's height goes in the weapon field (the stand-in is sized to it).
-+		SkyLink.pushEvent(Proto.EV_MOB_PROXY, mob.getId(), (float) mob.getX(), (float) mob.getY(), (float) mob.getZ(), mob.getYRot(),
-+			npcFight ? 0 : Proto.MOB_PROXY_TARGET_ONLY, Float.floatToRawIntBits(mob.getBbHeight()));
-+	}
-+
-+	/** The off ticks: where the mobs of the last scan are now, nothing else (and not at all when Skyrim is behind). */
-+	private static void positionsOnly(ServerLevel level) {
-+		if (!ENABLED || !SkyLink.active() || CACHE.isEmpty() || SkyLink.eventRingFree() <= 160) {
-+			return;
-+		}
-+		for (Want want : CACHE) {
-+			Mob mob = want.mob;
-+			if (mob.isAlive() && !mob.isRemoved() && mob.level() == level && LIVE.contains(mob.getId())) {
-+				pushPosition(mob, want.npcFight);
-+			}
-+		}
 +	}
 +
 +	/** Tells Skyrim the mob's name (its custom name if it has one), up to 24 plain ASCII characters. */
@@ -1378,21 +1353,23 @@ index 0000000..77638f0
 +	}
 +}
 diff --git a/fabric/src/main/java/dev/skycraft/combat/SkyCombat.java b/fabric/src/main/java/dev/skycraft/combat/SkyCombat.java
-index fccb371..647b840 100644
+index fccb371..dbe3063 100644
 --- a/fabric/src/main/java/dev/skycraft/combat/SkyCombat.java
 +++ b/fabric/src/main/java/dev/skycraft/combat/SkyCombat.java
-@@ -93,6 +93,10 @@ public final class SkyCombat {
+@@ -93,6 +93,12 @@ public final class SkyCombat {
  				SkyCraft.LOG.info("SkyCraft: hit {} for {} (knockback {})", proxy.getName().getString(), hit[0], hit[3]);
  			}
  		}
 +		if (level.getGameTime() % 4 == 0) {
 +			NpcFightsBack.tick(level, PROXIES.values());
 +		}
-+		MobProxies.tick(level, PROXIES.values(), players); // every tick: positions go out at 20 Hz, the scan for who needs a stand-in every other tick
++		if (level.getGameTime() % 2 == 0) {
++			MobProxies.tick(level, PROXIES.values(), players);
++		}
  	}
  
  	private static void sync(ServerLevel level) {
-@@ -117,6 +121,7 @@ public final class SkyCombat {
+@@ -117,6 +123,7 @@ public final class SkyCombat {
  				proxy = new SkyrimActorEntity(SKYRIM_ACTOR, level);
  				proxy.setFormId(a.formId());
  				proxy.setSize(a.width(), a.height());
@@ -1400,7 +1377,7 @@ index fccb371..647b840 100644
  				proxy.snapTo(a.x(), a.y(), a.z(), a.yaw(), 0.0F);
  				if (!a.name().isEmpty()) {
  					proxy.setCustomName(Component.literal(a.name()));
-@@ -128,6 +133,7 @@ public final class SkyCombat {
+@@ -128,6 +135,7 @@ public final class SkyCombat {
  				continue;
  			}
  			proxy.setSize(a.width(), a.height());
@@ -4015,7 +3992,7 @@ index 92b585a..193b6bc 100644
 +fRange = 40
 diff --git a/skse/src/BlockCollision.cpp b/skse/src/BlockCollision.cpp
 new file mode 100644
-index 0000000..d188f10
+index 0000000..7528447
 --- /dev/null
 +++ b/skse/src/BlockCollision.cpp
 @@ -0,0 +1,1308 @@
@@ -6132,36 +6109,25 @@ index 0000000..e2e734d
 +	}
 +}
 diff --git a/skse/src/Combat.cpp b/skse/src/Combat.cpp
-index 0954b7f..94d6688 100644
+index 0954b7f..636efcd 100644
 --- a/skse/src/Combat.cpp
 +++ b/skse/src/Combat.cpp
-@@ -1,5 +1,7 @@
+@@ -1,5 +1,8 @@
  #include "Game.h"
  
++#include <algorithm>
 +#include <cctype>
 +
  namespace skycraft
  {
  	namespace
-@@ -9,6 +11,32 @@ namespace skycraft
+@@ -9,6 +12,23 @@ namespace skycraft
  		constexpr float kHitMemorySeconds = 0.35f;   // how long a hit event can explain a health drop
  		constexpr float kDotFlushSeconds = 0.5f;     // magic/other damage is batched (Minecraft i-frames)
  
 +		// Skyrim actors this plugin made as stand-ins for Minecraft's mobs (see below): everything else that
 +		// looks at Skyrim's actors (the actor table, hazards) must leave them out.
 +		std::unordered_set<RE::FormID> proxyIds;
-+		// proxyIds changed since True Directional Movement was last told (it must never lock on to a stand-in: they are told at once, the frame
-+		// one is made, so there is no moment a stand-in can be picked).
-+		bool proxyIdsDirty = false;
-+		// The NPCs put into combat with a mob's stand-in (npc id -> the stand-in and the seconds since): a fight is started once and left to run
-+		// until its mob is gone, not started again every half second (a stand-in that Skyrim doesn't count as a combat target, a chicken that
-+		// won't fight, would make IsInCombat() false every time and the NPC would "start" the fight over and over).
-+		struct NpcFight
-+		{
-+			RE::FormID standIn = 0;
-+			float      age = 0.0f;
-+		};
-+		std::unordered_map<RE::FormID, NpcFight> npcFights;
 +		// Stand-ins held at zero alpha at the moment (see HideProxy): until their body has been found and hidden, so that nothing of a
 +		// stand-in's appearance (the fade-in Skyrim gives an actor whose 3D has just loaded) is ever drawn.
 +		std::unordered_set<RE::FormID> proxyFaded;
@@ -6172,11 +6138,69 @@ index 0954b7f..94d6688 100644
 +		// shot is sent to it as such), so what the hit takes off the stand-in is given back without being passed on. A spell is not
 +		// sent that way, so the damage it does to a stand-in is what hurts the real mob.
 +		std::unordered_map<RE::FormID, float> proxyWeaponHits;
++		// Damage Skyrim dealt to a stand-in beyond what it could take (see StandInDamageGuard): Skyrim's hit would have killed the stand-in, so
++		// the stand-in only takes what leaves it standing, and the rest is kept here, to be passed on to Minecraft's mob with the rest of the blow.
++		std::unordered_map<RE::FormID, float> proxyOverkill;
 +
  		// ---- what hit the player (main thread) -------------------------------------------------
  		struct RecentHit
  		{
-@@ -49,6 +77,27 @@ namespace skycraft
+@@ -37,6 +57,54 @@ namespace skycraft
+ 		bool  engaged = false;
+ 		float engagedTimer = 0.0f;
+ 
++		// Diagnostics: the engine's own events (3D loaded or unloaded, cell attach or detach, combat, death) for a mob's stand-in, written to
++		// the log in order with everything else, so what happens just before a stand-in is found switched off shows. Logs only; changes nothing.
++		template <class E>
++		class StandInEventLog final : public RE::BSTEventSink<E>
++		{
++		public:
++			static StandInEventLog* Get(const char* a_name)
++			{
++				static StandInEventLog sink;
++				sink.name = a_name;
++				return &sink;
++			}
++
++			RE::BSEventNotifyControl ProcessEvent(const E* a_event, RE::BSTEventSource<E>*) override
++			{
++				if (!a_event) {
++					return RE::BSEventNotifyControl::kContinue;
++				}
++				RE::FormID id = 0;
++				if constexpr (requires { a_event->formID; }) {
++					id = static_cast<RE::FormID>(a_event->formID);
++				} else if constexpr (requires { a_event->reference.get(); }) {
++					id = a_event->reference.get() ? a_event->reference.get()->GetFormID() : 0;
++				} else if constexpr (requires { a_event->actor.get(); }) {
++					id = a_event->actor.get() ? a_event->actor.get()->GetFormID() : 0;
++				} else if constexpr (requires { a_event->actorDying.get(); }) {
++					id = a_event->actorDying.get() ? a_event->actorDying.get()->GetFormID() : 0;
++				}
++				int detail = -1;
++				if constexpr (requires { static_cast<int>(a_event->loaded); }) {
++					detail = static_cast<int>(a_event->loaded);
++				} else if constexpr (requires { static_cast<int>(a_event->action); }) {
++					detail = static_cast<int>(a_event->action);
++				} else if constexpr (requires { static_cast<int>(a_event->newState); }) {
++					detail = static_cast<int>(a_event->newState);
++				} else if constexpr (requires { static_cast<int>(a_event->dead); }) {
++					detail = static_cast<int>(a_event->dead);
++				}
++				static int logged = 0;
++				if (id != 0 && proxyIds.contains(id) && logged++ < 300) {
++					logger::info("Engine event on stand-in ({:08X}): {} ({})", id, name, detail);
++				}
++				return RE::BSEventNotifyControl::kContinue;
++			}
++
++			const char* name{ "" };
++		};
++
+ 		class HitSink final : public RE::BSTEventSink<RE::TESHitEvent>
+ 		{
+ 		public:
+@@ -49,6 +117,27 @@ namespace skycraft
  			RE::BSEventNotifyControl ProcessEvent(const RE::TESHitEvent* a_event, RE::BSTEventSource<RE::TESHitEvent>*) override
  			{
  				auto* player = RE::PlayerCharacter::GetSingleton();
@@ -6204,7 +6228,7 @@ index 0954b7f..94d6688 100644
  				if (!a_event || !player || a_event->target.get() != player || !State().puppeting) {
  					return RE::BSEventNotifyControl::kContinue;
  				}
-@@ -168,6 +217,53 @@ namespace skycraft
+@@ -168,6 +257,53 @@ namespace skycraft
  			}
  		}
  
@@ -6258,7 +6282,7 @@ index 0954b7f..94d6688 100644
  		void WriteActorTable(RE::PlayerCharacter* a_player)
  		{
  			static std::vector<proto::ActorRecord> records;
-@@ -181,7 +277,7 @@ namespace skycraft
+@@ -181,7 +317,7 @@ namespace skycraft
  			for (auto& handle : lists->highActorHandles) {
  				auto actorPtr = handle.get();
  				auto* actor = actorPtr.get();
@@ -6267,7 +6291,7 @@ index 0954b7f..94d6688 100644
  					continue;
  				}
  				const auto pos = actor->GetPosition();
-@@ -191,7 +287,26 @@ namespace skycraft
+@@ -191,7 +327,26 @@ namespace skycraft
  				proto::ActorRecord r{};
  				r.formId = actor->GetFormID();
  				r.flags = (actor->IsHostileToActor(a_player) ? proto::kActorHostile : 0u) | (actor->IsDead() ? proto::kActorDead : 0u) |
@@ -6295,11 +6319,40 @@ index 0954b7f..94d6688 100644
  				const auto mc = SkyToMc(pos);
  				r.x = static_cast<float>(mc.x);
  				r.y = static_cast<float>(mc.y);
-@@ -267,134 +382,1539 @@ namespace skycraft
- 				id = 0x00013982;  // Iron Mace (fists, tools, blunt things)
- 				break;
+@@ -240,161 +395,1894 @@ namespace skycraft
+ 				logger::warn("hit pipeline: melee call site doesn't match this game build; using plain damage");
+ 				return;
  			}
--			return RE::TESForm::LookupByID<RE::TESObjectWEAP>(id);
+-			processHit = reinterpret_cast<ProcessHitFn*>(target);
+-			hitDataCtor = reinterpret_cast<HitDataCtorFn*>(REL::ID(43995).address());
+-			logger::info("hit pipeline: Minecraft hits go through Skyrim's hit processing");
++			processHit = reinterpret_cast<ProcessHitFn*>(target);
++			hitDataCtor = reinterpret_cast<HitDataCtorFn*>(REL::ID(43995).address());
++			logger::info("hit pipeline: Minecraft hits go through Skyrim's hit processing");
++		}
++
++		// A vanilla weapon standing in for the Minecraft one: its impact set gives the blood
++		// spray and impact sound, its type the skill and sounds.
++		RE::TESObjectWEAP* StandInWeapon(std::uint32_t a_weapon)
++		{
++			RE::FormID id = 0;
++			switch (a_weapon) {
++			case proto::kWeaponBlade:
++				id = 0x00012EB7;  // Iron Sword
++				break;
++			case proto::kWeaponAxe:
++				id = 0x00013790;  // Iron War Axe
++				break;
++			case proto::kWeaponPierce:
++				id = 0x0001397E;  // Iron Dagger
++				break;
++			case proto::kWeaponArrow:
++				id = 0x00013985;  // Hunting Bow
++				break;
++			default:
++				id = 0x00013982;  // Iron Mace (fists, tools, blunt things)
++				break;
++			}
 +			return RE::TESForm::LookupByID<RE::TESObjectWEAP>(id);
 +		}
 +
@@ -6358,9 +6411,18 @@ index 0954b7f..94d6688 100644
 +		// combat with the player and no skill experience; the actor just takes the damage, staggers if it
 +		// was a big one, and bleeds where it was hit.
 +		// Takes health off an actor with no attacker, by whichever call this CommonLib has (they differ between versions).
++		// Set while SkyCraft itself changes a stand-in's health (the sync to the mob's, giving back what Skyrim took): StandInDamageGuard
++		// cut every call on a stand-in to nothing, ours included, so the stand-in's health never followed the mob's.
++		inline int ownHealthChange = 0;
++
 +		template <class T>
 +		void DamageHealth(T* a_actor, float a_damage)
 +		{
++			struct Own
++			{
++				Own() { ++ownHealthChange; }
++				~Own() { --ownHealthChange; }
++			} own;
 +			auto* values = a_actor->AsActorValueOwner();
 +			if constexpr (requires { values->RestoreActorValue(RE::ACTOR_VALUE_MODIFIER::kDamage, RE::ActorValue::kHealth, -a_damage); }) {
 +				values->RestoreActorValue(RE::ACTOR_VALUE_MODIFIER::kDamage, RE::ActorValue::kHealth, -a_damage);
@@ -6374,6 +6436,33 @@ index 0954b7f..94d6688 100644
 +				a_actor->DoDamage(a_damage, nullptr, true);
 +			}
 +		}
++
++		// A mob's stand-in has the mob's own health (1:1, so a lock-on bar shows the mob's), which is a few dozen points: a witch's 26, a
++		// zombie's 20. Skyrim's hits are bigger than that: one swing of a Skyrim sword takes 30 or more, and in Skyrim's control mode
++		// those swings land on the stand-ins for real. A stand-in that Skyrim's damage took to zero (it is essential: it doesn't die, it goes
++		// into bleedout) is one lock-on mods refuse (True Directional Movement drops a bleeding-out essential target), and with its AI off
++		// nothing ever gets it up again: that is the stand-in that "vanishes after a while".
++		// So Skyrim's damage to a stand-in is cut to what leaves it standing, whatever the hit (weapon, arrow, spell, an NPC's blow). What
++		// was cut is kept (proxyOverkill) and still counts as damage to the mob when it is passed on to Minecraft. (The sign Skyrim gives the
++		// damage here is not relied on: its size is cut and its sign kept.)
++		struct StandInDamageGuard
++		{
++			static void thunk(RE::Actor* a_this, RE::Actor* a_attacker, float a_damage)
++			{
++				if (a_this && ownHealthChange == 0 && proxyIds.contains(a_this->GetFormID()) && !a_this->IsDead()) {
++					// A stand-in's health is its mob's, 1:1, and changes only when the mob's does. Skyrim's blow takes nothing off the stand-in
++					// (it used to take what left it standing, and the bar then jumped back a frame later); all of it counts as damage to the
++					// mob (proxyOverkill, see AbsorbProxyDamage), and the stand-in loses exactly what the mob then loses.
++					const float size = std::fabs(a_damage);
++					if (size > 0.0f) {
++						proxyOverkill[a_this->GetFormID()] += size;
++						a_damage = 0.0f;
++					}
++				}
++				func(a_this, a_attacker, a_damage);
++			}
++			static inline REL::Relocation<decltype(thunk)> func;
++		};
 +
 +		// Minecraft's blows are small and quick, so most of them don't stagger anyone; a real one (5% of the
 +		// NPC's health or more) makes them flinch, at most every couple of seconds so a fight isn't a stun-lock.
@@ -6924,13 +7013,6 @@ index 0954b7f..94d6688 100644
 +		};
 +		std::vector<DeadProxy> deadProxies;
 +
-+		void PushIgnoredStandIns()
-+		{
-+			std::vector<std::uint32_t> ids(proxyIds.begin(), proxyIds.end());
-+			LockOn::SetIgnoredActors(ids);
-+			proxyIdsDirty = false;
-+		}
-+
 +		RE::Actor* StandInForMob(std::int32_t a_mobId)
 +		{
 +			const auto it = mobProxies.find(a_mobId);
@@ -7188,15 +7270,9 @@ index 0954b7f..94d6688 100644
 +					logger::warn("This CommonLib has no way to switch a stand-in's AI off; they keep their own (and may growl)");
 +				}
 +			}
-+			// It is only ever in a fight with Skyrim's NPCs. If it has turned on the player (it growls, and shows its
-+			// health bar), it is taken out of that fight; the NPCs keep fighting it and Minecraft's mob keeps fighting the player.
-+			if (a_actor->IsInCombat()) {
-+				if (auto* player = RE::PlayerCharacter::GetSingleton(); player && a_actor->GetActorRuntimeData().currentCombatTarget.get().get() == player) {
-+					if constexpr (requires { a_actor->StopCombat(); }) {
-+						a_actor->StopCombat();
-+					}
-+				}
-+			}
++			// (It used to be taken out of any fight it had with the player here, on every report from Minecraft. The engine log showed a
++			// stand-in the player hit going into combat and being switched off 6 ms later, which is when this ran; with its AI off it can't
++			// attack anyway, so it is left alone. Pooled stand-ins are still taken out of combat when they are put away.)
 +			HideProxy(a_actor);
 +		}
 +
@@ -7260,36 +7336,68 @@ index 0954b7f..94d6688 100644
 +		};
 +		std::unordered_map<RE::FormID, HeadFit> proxyHeadFit;
 +
-+		// Sizes the stand-in to its mob: its height is the mob's, so the body it collides and is hit with is the mob's size. (Its head used
-+		// to be measured and put on the mob's eyes, which moved the whole actor off the mob's feet and made it collide where the mob wasn't;
-+		// lock-on is True Directional Movement's virtual target now, so nothing needs the stand-in's head.)
++		// Sizes the stand-in to its mob and measures where its head is (once). Where the head ends up is FollowProxy's business.
 +		template <class A>
 +		void FitProxyHeight(A* a_actor, MobProxy& a_proxy)
 +		{
 +			if (!kFitProxyHeight || !(a_proxy.height > 0.2f) || !(a_proxy.height < 16.0f)) {
 +				return;
 +			}
-+			if (!a_actor->Get3D()) {
++			auto* root = a_actor->Get3D();
++			if (!root) {
 +				return;  // no skeleton yet (it loads a moment after the actor exists): fitted on a later update
 +			}
 +			const float units = static_cast<float>(proto::kUnitsPerBlock);
-+			auto        base = proxyBaseHeight.find(a_actor->GetFormID());
-+			if (base == proxyBaseHeight.end()) {
-+				const float height = a_actor->GetHeight();  // (read before it has ever been scaled)
-+				if (!(height > 1.0f)) {
++			auto        fit = proxyHeadFit.find(a_actor->GetFormID());
++			if (fit == proxyHeadFit.end()) {
++				auto* head = FindHeadNode(root);
++				if (!head) {
++					// No head to be found on this skeleton: size it by its bounds.
++					auto base = proxyBaseHeight.find(a_actor->GetFormID());
++					if (base == proxyBaseHeight.end()) {
++						const float height = a_actor->GetHeight();
++						if (!(height > 1.0f)) {
++							return;
++						}
++						base = proxyBaseHeight.emplace(a_actor->GetFormID(), height).first;
++					}
++					if (std::fabs(a_proxy.fitted - a_proxy.height) < 0.05f) {
++						return;
++					}
++					a_proxy.scale = std::clamp(a_proxy.height * units / base->second, 0.25f, 10.0f);
++					SetProxyScale(a_actor, a_proxy.scale);
++					a_proxy.fitted = a_proxy.height;
 +					return;
 +				}
-+				base = proxyBaseHeight.emplace(a_actor->GetFormID(), height).first;
++				// Where the head is measured on the skeleton as it stands, in the skeleton's own frame, so it doesn't matter which way
++				// the stand-in happens to face (it is turned to the mob's heading every frame).
++				const float        scaleNow = root->world.scale > 0.05f ? root->world.scale : 1.0f;
++				const RE::NiPoint3 d = head->world.translate - root->world.translate;
++				HeadFit            f{ 0.0f, 0.0f, d.z / scaleNow };
++				if constexpr (requires { root->world.rotate.entry[0][0]; }) {
++					const auto& r = root->world.rotate.entry;
++					f.x = (r[0][0] * d.x + r[1][0] * d.y + r[2][0] * d.z) / scaleNow;
++					f.y = (r[0][1] * d.x + r[1][1] * d.y + r[2][1] * d.z) / scaleNow;
++					f.z = (r[0][2] * d.x + r[1][2] * d.y + r[2][2] * d.z) / scaleNow;
++				}
++				if (!(f.z * scaleNow > 1.0f)) {
++					return;  // not posed yet
++				}
++				fit = proxyHeadFit.emplace(a_actor->GetFormID(), f).first;
++				logger::info("Mob stand-in ({:08X}): head node '{}' is ({:.1f}, {:.1f}, {:.1f}) units from its origin at scale 1", a_actor->GetFormID(), head->name.c_str(),
++					f.x, f.y, f.z);
 +			}
-+			if (std::fabs(a_proxy.fitted - a_proxy.height) < 0.05f) {
++			// A mob's eyes: Minecraft says where (a spider's are low, a giraffe-tall enderman's high); else about this far up its body.
++			const float eyeBlocks = a_proxy.eye > 0.1f ? a_proxy.eye : a_proxy.height * 0.92f;
++			if (std::fabs(a_proxy.fitted - eyeBlocks) < 0.05f) {
 +				return;
 +			}
-+			a_proxy.scale = std::clamp(a_proxy.height * units / base->second, 0.25f, 10.0f);
++			a_proxy.scale = std::clamp(eyeBlocks * units / std::max(fit->second.z, 1.0f), 0.25f, 8.0f);
 +			SetProxyScale(a_actor, a_proxy.scale);
-+			a_proxy.fitted = a_proxy.height;
++			a_proxy.fitted = eyeBlocks;
 +			static int logged = 0;
 +			if (logged++ < 10) {
-+				logger::info("Sized a mob stand-in ({:08X}) to its mob's height, {:.2f} blocks (scale {:.2f})", a_actor->GetFormID(), a_proxy.height, a_proxy.scale);
++				logger::info("Sized a mob stand-in ({:08X}) so its head is {:.2f} blocks up (scale {:.2f})", a_actor->GetFormID(), eyeBlocks, a_proxy.scale);
 +			}
 +		}
 +
@@ -7330,6 +7438,62 @@ index 0954b7f..94d6688 100644
 +			return spot;
 +		}
 +
++		// True Directional Movement doesn't lock on to an actor's head, it locks on to a node of the actor's skeleton: by default the
++		// *torso* (its "Reticle Anchor" setting is Body), or the head if that is set, each named by the actor's race (body part data). The
++		// stand-in is a rabbit or a wolf, set down so that its *head* is where the mob's eyes are; its torso is then behind and below
++		// that (a four-legged body hangs off its head), a block or more from where the mob's body is, and that is where the lock-on
++		// reticle, the camera and the spells aimed with it went. (The name over its head is placed another way, which is why it was right.)
++		// So the nodes lock-on goes by are put where they belong on the mob: the torso at the middle of its body, the head at its eyes.
++		// Only their world position is set, after the stand-in's 3D has been moved for the frame, so nothing that rebuilds the skeleton
++		// is left holding a wrong local position; what draws it (nothing: it is hidden) is not affected.
++		constexpr bool kPinTargetNodes = true;  // if lock-on goes somewhere odd with this on, set it to false
++
++		template <class A>
++		RE::NiAVObject* LockOnNodeOf(A* a_actor, RE::NiAVObject* a_root, bool a_torso)
++		{
++			if constexpr (requires { a_actor->GetRace()->bodyPartData->parts[RE::BGSBodyPartDefs::LIMB_ENUM::kTorso]->targetName.c_str(); }) {
++				auto* race = a_actor->GetRace();
++				auto* data = race ? race->bodyPartData : nullptr;
++				auto* part = data ? data->parts[a_torso ? RE::BGSBodyPartDefs::LIMB_ENUM::kTorso : RE::BGSBodyPartDefs::LIMB_ENUM::kHead] : nullptr;
++				if (part && part->targetName.c_str() && part->targetName.c_str()[0] != '\0') {
++					return a_root->GetObjectByName(part->targetName.c_str());
++				}
++			}
++			return nullptr;
++		}
++
++		template <class A>
++		void PinTargetNodes(A* a_actor, const MobProxy& a_proxy)
++		{
++			// (Not before the stand-in's head has been measured, which has to be done on a skeleton nobody has moved.)
++			if (!kPinTargetNodes || !(a_proxy.height > 0.2f) || !proxyHeadFit.contains(a_actor->GetFormID())) {
++				return;
++			}
++			auto* root = a_actor->Get3D();
++			if (!root) {
++				return;
++			}
++			const float units = static_cast<float>(proto::kUnitsPerBlock);
++			const float eyeBlocks = a_proxy.eye > 0.1f ? a_proxy.eye : a_proxy.height * 0.92f;
++			RE::NiPoint3 body = a_proxy.shown;
++			body.z += a_proxy.height * 0.5f * units;
++			RE::NiPoint3 head = a_proxy.shown;
++			head.z += eyeBlocks * units;
++			auto* torsoNode = LockOnNodeOf(a_actor, root, true);
++			auto* headNode = LockOnNodeOf(a_actor, root, false);
++			if (torsoNode) {
++				torsoNode->world.translate = body;
++			}
++			if (headNode && headNode != torsoNode) {
++				headNode->world.translate = head;
++			}
++			static std::unordered_set<RE::FormID> logged;
++			if (logged.size() < 12 && logged.insert(a_actor->GetFormID()).second) {
++				logger::info("Mob stand-in ({:08X}): lock-on torso node '{}', head node '{}' (put on the mob's body and eyes)", a_actor->GetFormID(),
++					torsoNode ? torsoNode->name.c_str() : "(none found)", headNode ? headNode->name.c_str() : "(none found)");
++			}
++		}
++
 +		// Puts the stand-in where its mob is, every frame (Minecraft reports ten times a second; Skyrim draws many more, so between
 +		// reports the mob is carried on by its velocity and the stand-in glides to it). It faces the way the mob faces, and is placed
 +		// so that its *head* is at the mob's eyes, whatever the stand-in's own shape: a lock-on or target-bar mod aims at the head.
@@ -7347,15 +7511,24 @@ index 0954b7f..94d6688 100644
 +				a_proxy.shownHeading = a_proxy.heading;
 +				a_proxy.placed = true;
 +			} else {
-+				const float follow = 1.0f - std::exp(-60.0f * a_delta);
++				const float follow = 1.0f - std::exp(-40.0f * a_delta);
 +				a_proxy.shown.x += (mob.x - a_proxy.shown.x) * follow;
 +				a_proxy.shown.y += (mob.y - a_proxy.shown.y) * follow;
 +				a_proxy.shown.z += (mob.z - a_proxy.shown.z) * follow;
 +				const float turn = 1.0f - std::exp(-18.0f * a_delta);
 +				a_proxy.shownHeading = WrapHeading(a_proxy.shownHeading + WrapHeading(a_proxy.heading - a_proxy.shownHeading) * turn);
 +			}
-+			// The actor's origin is exactly where the mob's feet are, nothing added: where it collides is where the mob is.
-+			const RE::NiPoint3 place = a_proxy.shown;
++			RE::NiPoint3 place = a_proxy.shown;
++			const float  eyeBlocks = a_proxy.eye > 0.1f ? a_proxy.eye : (a_proxy.height > 0.2f ? a_proxy.height * 0.92f : 0.0f);
++			if (const auto fit = proxyHeadFit.find(a_actor->GetFormID()); fit != proxyHeadFit.end() && eyeBlocks > 0.0f) {
++				const float s = a_proxy.scale > 0.05f ? a_proxy.scale : 1.0f;
++				const float c = std::cos(a_proxy.shownHeading);
++				const float n = std::sin(a_proxy.shownHeading);
++				// The head's offset from the stand-in's origin, turned to the way it faces now; the origin goes where that puts the head on the eyes.
++				place.x -= (fit->second.x * c + fit->second.y * n) * s;
++				place.y -= (-fit->second.x * n + fit->second.y * c) * s;
++				place.z += eyeBlocks * units - fit->second.z * s;
++			}
 +			TurnTo(a_actor, a_proxy.shownHeading);
 +			a_actor->SetPosition(place, true);
 +			// With its AI off nothing else moves the stand-in's 3D after its data: its body, head node and hit shapes would stay where it was made.
@@ -7370,6 +7543,7 @@ index 0954b7f..94d6688 100644
 +				HideProxy(a_actor);
 +				StripSpawnEffects(a_actor);
 +			}
++			PinTargetNodes(a_actor, a_proxy);  // (last: after everything that moves or rebuilds the stand-in's 3D this frame)
 +			if (DiagnosticsEnabled()) {
 +				static float since = 0.0f;
 +				since += a_delta;
@@ -7377,9 +7551,11 @@ index 0954b7f..94d6688 100644
 +					since = 0.0f;
 +					const auto  now = a_actor->GetPosition();
 +					auto*       root = a_actor->Get3D();
-+					logger::info("stand-in {:08X}: mob at ({:.0f}, {:.0f}, {:.0f}), actor at ({:.0f}, {:.0f}, {:.0f}), off the mob by {:.1f} units, 3D at ({:.0f}, {:.0f}, {:.0f})",
-+						a_actor->GetFormID(), a_proxy.shown.x, a_proxy.shown.y, a_proxy.shown.z, now.x, now.y, now.z, now.GetDistance(a_proxy.shown),
-+						root ? root->world.translate.x : 0.0f, root ? root->world.translate.y : 0.0f, root ? root->world.translate.z : 0.0f);
++					auto*       head = root ? FindHeadNode(root) : nullptr;
++					const auto  eye = a_proxy.shown + RE::NiPoint3{ 0.0f, 0.0f, (a_proxy.eye > 0.1f ? a_proxy.eye : a_proxy.height * 0.92f) * units };
++					logger::info("stand-in {:08X}: mob at ({:.0f}, {:.0f}, {:.0f}), actor at ({:.0f}, {:.0f}, {:.0f}), 3D at ({:.0f}, {:.0f}, {:.0f}), head off the mob's eyes by {:.0f} units",
++						a_actor->GetFormID(), a_proxy.shown.x, a_proxy.shown.y, a_proxy.shown.z, now.x, now.y, now.z, root ? root->world.translate.x : 0.0f,
++						root ? root->world.translate.y : 0.0f, root ? root->world.translate.z : 0.0f, head ? head->world.translate.GetDistance(eye) : -1.0f);
 +				}
 +			}
 +		}
@@ -7438,8 +7614,14 @@ index 0954b7f..94d6688 100644
 +		void AbsorbProxyDamage(A* a_actor, MobProxy& a_proxy)
 +		{
 +			const float health = a_actor->AsActorValueOwner()->GetActorValue(RE::ActorValue::kHealth);
-+			if (health < a_proxy.lastHealth - 0.01f) {
-+				const float damage = a_proxy.lastHealth - health;
++			float       damage = health < a_proxy.lastHealth - 0.01f ? a_proxy.lastHealth - health : 0.0f;
++			const float taken = damage;
++			// What Skyrim's blow would have taken beyond what the stand-in could (see StandInDamageGuard) is the mob's to lose as well.
++			if (const auto over = proxyOverkill.find(a_proxy.formId); over != proxyOverkill.end()) {
++				damage += over->second;
++				proxyOverkill.erase(over);
++			}
++			if (damage > 0.01f) {
 +				// A blow from the player's weapon or an arrow is already in Minecraft (the swing or the shot is sent to it as such), so
 +				// it is only given back here; a spell (or fire, or an NPC's blow) is passed on as damage to the mob.
 +				if (!proxyWeaponHits.contains(a_proxy.formId)) {
@@ -7450,7 +7632,9 @@ index 0954b7f..94d6688 100644
 +						a_proxy.byPlayer = true;
 +					}
 +				}
-+				DamageHealth(a_actor, -damage);  // given back
++				if (taken > 0.0f) {
++					DamageHealth(a_actor, -taken);  // given back
++				}
 +			}
 +			a_proxy.lastHealth = a_actor->AsActorValueOwner()->GetActorValue(RE::ActorValue::kHealth);
 +		}
@@ -7465,71 +7649,135 @@ index 0954b7f..94d6688 100644
 +			}
 +			auto*       values = a_actor->AsActorValueOwner();
 +			const float target = std::clamp(a_proxy.mcHealth, 0.1f, a_proxy.mcMax);
-+			if (std::fabs(a_actor->GetActorValueMax(RE::ActorValue::kHealth) - a_proxy.mcMax) > 0.25f) {
-+				SetAV(values, RE::ActorValue::kHealth, a_proxy.mcMax);
++			// The max a health bar goes by is the base value plus whatever sits on top of it (a modifier left by a perk or an effect), so
++			// the base is set to what makes that total Minecraft's max exactly, not just to Minecraft's max.
++			const float max = a_actor->GetActorValueMax(RE::ActorValue::kHealth);
++			if (std::fabs(max - a_proxy.mcMax) > 0.05f) {
++				const float base = values->GetBaseActorValue(RE::ActorValue::kHealth);
++				SetAV(values, RE::ActorValue::kHealth, std::max(1.0f, base + (a_proxy.mcMax - max)));
 +			}
-+			const float now = values->GetActorValue(RE::ActorValue::kHealth);
++			float now = values->GetActorValue(RE::ActorValue::kHealth);
 +			if (std::fabs(now - target) > 0.05f) {
 +				DamageHealth(a_actor, now - target);  // (negative: it heals)
++				now = values->GetActorValue(RE::ActorValue::kHealth);
++				// The first way did not take (the stand-in kept the health it was made with while its mob had lost some, in the log): the
++				// other ways of changing health are tried on what is still owed, as DamageHealthExactly does. They run as SkyCraft's own change
++				// (ownHealthChange), or StandInDamageGuard would cut them to nothing like Skyrim's hits.
++				if (std::fabs(now - target) > 0.5f) {
++					++ownHealthChange;
++					for (int way : { 3, 2, 1 }) {
++						const float owed = now - target;
++						if (std::fabs(owed) <= 0.5f) {
++							break;
++						}
++						if (way != 3 && owed < 0.0f) {
++							continue;  // the other ways only take health off
++						}
++						TakeHealthWith(a_actor, way, owed, nullptr);
++						now = values->GetActorValue(RE::ActorValue::kHealth);
++						static int fixedBy[4] = {};
++						if (std::fabs(now - target) <= 0.5f && fixedBy[way]++ < 3) {
++							logger::info("Stand-in ({:08X}) health follows the mob's by way {} (the plain way did not take)", a_proxy.formId, way);
++						}
++					}
++					--ownHealthChange;
++				}
 +			}
 +			a_proxy.lastHealth = values->GetActorValue(RE::ActorValue::kHealth);  // our own change isn't damage done to it
- 		}
- 
--		// The Skyrim skill a Minecraft hit trains: swords, maces and tools One-Handed; axes and
--		// tridents/spears in hand Two-Handed; arrows and anything thrown Archery; fists nothing.
--		RE::ActorValue HitSkill(const proto::McEvent& a_ev)
++			// If it still isn't Minecraft's, say so (a few times): the bar would then be wrong, and this says by how much and why.
++			const float maxNow = a_actor->GetActorValueMax(RE::ActorValue::kHealth);
++			if (std::fabs(a_proxy.lastHealth - target) > 0.5f || std::fabs(maxNow - a_proxy.mcMax) > 0.5f) {
++				// Not while it is warming up out of sight (its health is set again every frame then, and used to fill the log's whole allowance
++				// of these at once, so the log never said whether the health followed the mob's afterwards).
++				static int logged = 0;
++				if (a_proxy.warm <= 0.0f && logged++ < 30) {
++					logger::warn("Stand-in ({:08X}) health isn't the mob's: has {:.1f}/{:.1f}, mob has {:.1f}/{:.1f} (base {:.1f}, permanent {:.1f})", a_proxy.formId,
++						a_proxy.lastHealth, maxNow, target, a_proxy.mcMax, values->GetBaseActorValue(RE::ActorValue::kHealth),
++						values->GetPermanentActorValue(RE::ActorValue::kHealth));
++				}
++			}
++		}
++
++		// A stand-in knocked down (it is essential: at no health it goes into bleedout instead of dying) is one lock-on mods refuse, and with
++		// its AI off it never gets up by itself. StandInDamageGuard keeps Skyrim's damage from doing it; this gets one up if it happens anyway.
++		template <class A>
++		void ReviveProxy(A* a_actor, MobProxy& a_proxy)
++		{
++			// Skyrim has more than one way of putting an essential actor down: bleedout, but also "essential down" and unconscious. Which one
++			// a hit from the player's own weapon ends in isn't something to guess, so any life state that isn't alive (a stand-in that is
++			// really dead is dropped by the caller before this) counts as knocked down. Lock-on and the target bar refuse all of them.
++			bool down = false;
++			int  state = -1;
++			if constexpr (requires { a_actor->AsActorState()->actorState1.lifeState; }) {
++				state = static_cast<int>(a_actor->AsActorState()->actorState1.lifeState);
++				down = state != static_cast<int>(RE::ACTOR_LIFE_STATE::kAlive) && state != static_cast<int>(RE::ACTOR_LIFE_STATE::kDead) &&
++				       state != static_cast<int>(RE::ACTOR_LIFE_STATE::kDying);
++			} else if constexpr (requires { a_actor->AsActorState()->actorState2.lifeState; }) {
++				state = static_cast<int>(a_actor->AsActorState()->actorState2.lifeState);
++				down = state != static_cast<int>(RE::ACTOR_LIFE_STATE::kAlive) && state != static_cast<int>(RE::ACTOR_LIFE_STATE::kDead) &&
++				       state != static_cast<int>(RE::ACTOR_LIFE_STATE::kDying);
++			}
++			if constexpr (requires { a_actor->AsActorState()->IsBleedingOut(); }) {
++				down = down || a_actor->AsActorState()->IsBleedingOut();
++			}
++			if (!down) {
++				return;
++			}
++			SyncProxyHealth(a_actor, a_proxy);
++			bool stood = false;
++			if constexpr (requires { a_actor->AsActorState()->actorState1.lifeState = RE::ACTOR_LIFE_STATE::kAlive; }) {
++				a_actor->AsActorState()->actorState1.lifeState = RE::ACTOR_LIFE_STATE::kAlive;
++				stood = true;
++			} else if constexpr (requires { a_actor->AsActorState()->actorState2.lifeState = RE::ACTOR_LIFE_STATE::kAlive; }) {
++				a_actor->AsActorState()->actorState2.lifeState = RE::ACTOR_LIFE_STATE::kAlive;
++				stood = true;
++			}
++			// Its animation graph may still be lying in bleedout; with its AI off nothing else will tell it to get up.
++			if constexpr (requires { a_actor->NotifyAnimationGraph("BleedoutStop"); }) {
++				a_actor->NotifyAnimationGraph("BleedoutStop");
++			}
++			static int logged = 0;
++			if (logged++ < 10) {
++				logger::warn("Mob stand-in ({:08X}) was knocked down (life state {}); {}", a_actor->GetFormID(), state, stood ? "got it up again" : "this CommonLib has no way to get it up (it is dropped and made again instead)");
++			}
++		}
++
 +		// A mob is gone: its stand-in leaves the fight and waits in the pool (see proxyPool).
 +		void RemoveProxy(std::int32_t a_mobId)
- 		{
--			if (a_ev.flags & proto::kHitProjectile) {
--				return RE::ActorValue::kArchery;
++		{
 +			auto it = mobProxies.find(a_mobId);
 +			if (it == mobProxies.end()) {
 +				return;
- 			}
--			switch (a_ev.weapon) {
--			case proto::kWeaponUnarmed:
--				return RE::ActorValue::kNone;
--			case proto::kWeaponAxe:
--			case proto::kWeaponPierce:
--				return RE::ActorValue::kTwoHanded;
--			default:
--				return RE::ActorValue::kOneHanded;
++			}
 +			FlushProxyDamage(a_mobId, it->second);
++			{
++				static int loggedRemove = 0;
++				if (loggedRemove++ < 60) {
++					logger::info("Stand-in ({:08X}) of mob {} removed from the mob list (silence {:.1f} s); it goes to the pool", it->second.formId, a_mobId, it->second.silence);
++				}
++			}
 +			if (auto* actor = RE::TESForm::LookupByID<RE::Actor>(it->second.formId); actor && !actor->IsDead()) {
 +				ReleaseHunters(actor);
 +				StopProxyCombat(actor);
-+				proxyPool.push_back(it->second.formId);
++				if (std::ranges::find(proxyPool, it->second.formId) == proxyPool.end()) {
++					proxyPool.push_back(it->second.formId);
++				}
 +			} else {
 +				if (actor) {
 +					ReleaseHunters(actor);
 +					deadProxies.push_back({ it->second.formId, 2.0f });  // died: the body goes in a moment
 +				}
-+				proxyIds.erase(it->second.formId); proxyIdsDirty = true;  // it died or is gone: forgotten
- 			}
++				proxyIds.erase(it->second.formId);  // it died or is gone: forgotten
++			}
 +			mobProxies.erase(it);
- 		}
- 
--		// Skyrim's own skill experience (what its weapons, blocking, armour and crafting call), so
--		// skills level up with Skyrim's notification and count towards the character's level.
--		// Uses are counted like Skyrim counts them: a weapon hit is worth the weapon's damage.
--		void TrainSkill(RE::PlayerCharacter* a_player, RE::ActorValue a_skill, float a_uses)
++		}
++
 +		void ClearProxies()
- 		{
--			if (a_skill == RE::ActorValue::kNone || !(a_uses >= 0.05f)) {
--				return;  // nothing, or a scratch (damage over time ticks)
++		{
 +			while (!mobProxies.empty()) {
 +				RemoveProxy(mobProxies.begin()->first);
- 			}
--			const float before = a_player->AsActorValueOwner()->GetBaseActorValue(a_skill);
--			a_player->AddSkillExperience(a_skill, std::min(a_uses, 500.0f));
--			const float after = a_player->AsActorValueOwner()->GetBaseActorValue(a_skill);
--			static int logged = 0;
--			if (after > before || logged < 8) {
--				++logged;
--				logger::info("skill {} +{:.1f} uses ({:.0f}{})", static_cast<int>(a_skill), a_uses, after, after > before ? ", levelled up" : "");
++			}
 +			mobNames.clear();
-+			npcFights.clear();
 +		}
 +
 +		// Pooled stand-ins wait high above the player where nothing can reach them.
@@ -7575,19 +7823,35 @@ index 0954b7f..94d6688 100644
 +			parkTimer = 0.25f;
 +			auto spot = a_player->GetPosition();
 +			spot.z += 60.0f * static_cast<float>(proto::kUnitsPerBlock);
++			std::unordered_set<RE::FormID> live;
++			for (const auto& entry : mobProxies) {
++				live.insert(entry.second.formId);
++			}
 +			for (auto it = proxyPool.begin(); it != proxyPool.end();) {
++				// A stand-in whose mob lives can be in the pool by mistake (put there twice, one entry left over once it was reused):
++				// parking it switched it off under its mob, which is the stand-in that vanished and came back a moment later.
++				if (live.contains(*it)) {
++					it = proxyPool.erase(it);
++					continue;
++				}
 +				auto* actor = RE::TESForm::LookupByID<RE::Actor>(*it);
 +				if (!actor || actor->IsDead()) {
 +					if (actor) {
 +						deadProxies.push_back({ *it, 2.0f });
 +					}
-+					proxyIds.erase(*it); proxyIdsDirty = true;
++					proxyIds.erase(*it);
 +					it = proxyPool.erase(it);
 +					continue;
 +				}
 +				if (actor->IsDisabled()) {
 +					++it;  // already put away
 +					continue;
++				}
++				{
++					static int loggedPark = 0;
++					if (loggedPark++ < 60) {
++						logger::info("Stand-in ({:08X}) parked: switched off in the pool", actor->GetFormID());
++					}
 +				}
 +				StopProxyCombat(actor);
 +				QuietProxy(actor);  // hidden again, in case its 3D was rebuilt since
@@ -7599,25 +7863,38 @@ index 0954b7f..94d6688 100644
 +					actor->Disable();
 +				}
 +				++it;
- 			}
++			}
  		}
  
--		RE::NiAVObject* HitNode(RE::Actor* a_actor)
+-		// A vanilla weapon standing in for the Minecraft one: its impact set gives the blood
+-		// spray and impact sound, its type the skill and sounds.
+-		RE::TESObjectWEAP* StandInWeapon(std::uint32_t a_weapon)
 +		// A mob reported by Minecraft: make or move its stand-in. a_ev.formId = the mob's id, a/b/c = its position.
 +		void MobProxyEvent(RE::PlayerCharacter* a_player, const proto::McEvent& a_ev)
  		{
--			auto* root = a_actor->Get3D();
--			if (!root) {
--				return nullptr;
+-			RE::FormID id = 0;
+-			switch (a_weapon) {
+-			case proto::kWeaponBlade:
+-				id = 0x00012EB7;  // Iron Sword
+-				break;
+-			case proto::kWeaponAxe:
+-				id = 0x00013790;  // Iron War Axe
+-				break;
+-			case proto::kWeaponPierce:
+-				id = 0x0001397E;  // Iron Dagger
+-				break;
+-			case proto::kWeaponArrow:
+-				id = 0x00013985;  // Hunting Bow
+-				break;
+-			default:
+-				id = 0x00013982;  // Iron Mace (fists, tools, blunt things)
+-				break;
 +			const auto mobId = static_cast<std::int32_t>(a_ev.formId);
 +			if ((a_ev.flags & proto::kMobProxyGone) != 0) {
 +				mobNames.erase(mobId);
 +				RemoveProxy(mobId);
 +				return;
- 			}
--			for (const char* name : { "NPC Spine2 [Spn2]", "NPC Spine1 [Spn1]", "NPC Spine [Spn0]", "NPC Pelvis [Pelv]" }) {
--				if (auto* node = root->GetObjectByName(name)) {
--					return node;
++			}
 +			const auto pos = McToSky(a_ev.a, a_ev.b, a_ev.c);
 +			auto       it = mobProxies.find(mobId);
 +			if (it == mobProxies.end()) {
@@ -7629,7 +7906,7 @@ index 0954b7f..94d6688 100644
 +				while (!proxyPool.empty() && !actor) {  // a parked one first
 +					actor = RE::TESForm::LookupByID<RE::Actor>(proxyPool.back());
 +					if (!actor || actor->IsDead()) {
-+						proxyIds.erase(proxyPool.back()); proxyIdsDirty = true;
++						proxyIds.erase(proxyPool.back());
 +						actor = nullptr;
 +					} else if (actor->IsDisabled()) {
 +						FadeProxy(actor, true);  // held at no alpha before its 3D reloads, so its coming back is never seen
@@ -7665,8 +7942,6 @@ index 0954b7f..94d6688 100644
 +				}
 +				made.lastHealth = actor->AsActorValueOwner()->GetActorValue(RE::ActorValue::kHealth);
 +				proxyIds.insert(made.formId);
-+				proxyIdsDirty = true;
-+				PushIgnoredStandIns();  // before anything else can look at the new actor
 +				QuietProxy(actor, true);
 +				it = mobProxies.emplace(mobId, made).first;
 +				static int logged = 0;
@@ -7694,7 +7969,121 @@ index 0954b7f..94d6688 100644
 +				if (const auto name = mobNames.find(mobId); name != mobNames.end() && it->second.named != name->second) {
 +					NameProxy(actor, name->second);
 +					it->second.named = name->second;
- 				}
++				}
+ 			}
+-			return RE::TESForm::LookupByID<RE::TESObjectWEAP>(id);
+ 		}
+ 
+-		// The Skyrim skill a Minecraft hit trains: swords, maces and tools One-Handed; axes and
+-		// tridents/spears in hand Two-Handed; arrows and anything thrown Archery; fists nothing.
+-		RE::ActorValue HitSkill(const proto::McEvent& a_ev)
++		// A mob's health, eye height and velocity, from Minecraft (kEvMobVitals).
++		void MobVitalsEvent(const proto::McEvent& a_ev)
+ 		{
+-			if (a_ev.flags & proto::kHitProjectile) {
+-				return RE::ActorValue::kArchery;
++			const auto it = mobProxies.find(static_cast<std::int32_t>(a_ev.formId));
++			if (it == mobProxies.end()) {
++				return;
+ 			}
+-			switch (a_ev.weapon) {
+-			case proto::kWeaponUnarmed:
+-				return RE::ActorValue::kNone;
+-			case proto::kWeaponAxe:
+-			case proto::kWeaponPierce:
+-				return RE::ActorValue::kTwoHanded;
+-			default:
+-				return RE::ActorValue::kOneHanded;
++			auto& proxy = it->second;
++			proxy.mcHealth = a_ev.a;
++			proxy.mcMax = a_ev.b;
++			if (a_ev.c > 0.05f && a_ev.c < 32.0f) {
++				proxy.eye = a_ev.c;
++			}
++			proxy.velX = std::bit_cast<float>(a_ev.flags);
++			proxy.velZ = std::bit_cast<float>(a_ev.weapon);
++			if (auto* actor = RE::TESForm::LookupByID<RE::Actor>(proxy.formId); actor && !actor->IsDead()) {
++				AbsorbProxyDamage(actor, proxy);  // anything Skyrim did since last frame is counted before the mob's health replaces it
++				SyncProxyHealth(actor, proxy);
+ 			}
+ 		}
+ 
+-		// Skyrim's own skill experience (what its weapons, blocking, armour and crafting call), so
+-		// skills level up with Skyrim's notification and count towards the character's level.
+-		// Uses are counted like Skyrim counts them: a weapon hit is worth the weapon's damage.
+-		void TrainSkill(RE::PlayerCharacter* a_player, RE::ActorValue a_skill, float a_uses)
++		// A mob's name, from Minecraft: 24 ASCII bytes spread over a, b, c, d, flags, weapon.
++		void MobNameEvent(const proto::McEvent& a_ev)
+ 		{
+-			if (a_skill == RE::ActorValue::kNone || !(a_uses >= 0.05f)) {
+-				return;  // nothing, or a scratch (damage over time ticks)
++			std::array<char, 25> text{};
++			std::memcpy(text.data() + 0, &a_ev.a, 4);
++			std::memcpy(text.data() + 4, &a_ev.b, 4);
++			std::memcpy(text.data() + 8, &a_ev.c, 4);
++			std::memcpy(text.data() + 12, &a_ev.d, 4);
++			std::memcpy(text.data() + 16, &a_ev.flags, 4);
++			std::memcpy(text.data() + 20, &a_ev.weapon, 4);
++			const auto mobId = static_cast<std::int32_t>(a_ev.formId);
++			const std::string name(text.data());
++			if (name.empty()) {
++				return;
+ 			}
+-			const float before = a_player->AsActorValueOwner()->GetBaseActorValue(a_skill);
+-			a_player->AddSkillExperience(a_skill, std::min(a_uses, 500.0f));
+-			const float after = a_player->AsActorValueOwner()->GetBaseActorValue(a_skill);
+-			static int logged = 0;
+-			if (after > before || logged < 8) {
+-				++logged;
+-				logger::info("skill {} +{:.1f} uses ({:.0f}{})", static_cast<int>(a_skill), a_uses, after, after > before ? ", levelled up" : "");
++			mobNames[mobId] = name;
++			if (const auto it = mobProxies.find(mobId); it != mobProxies.end() && it->second.named != name) {
++				if (auto* actor = RE::TESForm::LookupByID<RE::Actor>(it->second.formId)) {
++					NameProxy(actor, name);
++					it->second.named = name;
++				}
+ 			}
+ 		}
+ 
+-		RE::NiAVObject* HitNode(RE::Actor* a_actor)
++		// Each frame: stand-ins whose mob has gone quiet are dropped, and what Skyrim's NPCs took off a stand-in is
++		// handed to Minecraft and given back.
++		// Diagnostics for stand-ins that seem to vanish: what Skyrim says about one is logged whenever it changes (not every frame), so the
++		// log shows what a hit left behind and whether it is gone after the switch back from Minecraft's controls.
++		template <class A>
++		void WatchProxy(A* a_actor, const MobProxy& a_proxy, bool a_skyrimMode)
+ 		{
+-			auto* root = a_actor->Get3D();
+-			if (!root) {
+-				return nullptr;
++			static std::unordered_map<RE::FormID, std::uint32_t> seen;
++			static int                                           logged = 0;
++			int state = -1;
++			if constexpr (requires { a_actor->AsActorState()->actorState1.lifeState; }) {
++				state = static_cast<int>(a_actor->AsActorState()->actorState1.lifeState);
+ 			}
+-			for (const char* name : { "NPC Spine2 [Spn2]", "NPC Spine1 [Spn1]", "NPC Spine [Spn0]", "NPC Pelvis [Pelv]" }) {
+-				if (auto* node = root->GetObjectByName(name)) {
+-					return node;
+-				}
++			bool ragdoll = false;
++			if constexpr (requires { a_actor->IsInRagdollState(); }) {
++				ragdoll = a_actor->IsInRagdollState();
++			}
++			const bool  disabled = a_actor->IsDisabled();
++			const bool  has3d = a_actor->Get3D() != nullptr;
++			const bool  loaded = a_actor->Is3DLoaded();
++			const bool  combat = a_actor->IsInCombat();
++			const bool  nearMob = a_actor->GetPosition().GetDistance(a_proxy.shown) < 140.0f;
++			const bool  silent = a_proxy.silence > 1.0f;
++			const std::uint32_t key = (disabled ? 1u : 0u) | (has3d ? 2u : 0u) | (loaded ? 4u : 0u) | (combat ? 8u : 0u) | (ragdoll ? 16u : 0u) |
++			                          (nearMob ? 32u : 0u) | (silent ? 64u : 0u) | (a_skyrimMode ? 128u : 0u) | (static_cast<std::uint32_t>(state + 1) << 8);
++			auto& last = seen[a_proxy.formId];
++			if (last != key && logged < 150) {
++				last = key;
++				++logged;
++				logger::info("Watch stand-in ({:08X}): {} disabled={} 3d={} loaded={} combat={} life={} ragdoll={} near-mob={} silent={}", a_proxy.formId,
++					a_skyrimMode ? "skyrim-mode" : "minecraft-mode", disabled, has3d, loaded, combat, state, ragdoll, nearMob, silent);
  			}
 -			return root;
  		}
@@ -7702,13 +8091,17 @@ index 0954b7f..94d6688 100644
 -		// A Minecraft hit on an actor's stand-in: real damage, scaled so Minecraft gear stays
 -		// meaningful against higher-level enemies, delivered the way a Skyrim weapon would.
 -		void ApplyHit(RE::PlayerCharacter* a_player, const proto::McEvent& a_ev)
-+		// A mob's health, eye height and velocity, from Minecraft (kEvMobVitals).
-+		void MobVitalsEvent(const proto::McEvent& a_ev)
++		// Lock-on is LockOn.cpp's: Minecraft's mobs are handed to True Directional Movement as virtual targets there. The stand-ins are
++		// only reported to it (as actors it must never pick), whenever the set of them changes, so a mob is never offered twice.
++		std::vector<std::uint32_t> ignoredStandIns;
++
++		void PublishLockTargets(float)
  		{
 -			auto* actor = RE::TESForm::LookupByID<RE::Actor>(a_ev.formId);
 -			if (!actor || actor->IsDead()) {
-+			const auto it = mobProxies.find(static_cast<std::int32_t>(a_ev.formId));
-+			if (it == mobProxies.end()) {
++			std::vector<std::uint32_t> now(proxyIds.begin(), proxyIds.end());
++			std::sort(now.begin(), now.end());
++			if (now == ignoredStandIns) {
  				return;
  			}
 -			const float scale = 5.0f + 0.25f * static_cast<float>(actor->GetLevel());
@@ -7725,18 +8118,8 @@ index 0954b7f..94d6688 100644
 -			RE::NiPoint3 dir = hitPos - a_player->GetPosition();
 -			dir.z = 0.0f;
 -			dir = dir.Length() > 1e-3f ? dir / dir.Length() : RE::NiPoint3{ 0.0f, 1.0f, 0.0f };
-+			auto& proxy = it->second;
-+			proxy.mcHealth = a_ev.a;
-+			proxy.mcMax = a_ev.b;
-+			if (a_ev.c > 0.05f && a_ev.c < 32.0f) {
-+				proxy.eye = a_ev.c;
-+			}
-+			proxy.velX = std::bit_cast<float>(a_ev.flags);
-+			proxy.velZ = std::bit_cast<float>(a_ev.weapon);
-+			if (auto* actor = RE::TESForm::LookupByID<RE::Actor>(proxy.formId); actor && !actor->IsDead()) {
-+				AbsorbProxyDamage(actor, proxy);  // anything Skyrim did since last frame is counted before the mob's health replaces it
-+				SyncProxyHealth(actor, proxy);
-+			}
++			ignoredStandIns = now;
++			LockOn::SetIgnoredActors(ignoredStandIns);
 +		}
  
 -			if (processHit && damage > 0.0f) {
@@ -7759,39 +8142,9 @@ index 0954b7f..94d6688 100644
 -				hit->flags.reset(RE::HitData::Flag::kPowerAttack, RE::HitData::Flag::kCritical, RE::HitData::Flag::kSneakAttack, RE::HitData::Flag::kMeleeAttack);
 -				if (!projectile) {
 -					hit->flags.set(RE::HitData::Flag::kMeleeAttack);
-+		// A mob's name, from Minecraft: 24 ASCII bytes spread over a, b, c, d, flags, weapon.
-+		void MobNameEvent(const proto::McEvent& a_ev)
-+		{
-+			std::array<char, 25> text{};
-+			std::memcpy(text.data() + 0, &a_ev.a, 4);
-+			std::memcpy(text.data() + 4, &a_ev.b, 4);
-+			std::memcpy(text.data() + 8, &a_ev.c, 4);
-+			std::memcpy(text.data() + 12, &a_ev.d, 4);
-+			std::memcpy(text.data() + 16, &a_ev.flags, 4);
-+			std::memcpy(text.data() + 20, &a_ev.weapon, 4);
-+			const auto mobId = static_cast<std::int32_t>(a_ev.formId);
-+			const std::string name(text.data());
-+			if (name.empty()) {
-+				return;
-+			}
-+			mobNames[mobId] = name;
-+			if (const auto it = mobProxies.find(mobId); it != mobProxies.end() && it->second.named != name) {
-+				if (auto* actor = RE::TESForm::LookupByID<RE::Actor>(it->second.formId)) {
-+					NameProxy(actor, name);
-+					it->second.named = name;
- 				}
--				if (crit) {
--					hit->flags.set(RE::HitData::Flag::kCritical);
-+			}
-+		}
-+
-+		// Each frame: stand-ins whose mob has gone quiet are dropped, and what Skyrim's NPCs took off a stand-in is
-+		// handed to Minecraft and given back.
 +		void UpdateProxies(RE::PlayerCharacter* a_player, float a_delta)
 +		{
-+			if (proxyIdsDirty) {
-+				PushIgnoredStandIns();
-+			}
++			PublishLockTargets(a_delta);
 +			for (auto hit = proxyPlayerHitAge.begin(); hit != proxyPlayerHitAge.end();) {
 +				hit->second += a_delta;
 +				hit = hit->second > 30.0f ? proxyPlayerHitAge.erase(hit) : std::next(hit);
@@ -7808,10 +8161,21 @@ index 0954b7f..94d6688 100644
 +				if (Link::Get().McAlive()) {
 +					proxy.silence += std::min(a_delta, 0.1f);
  				}
+-				if (crit) {
+-					hit->flags.set(RE::HitData::Flag::kCritical);
++				auto* actor = RE::TESForm::LookupByID<RE::Actor>(proxy.formId);
++				// A knocked-down stand-in is got up again before it is judged (see ReviveProxy).
++				if (actor && !actor->IsDead()) {
++					ReviveProxy(actor, proxy);
+ 				}
 -				if (push > 0.45f) {
 -					hit->flags.set(RE::HitData::Flag::kPowerAttack);
-+				auto* actor = RE::TESForm::LookupByID<RE::Actor>(proxy.formId);
-+				if (!actor || actor->IsDead() || proxy.silence > 4.0f) {
++				if (!actor || actor->IsDead() || proxy.silence > 10.0f) {
++					static int dropped = 0;
++					if (dropped++ < 40) {
++						logger::info("Stand-in ({:08X}) of mob {} dropped: {}", proxy.formId, it->first,
++							!actor ? "Skyrim no longer has the actor" : actor->IsDead() ? "it died in Skyrim" : "Minecraft stopped reporting the mob");
++					}
 +					const auto id = it->first;
 +					++it;
 +					RemoveProxy(id);
@@ -7827,7 +8191,72 @@ index 0954b7f..94d6688 100644
 -					actor->SetGraphVariableFloat("staggerDirection", sdir);
 -					actor->SetGraphVariableFloat("staggerMagnitude", stagger);
 -					actor->NotifyAnimationGraph("staggerStart");
-+				AbsorbProxyDamage(actor, proxy);
++				// A stand-in whose mob is alive is never left switched off, whatever switched it off (a stand-in is only put away when its
++				// mob is gone): it is switched on again and kept out of sight for a moment while it loads.
++				// Skyrim hands a stand-in that was switched off back with its own default health (a rabbit's), not the mob's. That drop is
++				// not damage, so it is not passed on to Minecraft (it used to be: 21 "lost" at a time, the player's doing, killing mobs nobody hit).
++				bool reloaded = false;
++				if (actor->IsDisabled()) {
++					{
++						static int loggedOff = 0;
++						if (loggedOff++ < 40) {
++							const auto at = actor->GetPosition();
++							logger::info("Stand-in ({:08X}) found switched off: at ({:.0f} {:.0f} {:.0f}), mob shown at ({:.0f} {:.0f} {:.0f}), silence {:.1f} s, pending damage {:.1f}, in pool {}, in dead list {}",
++								proxy.formId, at.x, at.y, at.z, proxy.shown.x, proxy.shown.y, proxy.shown.z, proxy.silence, proxy.pendingDamage,
++								std::ranges::find(proxyPool, proxy.formId) != proxyPool.end(),
++								std::ranges::any_of(deadProxies, [&](const DeadProxy& d) { return d.formId == proxy.formId; }));
++						}
++					}
++					{
++						// What the stand-in looked like when it was found off: the clue to what switched it off.
++						static int loggedWhy = 0;
++						if (loggedWhy++ < 40) {
++							// (A generic lambda, so the checks below are in a template and the way this CommonLib spells it is picked at compile time.)
++							const int life = [](auto* a) {
++								int state = -1;
++								if constexpr (requires { a->AsActorState()->actorState1.lifeState; }) {
++									state = static_cast<int>(a->AsActorState()->actorState1.lifeState);
++								} else if constexpr (requires { a->AsActorState()->actorState2.lifeState; }) {
++									state = static_cast<int>(a->AsActorState()->actorState2.lifeState);
++								}
++								return state;
++							}(actor);
++							const auto flags = [](auto* a) {
++								std::uint32_t f = 0;
++								if constexpr (requires { static_cast<std::uint32_t>(a->formFlags); }) {
++									f = static_cast<std::uint32_t>(a->formFlags);
++								}
++								return f;
++							}(actor);
++							logger::info("Stand-in ({:08X}) found off: form flags {:08X}, same cell as the player {}", proxy.formId, flags,
++								actor->GetParentCell() == a_player->GetParentCell());
++							logger::info("Stand-in ({:08X}) found off: health {:.1f} (last {:.1f}, mob's {:.1f}/{:.1f}), life state {}, in combat {}, warm {:.1f}, hit by the player {} s ago",
++								proxy.formId, actor->AsActorValueOwner()->GetActorValue(RE::ActorValue::kHealth), proxy.lastHealth, proxy.mcHealth, proxy.mcMax, life,
++								actor->IsInCombat(), proxy.warm, proxyPlayerHitAge.contains(proxy.formId) ? proxyPlayerHitAge[proxy.formId] : -1.0f);
++						}
++					}
++					FadeProxy(actor, true);
++					if constexpr (requires { actor->Enable(false); }) {
++						actor->Enable(false);
++					}
++					reloaded = true;
++					proxy.warm = std::max(proxy.warm, 1.5f);  // out of sight up in the air while it loads: what it plays as it comes back is seen there, not at the mob
++					proxy.placed = false;
++					static int switchedBack = 0;
++					if (switchedBack++ < 20) {
++						logger::info("Stand-in ({:08X}) of mob {} had been switched off while its mob lives; switched back on", proxy.formId, it->first);
++					}
++				}
++				if (reloaded || proxy.warm > 0.0f) {
++					// Just switched back on, or still warming up out of sight: whatever its health reads is not damage, and nothing can be
++					// hitting it yet. SyncProxyHealth below gives it the mob's health again.
++					proxy.lastHealth = actor->AsActorValueOwner()->GetActorValue(RE::ActorValue::kHealth);
++					proxyOverkill.erase(proxy.formId);
++				} else {
++					AbsorbProxyDamage(actor, proxy);
++				}
++				SyncProxyHealth(actor, proxy);  // every frame, so the health is the mob's at all times, not only when Minecraft reports it
++				WatchProxy(actor, proxy, State().skyrimMode);
 +				if (proxy.warm > 0.0f) {
 +					proxy.warm -= a_delta;
 +					const auto spot = WarmSpot(a_player);
@@ -7841,11 +8270,11 @@ index 0954b7f..94d6688 100644
 +					}
 +				} else {
 +					FollowProxy(actor, proxy, a_delta);
- 				}
++				}
 +				proxy.flushAge += a_delta;
 +				if (proxy.pendingDamage > 0.0f && (proxy.pendingDamage >= kProxyBigHit || proxy.flushAge >= kProxyFlushSeconds)) {
 +					FlushProxyDamage(it->first, proxy);
-+				}
+ 				}
 +				++it;
  			}
 -			// Blood spray and the weapon-on-flesh sound, like a Skyrim blade connecting.
@@ -7871,27 +8300,6 @@ index 0954b7f..94d6688 100644
 +				return;
 +			}
 +			const auto playerPos = a_player->GetPosition();
-+			std::unordered_set<RE::FormID> liveStandIns;
-+			for (const auto& entry : mobProxies) {
-+				if (!entry.second.targetOnly && !(entry.second.warm > 0.0f)) {  // warm counts down past zero and stays there: only a positive value is still warming up
-+					liveStandIns.insert(entry.second.formId);
-+				}
-+			}
-+			// A fight whose mob is gone is ended (the NPC stands down); the others just age.
-+			for (auto it = npcFights.begin(); it != npcFights.end();) {
-+				auto* npc = RE::TESForm::LookupByID<RE::Actor>(it->first);
-+				if (!npc || npc->IsDead() || npc->IsDisabled()) {
-+					it = npcFights.erase(it);
-+				} else if (!liveStandIns.contains(it->second.standIn)) {
-+					if (npc->IsInCombat()) {
-+						npc->StopCombat();
-+					}
-+					it = npcFights.erase(it);
-+				} else {
-+					it->second.age += 0.5f;
-+					++it;
-+				}
-+			}
 +			for (auto& handle : lists->highActorHandles) {
 +				auto  actorPtr = handle.get();
 +				auto* npc = actorPtr.get();
@@ -7899,18 +8307,14 @@ index 0954b7f..94d6688 100644
 +					npc->GetPosition().GetDistance(playerPos) > kActorRange) {
 +					continue;
 +				}
-+				const auto fight = npcFights.find(npc->GetFormID());
-+				if (fight != npcFights.end() && fight->second.age < 6.0f) {
-+					continue;  // already sent against its mob: given time to take it up, not sent again every half second
-+				}
 +				const bool  fighter = npc->AsActorValueOwner()->GetActorValue(RE::ActorValue::kAggression) >= 1.0f;
 +				const float reach = (fighter ? 30.0f : 20.0f) * static_cast<float>(proto::kUnitsPerBlock);  // (a skeleton or pillager shoots from further off than 12 blocks)
 +				RE::Actor*  best = nullptr;
 +				float       bestDistance = reach;
 +				for (const auto& entry : mobProxies) {
 +					const auto& proxy = entry.second;
-+					if (proxy.targetOnly || proxy.warm > 0.0f) {
-+						continue;  // there for the player to lock on to (no business of the NPCs), or still warming up out of sight
++					if (proxy.targetOnly) {
++						continue;  // there for the player to lock on to: no business of the NPCs
 +					}
 +					auto*       standIn = RE::TESForm::LookupByID<RE::Actor>(proxy.formId);
 +					const float d = standIn ? npc->GetPosition().GetDistance(proxy.pos) : reach;
@@ -7921,7 +8325,6 @@ index 0954b7f..94d6688 100644
 +				}
 +				if (best) {
 +					npc->StartCombat(best);
-+					npcFights[npc->GetFormID()] = NpcFight{ best->GetFormID(), 0.0f };
 +					static int logged = 0;
 +					if (logged++ < 20) {
 +						logger::info("{} goes into combat with a Minecraft mob", npc->GetDisplayFullName());
@@ -7933,7 +8336,7 @@ index 0954b7f..94d6688 100644
  		}
  
  		void KillPlayer(RE::PlayerCharacter* a_player, const proto::McEvent& a_ev)
-@@ -580,7 +2100,7 @@ namespace skycraft
+@@ -580,7 +2468,7 @@ namespace skycraft
  			for (auto& handle : lists->highActorHandles) {
  				auto actorPtr = handle.get();
  				auto* actor = actorPtr.get();
@@ -7942,7 +8345,7 @@ index 0954b7f..94d6688 100644
  					continue;
  				}
  				const auto hazard = HazardAtActor(actor);
-@@ -698,6 +2218,7 @@ namespace skycraft
+@@ -698,6 +2586,7 @@ namespace skycraft
  			RE::NiPoint3 center;
  			float        radius;  // Minecraft blocks
  			float        delay;   // seconds: after the blast's damage has landed
@@ -7950,7 +8353,7 @@ index 0954b7f..94d6688 100644
  		};
  		std::vector<PendingExplosion> pendingExplosions;
  
-@@ -786,6 +2307,9 @@ namespace skycraft
+@@ -786,6 +2675,9 @@ namespace skycraft
  					continue;
  				}
  				if (auto* actor = ref->As<RE::Actor>()) {
@@ -7960,7 +8363,7 @@ index 0954b7f..94d6688 100644
  					if (!actor->IsDead()) {
  						if (auto* process = actor->GetActorRuntimeData().currentProcess) {
  							process->KnockExplosion(actor, a_blast.center, 25.0f * falloff * power);
-@@ -830,6 +2354,183 @@ namespace skycraft
+@@ -830,6 +2722,183 @@ namespace skycraft
  			}
  			logger::info("Minecraft explosion (radius {:.1f}): knocked {} people away, threw {} objects", a_blast.radius, people, objects);
  		}
@@ -8144,7 +8547,23 @@ index 0954b7f..94d6688 100644
  	}
  
  	namespace Combat
-@@ -854,20 +2555,74 @@ namespace skycraft
+@@ -838,8 +2907,15 @@ namespace skycraft
+ 		{
+ 			REL::Relocation<std::uintptr_t> vtbl{ RE::VTABLE_PlayerCharacter[0] };
+ 			HandleHealthDamageHook::func = vtbl.write_vfunc(0x104, HandleHealthDamageHook::thunk);
++			REL::Relocation<std::uintptr_t> characterVtbl{ RE::VTABLE_Character[0] };  // (the stand-ins are Characters; same slot as the player's)
++			StandInDamageGuard::func = characterVtbl.write_vfunc(0x104, StandInDamageGuard::thunk);
++			logger::info("Stand-in damage guard installed: Skyrim's hits can no longer knock a mob's stand-in down");
+ 			if (auto* events = RE::ScriptEventSourceHolder::GetSingleton()) {
+ 				events->AddEventSink<RE::TESHitEvent>(HitSink::Get());
++				events->AddEventSink<RE::TESObjectLoadedEvent>(StandInEventLog<RE::TESObjectLoadedEvent>::Get("3D loaded (1) / unloaded (0)"));
++				events->AddEventSink<RE::TESCellAttachDetachEvent>(StandInEventLog<RE::TESCellAttachDetachEvent>::Get("cell attach / detach"));
++				events->AddEventSink<RE::TESCombatEvent>(StandInEventLog<RE::TESCombatEvent>::Get("combat state"));
++				events->AddEventSink<RE::TESDeathEvent>(StandInEventLog<RE::TESDeathEvent>::Get("death"));
+ 			}
+ 			ResolveHitPipeline();
+ 			logger::info("combat hooks installed");
+@@ -854,20 +2930,66 @@ namespace skycraft
  				}
  				healthPrimed = false;
  				engaged = false;
@@ -8153,9 +8572,6 @@ index 0954b7f..94d6688 100644
 +				// Skyrim's NPCs fight each other in it, and the player's swings hit the mobs. (Minecraft's player
 +				// only rides along, so whatever happens to it isn't the Skyrim player's death.)
 +				const bool mirror = State().skyrimMode && State().worldVisible && link.McAlive();
-+				// The stand-ins of Minecraft's mobs are kept whichever control mode it is, as long as Minecraft's world is there to be mirrored:
-+				// taking them away (and making them again, warm-up and all) on a switch of controls is what put them out of step with their mobs.
-+				const bool standIns = State().worldVisible && link.McAlive();
 +				// Events are always drained, so stale hits don't land when control resumes.
  				proto::McEvent ev;
  				while (link.PopEvent(ev)) {
@@ -8175,8 +8591,6 @@ index 0954b7f..94d6688 100644
 +						}
 +					} else if (mirror) {
 +						HandleEvent(a_player, ev, true);
-+					} else if (standIns && (ev.type == proto::kEvMobProxy || ev.type == proto::kEvMobName || ev.type == proto::kEvMobVitals)) {
-+						HandleEvent(a_player, ev, false);  // (only the mob stand-in events are meant here: the rest of it is for the mirror)
 +					}
 +				}
 +				if (mirror) {
@@ -8190,7 +8604,7 @@ index 0954b7f..94d6688 100644
 +						} else {
 +							++it;
 +						}
- 					}
++					}
 +					UpdateSkyrimAttacks(a_player);
 +					UpdateNpcBows(a_delta);
 +					UpdateProxies(a_player, a_delta);
@@ -8199,19 +8613,16 @@ index 0954b7f..94d6688 100644
 +					pendingExplosions.clear();
 +					pendingFlings.clear();
 +					ResetSkyrimAttacks();
-+					// A Skyrim menu, a load, a moment of lag: not a reason to drop every stand-in (and make them all again, warm-up and
-+					// all, a moment later). They are only let go when Minecraft's world has been gone for a good while; switching to
-+					// Minecraft's controls is not that.
-+					if (standIns) {
-+						UpdateProxies(a_player, a_delta);
-+						mirrorOffFor = 0.0f;
-+					} else {
-+						mirrorOffFor += a_delta;
-+						if (mirrorOffFor > 6.0f) {
-+							ClearProxies();
-+						}
-+						ParkPool(a_player, a_delta);
-+					}
++					// A Skyrim menu, a load, a stall in Minecraft (its heartbeat is only trusted for 3 s): none is a reason to drop a stand-in
++					// whose mob is alive, in either mode. They go when Minecraft's world is really gone (Minecraft closed, or out of its
++					// world) for a good while, or when the player has died (the game is about to reload).
++					static float playerDeadFor = 0.0f;
++					mirrorOffFor = (link.McAlive() && State().mcInWorld) ? 0.0f : mirrorOffFor + a_delta;
++					playerDeadFor = a_player->IsDead() ? playerDeadFor + a_delta : 0.0f;
++					if (mirrorOffFor > 30.0f || playerDeadFor > 6.0f) {
++						ClearProxies();
+ 					}
++					ParkPool(a_player, a_delta);
 +					link.WriteActors(nullptr, 0);
  				}
 -				pendingExplosions.clear();
@@ -8225,7 +8636,7 @@ index 0954b7f..94d6688 100644
  			SetEssential(a_player, true);
  			WriteActorTable(a_player);
  			engagedTimer -= a_delta;
-@@ -878,29 +2633,11 @@ namespace skycraft
+@@ -878,29 +3000,11 @@ namespace skycraft
  
  			proto::McEvent ev;
  			while (link.PopEvent(ev)) {
@@ -8258,7 +8669,7 @@ index 0954b7f..94d6688 100644
  			for (auto it = pendingExplosions.begin(); it != pendingExplosions.end();) {
  				it->delay -= a_delta;
  				if (it->delay <= 0.0f) {
-@@ -924,5 +2661,16 @@ namespace skycraft
+@@ -924,5 +3028,16 @@ namespace skycraft
  		}
  
  		bool PlayerEngaged() { return engaged; }
@@ -9588,7 +9999,7 @@ index 0000000..0939189
 +	}
 +}
 diff --git a/skse/src/NpcBlocks.cpp b/skse/src/NpcBlocks.cpp
-index 5e25a7d..45b9bec 100644
+index 5e25a7d..ce0e55f 100644
 --- a/skse/src/NpcBlocks.cpp
 +++ b/skse/src/NpcBlocks.cpp
 @@ -1,4 +1,7 @@
@@ -10509,7 +10920,7 @@ index b877ae5..36666dc 100644
  				logger::info("in-frame block drawing: hooked after Main::RenderWorld");
  			}
 diff --git a/skse/src/main.cpp b/skse/src/main.cpp
-index eb548b4..765cf47 100644
+index eb548b4..5b60f4b 100644
 --- a/skse/src/main.cpp
 +++ b/skse/src/main.cpp
 @@ -21,6 +21,9 @@ namespace
@@ -10534,7 +10945,7 @@ index eb548b4..765cf47 100644
  	SetupLog();
  	skycraft::CrashLog::Install();
  	logger::info("SkyCraft {} loading (runtime {})", "0.1.2", a_skse->RuntimeVersion().string());
-+	logger::info("patch revision 37 (mob stand-ins are back: invisible Skyrim actors for Minecraft mobs so NPCs fight them and spells hurt the mob; they sit exactly on the mob's feet at its height, stay in every control mode, and are on True Directional Movement's never-lock-on list; revision 36: doors, trapdoors and fence gates send their section to Skyrim again the moment their state changes, by any route, and the Fabric side watches every openable block each frame; walking up stairs, slabs and carpets lifts the player onto the step as Minecraft does, bStepUp in SkyCraft.ini; revision 35: the collision model's blocks are now in Skyrim's own order, the shapes before the list that holds them: the list was built before its children existed, a null read at load in every section model; the body bytes now match Skyrim's own statics: the second collision response and callback delay were zero, which is response type INVALID, and the rolling friction was 1; revision 34: the plugin makes the shape library models at load and places odd blocks as references to them once a section model is proven; collision models on by default, the crates stay under you until a model is seen working; tools/make_collision_library.py builds the shape library from the catalogue, which the Fabric side now writes by itself; ShapeKey in Game.h; revision 33: the Fabric side can list every distinct collision shape in the game with -Dskycraft.dumpShapes=true, ShapeCatalog.java; revision 32: collision test models are now loaded one at a time, smallest first, with a LOADING line logged before each; the byte-shifted variants are gone; revision 31: collision shapes: the array headers inside the list and convex shapes are empty like Skyrim's own, which was a null read at load; revision 30: collision model body now matches Skyrim's own statics: fixed motion system, flags 129 and 130; revision 29: collision models are off by default, a copy of vanilla models is made to see their layout; revision 28: section models are written into files made at plugin load, because Skyrim only loads model files that existed when it started; revision 27: smaller test models and copies of loose models tried too; revision 26: block model variants tried side by side, the first Skyrim loads is used; revision 25: exact block shapes: no padding on doors, stairs and other non-cube blocks, up to 16 boxes per block; a probe in the log tells a rejected .nif from a form that can't load models; revision 24: block collision models checked in the Havok world, crates kept until they work; lock-on survives a missing frame; revision 23: section models of merged boxes loaded as invisible statics over the whole area Minecraft sent; revision 22: crates only, the box simulation that held the Skyrim player is gone; Minecraft's mobs, passive ones too, are lock-on targets again, handed to True Directional Movement as virtual targets; revision 21: mob stand-ins removed)");
++	logger::info("patch revision 38 (mob stand-ins restored to the earlier, steadier version (health 1:1, damage guard, revival, 20 Hz positions from Fabric) on top of the collision and lock-on work; lock-on stays LockOn.cpp, with the stand-ins on its never-lock-on list; revision 37: mob stand-ins are back: invisible Skyrim actors for Minecraft mobs so NPCs fight them and spells hurt the mob; they sit exactly on the mob's feet at its height, stay in every control mode, and are on True Directional Movement's never-lock-on list; revision 36: doors, trapdoors and fence gates send their section to Skyrim again the moment their state changes, by any route, and the Fabric side watches every openable block each frame; walking up stairs, slabs and carpets lifts the player onto the step as Minecraft does, bStepUp in SkyCraft.ini; revision 35: the collision model's blocks are now in Skyrim's own order, the shapes before the list that holds them: the list was built before its children existed, a null read at load in every section model; the body bytes now match Skyrim's own statics: the second collision response and callback delay were zero, which is response type INVALID, and the rolling friction was 1; revision 34: the plugin makes the shape library models at load and places odd blocks as references to them once a section model is proven; collision models on by default, the crates stay under you until a model is seen working; tools/make_collision_library.py builds the shape library from the catalogue, which the Fabric side now writes by itself; ShapeKey in Game.h; revision 33: the Fabric side can list every distinct collision shape in the game with -Dskycraft.dumpShapes=true, ShapeCatalog.java; revision 32: collision test models are now loaded one at a time, smallest first, with a LOADING line logged before each; the byte-shifted variants are gone; revision 31: collision shapes: the array headers inside the list and convex shapes are empty like Skyrim's own, which was a null read at load; revision 30: collision model body now matches Skyrim's own statics: fixed motion system, flags 129 and 130; revision 29: collision models are off by default, a copy of vanilla models is made to see their layout; revision 28: section models are written into files made at plugin load, because Skyrim only loads model files that existed when it started; revision 27: smaller test models and copies of loose models tried too; revision 26: block model variants tried side by side, the first Skyrim loads is used; revision 25: exact block shapes: no padding on doors, stairs and other non-cube blocks, up to 16 boxes per block; a probe in the log tells a rejected .nif from a form that can't load models; revision 24: block collision models checked in the Havok world, crates kept until they work; lock-on survives a missing frame; revision 23: section models of merged boxes loaded as invisible statics over the whole area Minecraft sent; revision 22: crates only, the box simulation that held the Skyrim player is gone; Minecraft's mobs, passive ones too, are lock-on targets again, handed to True Directional Movement as virtual targets; revision 21: mob stand-ins removed)");
 +	skycraft::BlockCollision::PrepareFiles();
  	SKSE::GetMessagingInterface()->RegisterListener(OnMessage);
  	// As early as possible: Minecraft takes about as long to start as Skyrim does to reach its menu.
