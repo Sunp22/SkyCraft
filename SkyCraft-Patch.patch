@@ -4018,7 +4018,7 @@ new file mode 100644
 index 0000000..d188f10
 --- /dev/null
 +++ b/skse/src/BlockCollision.cpp
-@@ -0,0 +1,1307 @@
+@@ -0,0 +1,1308 @@
 +#include "Game.h"
 +#include "CollisionNif.h"
 +
@@ -5190,6 +5190,7 @@ index 0000000..d188f10
 +					lib.clear();  // only odd shapes in this section: a section model of their boxes is simpler than a reference for each
 +					BuildBoxes(s.sx, s.sy, s.sz, cfg.overlap, boxes);
 +				}
++				logger::info("Block collision: rebuilding ({}, {}, {}) from stamp {}: {} boxes, {} library blocks", s.sx, s.sy, s.sz, s.stamp, boxes.size(), lib.size());
 +				if (boxes.empty()) {
 +					// Nothing solid after all: any old mesh goes.
 +					if (auto it = meshes.find(mapKey); it != meshes.end()) {
@@ -9681,7 +9682,7 @@ index 5e25a7d..45b9bec 100644
  		}
  
  		std::uint32_t Generation() { return solidsGeneration.load(); }
-@@ -120,6 +170,135 @@ namespace skycraft
+@@ -120,6 +170,136 @@ namespace skycraft
  			}
  		}
  
@@ -9804,6 +9805,7 @@ index 5e25a7d..45b9bec 100644
 +			}
 +			std::unique_lock lock(solidsLock);
 +			++solidsGeneration;
++			logger::info("shapes: section ({}, {}, {}) now holds {} non-cube blocks (generation {})", hdr->sx, hdr->sy, hdr->sz, parsed.size(), solidsGeneration.load());
 +			if (parsed.empty()) {
 +				shapes.erase(key);
 +			} else {
@@ -9817,7 +9819,7 @@ index 5e25a7d..45b9bec 100644
  		bool SolidAt(std::int32_t a_x, std::int32_t a_y, std::int32_t a_z)
  		{
  			std::shared_lock lock(solidsLock);
-@@ -158,7 +337,7 @@ namespace skycraft
+@@ -158,7 +338,7 @@ namespace skycraft
  			for (auto& handle : lists->highActorHandles) {
  				auto actorPtr = handle.get();
  				auto* actor = actorPtr.get();
@@ -9826,7 +9828,7 @@ index 5e25a7d..45b9bec 100644
  					continue;
  				}
  				const auto   sky = actor->GetPosition();
-@@ -169,37 +348,15 @@ namespace skycraft
+@@ -169,37 +349,15 @@ namespace skycraft
  				const int y0 = int(std::floor(mc.y + 0.3)), y1 = int(std::floor(mc.y + h - 0.1));
  				double    cx = mc.x, cz = mc.z;
  				bool      moved = false;
@@ -9872,7 +9874,7 @@ index 5e25a7d..45b9bec 100644
  					}
  					if (std::abs(pushX) < 1e-4 && std::abs(pushZ) < 1e-4) {
  						break;
-@@ -251,4 +408,189 @@ namespace skycraft
+@@ -251,4 +409,189 @@ namespace skycraft
  			}
  		}
  	}
