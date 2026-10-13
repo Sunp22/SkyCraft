@@ -443,7 +443,7 @@ index 9f3b180..3853275 100644
  	}
  }
 diff --git a/fabric/src/client/java/dev/skycraft/client/render/WorldExporter.java b/fabric/src/client/java/dev/skycraft/client/render/WorldExporter.java
-index 9f909ce..5240d18 100644
+index 9f909ce..ac655ad 100644
 --- a/fabric/src/client/java/dev/skycraft/client/render/WorldExporter.java
 +++ b/fabric/src/client/java/dev/skycraft/client/render/WorldExporter.java
 @@ -44,6 +44,7 @@ import net.minecraft.world.level.CardinalLighting;
@@ -454,7 +454,7 @@ index 9f909ce..5240d18 100644
  import net.minecraft.world.level.chunk.LevelChunk;
  import net.minecraft.world.level.chunk.LevelChunkSection;
  import net.minecraft.world.level.chunk.status.ChunkStatus;
-@@ -62,14 +63,20 @@ import net.minecraft.world.phys.shapes.VoxelShape;
+@@ -62,14 +63,22 @@ import net.minecraft.world.phys.shapes.VoxelShape;
   */
  public final class WorldExporter {
  	private static final int SECTIONS_PER_FRAME = 12;
@@ -467,6 +467,8 @@ index 9f909ce..5240d18 100644
 +	private static final LongOpenHashSet SHAPE = new LongOpenHashSet(); // sections Skyrim holds exact block shapes for
 +	private static final ByteBuffer SHAPES = ByteBuffer.allocate(4096 * (3 + MAX_SHAPE_BOXES * 6)).order(ByteOrder.LITTLE_ENDIAN);
  	private static final LongOpenHashSet SOLID = new LongOpenHashSet(); // sections Skyrim holds NPC collision for
++	// What the solids and shapes of each section were when last sent: a section sent again with the same collision does not make Skyrim rebuild its collision model.
++	private static final it.unimi.dsi.fastutil.longs.Long2LongOpenHashMap COLLISION_HASH = new it.unimi.dsi.fastutil.longs.Long2LongOpenHashMap();
  	private static final long[] SOLID_BITS = new long[64]; // 4096 blocks: bit x + 16z + 256y
  	private static final LongOpenHashSet DUG = new LongOpenHashSet(); // sections Skyrim holds dug cells for
 +	// Doors, trapdoors, fence gates and the like (anything with an "open" state), per section, with the state each had when the section was
@@ -475,7 +477,7 @@ index 9f909ce..5240d18 100644
  	private static final ByteBuffer LIGHTS = ByteBuffer.allocate(16 * 16 * 16 * 8).order(ByteOrder.LITTLE_ENDIAN);
  	private static int sentGeneration = Integer.MIN_VALUE;
  	private static int meshesSent;
-@@ -87,6 +94,79 @@ public final class WorldExporter {
+@@ -87,6 +96,79 @@ public final class WorldExporter {
  	private WorldExporter() {
  	}
  
@@ -555,7 +557,7 @@ index 9f909ce..5240d18 100644
  	public static void markDirty(int sx, int sy, int sz) {
  		synchronized (DIRTY) {
  			DIRTY.add(SectionPos.asLong(sx, sy, sz));
-@@ -108,6 +188,7 @@ public final class WorldExporter {
+@@ -108,6 +190,7 @@ public final class WorldExporter {
  		if (sentGeneration != SkyLink.generation() || sentLevel != level || atlas == null || atlas.stale(minecraft)) {
  			resendEverything(minecraft, level);
  		}
@@ -563,17 +565,18 @@ index 9f909ce..5240d18 100644
  		meshDirtySections(level);
  		// Animated textures (water, lava, fire, ...): the frame for this game tick.
  		atlas.animate(level.getGameTime(), region -> {
-@@ -136,7 +217,9 @@ public final class WorldExporter {
+@@ -136,7 +219,10 @@ public final class WorldExporter {
  		SENT.clear();
  		LIT.clear();
  		SOLID.clear();
 +		SHAPE.clear();
++		COLLISION_HASH.clear();
  		DUG.clear();
 +		OPENABLES.clear();
  		dev.skycraft.client.SkyDigClient.resendAll();
  		// Everything already loaded needs meshing again; later chunk loads mark themselves dirty.
  		int radius = minecraft.options.getEffectiveRenderDistance() + 1;
-@@ -190,6 +273,9 @@ public final class WorldExporter {
+@@ -190,6 +276,9 @@ public final class WorldExporter {
  		}
  		LevelChunkSection section = sectionAt(level, chunk, sy);
  		boolean empty = section == null || section.hasOnlyAir();
@@ -583,7 +586,7 @@ index 9f909ce..5240d18 100644
  		long[] dug = dev.skycraft.client.SkyDigClient.dugBits(chunk, sy);
  		int dugCount = 0;
  		if (dug != null) {
-@@ -205,7 +291,11 @@ public final class WorldExporter {
+@@ -205,7 +294,11 @@ public final class WorldExporter {
  		int lightCount = 0;
  		java.util.Arrays.fill(SOLID_BITS, 0L);
  		int solidCount = 0;
@@ -595,7 +598,7 @@ index 9f909ce..5240d18 100644
  		if (!empty) {
  			BlockPos origin = SectionPos.of(sx, sy, sz).origin();
  			BlockPos.MutableBlockPos pos = new BlockPos.MutableBlockPos();
-@@ -217,11 +307,34 @@ public final class WorldExporter {
+@@ -217,11 +310,34 @@ public final class WorldExporter {
  						if (state.isAir()) {
  							continue;
  						}
@@ -631,7 +634,7 @@ index 9f909ce..5240d18 100644
  						}
  						// Light-emitting blocks (torches, lava, glowstone, ...) light Skyrim's world too.
  						int emission = state.getLightEmission();
-@@ -245,6 +358,11 @@ public final class WorldExporter {
+@@ -245,6 +361,11 @@ public final class WorldExporter {
  				}
  			}
  		}
@@ -643,14 +646,44 @@ index 9f909ce..5240d18 100644
  		// Holes dug into Skyrim's ground: Minecraft walls where its surface still runs above them.
  		var digLookup = dev.skycraft.world.SkyDig.clientDug;
  		if (dugCount > 0 && digLookup != null) {
-@@ -288,6 +406,17 @@ public final class WorldExporter {
+@@ -272,7 +393,19 @@ public final class WorldExporter {
+ 					LIT.remove(key);
+ 				}
+ 			}
+-			if (solidCount > 0 || SOLID.contains(key)) {
++			long collisionHash = 0xCBF29CE484222325L ^ solidCount ^ ((long) shapeCount << 20);
++			for (long word : SOLID_BITS) {
++				collisionHash = (collisionHash ^ word) * 0x100000001B3L;
++				collisionHash ^= collisionHash >>> 29;
++			}
++			byte[] shapeBytes = SHAPES.array();
++			for (int i = 0, n = SHAPES.position(); i < n; i++) {
++				collisionHash = (collisionHash ^ shapeBytes[i]) * 0x100000001B3L;
++			}
++			boolean collisionSame = COLLISION_HASH.containsKey(key) && COLLISION_HASH.get(key) == collisionHash
++				&& (solidCount > 0) == SOLID.contains(key) && (shapeCount > 0) == SHAPE.contains(key);
++			boolean collisionSent = true;
++			if (!collisionSame && (solidCount > 0 || SOLID.contains(key))) {
+ 				ByteBuffer solidHeader = ByteBuffer.allocate(16).order(ByteOrder.LITTLE_ENDIAN).putInt(sx).putInt(sy).putInt(sz).putInt(solidCount).flip();
+ 				ByteBuffer bits = ByteBuffer.allocate(solidCount > 0 ? 512 : 0).order(ByteOrder.LITTLE_ENDIAN);
+ 				if (solidCount > 0) {
+@@ -281,6 +414,7 @@ public final class WorldExporter {
+ 					}
+ 				}
+ 				if (!SkyLink.writeRender(Proto.REN_SOLIDS, solidHeader, bits.flip())) {
++					collisionSent = false;
+ 					markDirty(sx, sy, sz);
+ 				} else if (solidCount > 0) {
+ 					SOLID.add(key);
+@@ -288,6 +422,21 @@ public final class WorldExporter {
  					SOLID.remove(key);
  				}
  			}
 +			// Exact shapes of the solid blocks that aren't whole cubes (after the solids, so they replace the cubes).
-+			if (shapeCount > 0 || SHAPE.contains(key)) {
++			if (!collisionSame && (shapeCount > 0 || SHAPE.contains(key))) {
 +				ByteBuffer shapeHeader = ByteBuffer.allocate(16).order(ByteOrder.LITTLE_ENDIAN).putInt(sx).putInt(sy).putInt(sz).putInt(shapeCount).flip();
 +				if (!SkyLink.writeRender(Proto.REN_SHAPES, shapeHeader, SHAPES.flip())) {
++					collisionSent = false;
 +					markDirty(sx, sy, sz);
 +				} else if (shapeCount > 0) {
 +					SHAPE.add(key);
@@ -658,10 +691,13 @@ index 9f909ce..5240d18 100644
 +					SHAPE.remove(key);
 +				}
 +			}
++			if (collisionSent && !collisionSame) {
++				COLLISION_HASH.put(key, collisionHash);
++			}
  			// Cells dug out of Skyrim's world: its geometry there goes.
  			if (dugCount > 0 || DUG.contains(key)) {
  				ByteBuffer dugHeader = ByteBuffer.allocate(24).order(ByteOrder.LITTLE_ENDIAN).putInt(sx).putInt(sy).putInt(sz).putInt(dugCount)
-@@ -315,8 +444,33 @@ public final class WorldExporter {
+@@ -315,8 +464,33 @@ public final class WorldExporter {
  		return true;
  	}
  
@@ -695,7 +731,7 @@ index 9f909ce..5240d18 100644
  		Vec3 eye = minecraft.player.getEyePosition(partialTick);
  		for (Entity e : level.entitiesForRendering()) {
  			if (ENTITIES.size() >= Proto.MAX_WORLD_ENTITIES || e.distanceToSqr(eye) > ENTITY_RANGE * ENTITY_RANGE) {
-@@ -344,6 +498,14 @@ public final class WorldExporter {
+@@ -344,6 +518,14 @@ public final class WorldExporter {
  				&& (e != minecraft.player || minecraft.gameRenderer.mainCamera().isDetached())) {
  				// Players and mobs: Skyrim darkens the ground softly under their feet.
  				ENTITIES.add(new SkyLink.WorldEntity(Proto.WE_SHADOW, e.getId(), (float) p.x, (float) p.y, (float) p.z, 0.0F, 0.0F, e.getBbWidth(), null, null, 0));
@@ -710,7 +746,7 @@ index 9f909ce..5240d18 100644
  			}
  		}
  		addCracks(level);
-@@ -651,4 +813,9 @@ public final class WorldExporter {
+@@ -651,4 +833,9 @@ public final class WorldExporter {
  			return this;
  		}
  	}
@@ -10926,7 +10962,7 @@ index b877ae5..36666dc 100644
  				logger::info("in-frame block drawing: hooked after Main::RenderWorld");
  			}
 diff --git a/skse/src/main.cpp b/skse/src/main.cpp
-index eb548b4..35da7a8 100644
+index eb548b4..df6d1d2 100644
 --- a/skse/src/main.cpp
 +++ b/skse/src/main.cpp
 @@ -21,6 +21,9 @@ namespace
@@ -10951,7 +10987,7 @@ index eb548b4..35da7a8 100644
  	SetupLog();
  	skycraft::CrashLog::Install();
  	logger::info("SkyCraft {} loading (runtime {})", "0.1.2", a_skse->RuntimeVersion().string());
-+	logger::info("patch revision 39 (open doors, trapdoors and fence gates have no collision in Skyrim; each open/close is logged on the Minecraft side; revision 38: mob stand-ins restored to the earlier, steadier version (health 1:1, damage guard, revival, 20 Hz positions from Fabric) on top of the collision and lock-on work; lock-on stays LockOn.cpp, with the stand-ins on its never-lock-on list; revision 37: mob stand-ins are back: invisible Skyrim actors for Minecraft mobs so NPCs fight them and spells hurt the mob; they sit exactly on the mob's feet at its height, stay in every control mode, and are on True Directional Movement's never-lock-on list; revision 36: doors, trapdoors and fence gates send their section to Skyrim again the moment their state changes, by any route, and the Fabric side watches every openable block each frame; walking up stairs, slabs and carpets lifts the player onto the step as Minecraft does, bStepUp in SkyCraft.ini; revision 35: the collision model's blocks are now in Skyrim's own order, the shapes before the list that holds them: the list was built before its children existed, a null read at load in every section model; the body bytes now match Skyrim's own statics: the second collision response and callback delay were zero, which is response type INVALID, and the rolling friction was 1; revision 34: the plugin makes the shape library models at load and places odd blocks as references to them once a section model is proven; collision models on by default, the crates stay under you until a model is seen working; tools/make_collision_library.py builds the shape library from the catalogue, which the Fabric side now writes by itself; ShapeKey in Game.h; revision 33: the Fabric side can list every distinct collision shape in the game with -Dskycraft.dumpShapes=true, ShapeCatalog.java; revision 32: collision test models are now loaded one at a time, smallest first, with a LOADING line logged before each; the byte-shifted variants are gone; revision 31: collision shapes: the array headers inside the list and convex shapes are empty like Skyrim's own, which was a null read at load; revision 30: collision model body now matches Skyrim's own statics: fixed motion system, flags 129 and 130; revision 29: collision models are off by default, a copy of vanilla models is made to see their layout; revision 28: section models are written into files made at plugin load, because Skyrim only loads model files that existed when it started; revision 27: smaller test models and copies of loose models tried too; revision 26: block model variants tried side by side, the first Skyrim loads is used; revision 25: exact block shapes: no padding on doors, stairs and other non-cube blocks, up to 16 boxes per block; a probe in the log tells a rejected .nif from a form that can't load models; revision 24: block collision models checked in the Havok world, crates kept until they work; lock-on survives a missing frame; revision 23: section models of merged boxes loaded as invisible statics over the whole area Minecraft sent; revision 22: crates only, the box simulation that held the Skyrim player is gone; Minecraft's mobs, passive ones too, are lock-on targets again, handed to True Directional Movement as virtual targets; revision 21: mob stand-ins removed)");
++	logger::info("patch revision 40 (a section sent again with the same collision no longer makes Skyrim rebuild its collision model, so the sections beside a door stop being rebuilt many times a second and a door change shows at once; revision 39: open doors, trapdoors and fence gates have no collision in Skyrim; each open/close is logged on the Minecraft side; revision 38: mob stand-ins restored to the earlier, steadier version (health 1:1, damage guard, revival, 20 Hz positions from Fabric) on top of the collision and lock-on work; lock-on stays LockOn.cpp, with the stand-ins on its never-lock-on list; revision 37: mob stand-ins are back: invisible Skyrim actors for Minecraft mobs so NPCs fight them and spells hurt the mob; they sit exactly on the mob's feet at its height, stay in every control mode, and are on True Directional Movement's never-lock-on list; revision 36: doors, trapdoors and fence gates send their section to Skyrim again the moment their state changes, by any route, and the Fabric side watches every openable block each frame; walking up stairs, slabs and carpets lifts the player onto the step as Minecraft does, bStepUp in SkyCraft.ini; revision 35: the collision model's blocks are now in Skyrim's own order, the shapes before the list that holds them: the list was built before its children existed, a null read at load in every section model; the body bytes now match Skyrim's own statics: the second collision response and callback delay were zero, which is response type INVALID, and the rolling friction was 1; revision 34: the plugin makes the shape library models at load and places odd blocks as references to them once a section model is proven; collision models on by default, the crates stay under you until a model is seen working; tools/make_collision_library.py builds the shape library from the catalogue, which the Fabric side now writes by itself; ShapeKey in Game.h; revision 33: the Fabric side can list every distinct collision shape in the game with -Dskycraft.dumpShapes=true, ShapeCatalog.java; revision 32: collision test models are now loaded one at a time, smallest first, with a LOADING line logged before each; the byte-shifted variants are gone; revision 31: collision shapes: the array headers inside the list and convex shapes are empty like Skyrim's own, which was a null read at load; revision 30: collision model body now matches Skyrim's own statics: fixed motion system, flags 129 and 130; revision 29: collision models are off by default, a copy of vanilla models is made to see their layout; revision 28: section models are written into files made at plugin load, because Skyrim only loads model files that existed when it started; revision 27: smaller test models and copies of loose models tried too; revision 26: block model variants tried side by side, the first Skyrim loads is used; revision 25: exact block shapes: no padding on doors, stairs and other non-cube blocks, up to 16 boxes per block; a probe in the log tells a rejected .nif from a form that can't load models; revision 24: block collision models checked in the Havok world, crates kept until they work; lock-on survives a missing frame; revision 23: section models of merged boxes loaded as invisible statics over the whole area Minecraft sent; revision 22: crates only, the box simulation that held the Skyrim player is gone; Minecraft's mobs, passive ones too, are lock-on targets again, handed to True Directional Movement as virtual targets; revision 21: mob stand-ins removed)");
 +	skycraft::BlockCollision::PrepareFiles();
  	SKSE::GetMessagingInterface()->RegisterListener(OnMessage);
  	// As early as possible: Minecraft takes about as long to start as Skyrim does to reach its menu.
