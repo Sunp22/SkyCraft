@@ -107,6 +107,53 @@ jobs:
           print("Open doors now have no collision in Skyrim.")
           PYEOF
 
+      # A section whose solids and shapes are the same as last time is not sent as collision again, so Skyrim does not rebuild its collision model
+      # (the sections beside a door were re-sent and rebuilt many times a second, which kept the door's own section waiting). SkyCraft-Patch.patch
+      # already has this; it is repeated here for a source that has an earlier SkyCraft-Patch.patch committed. Does nothing when the source has it.
+      - name: Make sure unchanged sections are not rebuilt in Skyrim
+        shell: bash
+        run: |
+          py=python3; command -v python3 >/dev/null 2>&1 || py=python
+          "$py" - <<'PYEOF'
+          import sys
+          p = "fabric/src/client/java/dev/skycraft/client/render/WorldExporter.java"
+          s = open(p, encoding="utf-8", newline="").read()
+          m = "skse/src/main.cpp"
+          t = open(m, encoding="utf-8", newline="").read()
+          if "patch revision 40 (" not in t:
+              t = t.replace("patch revision 39 (", "patch revision 40 (a section sent again with the same collision no longer makes Skyrim rebuild its collision model, so the sections beside a door stop being rebuilt many times a second and a door change shows at once; revision 39: ", 1)
+              open(m, "w", encoding="utf-8", newline="").write(t)
+          if "COLLISION_HASH" in s:
+              print("Unchanged sections are already not re-sent as collision; nothing to do.")
+              sys.exit(0)
+          nl = "\r\n" if "\r\n" in s else "\n"
+          s = s.replace("\r\n", "\n")
+          reps = [
+              ('\tprivate static final long[] SOLID_BITS = new long[64];',
+               '\t// What the solids and shapes of each section were when last sent: a section sent again with the same collision does not make Skyrim rebuild its collision model.\n\tprivate static final it.unimi.dsi.fastutil.longs.Long2LongOpenHashMap COLLISION_HASH = new it.unimi.dsi.fastutil.longs.Long2LongOpenHashMap();\n\tprivate static final long[] SOLID_BITS = new long[64];'),
+              ('\t\tSOLID.clear();\n\t\tSHAPE.clear();',
+               '\t\tSOLID.clear();\n\t\tSHAPE.clear();\n\t\tCOLLISION_HASH.clear();'),
+              ('\t\t\tif (solidCount > 0 || SOLID.contains(key)) {\n\t\t\t\tByteBuffer solidHeader',
+               '\t\t\tlong collisionHash = 0xCBF29CE484222325L ^ solidCount ^ ((long) shapeCount << 20);\n\t\t\tfor (long word : SOLID_BITS) {\n\t\t\t\tcollisionHash = (collisionHash ^ word) * 0x100000001B3L;\n\t\t\t\tcollisionHash ^= collisionHash >>> 29;\n\t\t\t}\n\t\t\tbyte[] shapeBytes = SHAPES.array();\n\t\t\tfor (int i = 0, n = SHAPES.position(); i < n; i++) {\n\t\t\t\tcollisionHash = (collisionHash ^ shapeBytes[i]) * 0x100000001B3L;\n\t\t\t}\n\t\t\tboolean collisionSame = COLLISION_HASH.containsKey(key) && COLLISION_HASH.get(key) == collisionHash\n\t\t\t\t&& (solidCount > 0) == SOLID.contains(key) && (shapeCount > 0) == SHAPE.contains(key);\n\t\t\tboolean collisionSent = true;\n\t\t\tif (!collisionSame && (solidCount > 0 || SOLID.contains(key))) {\n\t\t\t\tByteBuffer solidHeader'),
+              ('\t\t\t\tif (!SkyLink.writeRender(Proto.REN_SOLIDS, solidHeader, bits.flip())) {\n\t\t\t\t\tmarkDirty(sx, sy, sz);',
+               '\t\t\t\tif (!SkyLink.writeRender(Proto.REN_SOLIDS, solidHeader, bits.flip())) {\n\t\t\t\t\tcollisionSent = false;\n\t\t\t\t\tmarkDirty(sx, sy, sz);'),
+              ('\t\t\tif (shapeCount > 0 || SHAPE.contains(key)) {\n\t\t\t\tByteBuffer shapeHeader',
+               '\t\t\tif (!collisionSame && (shapeCount > 0 || SHAPE.contains(key))) {\n\t\t\t\tByteBuffer shapeHeader'),
+              ('\t\t\t\tif (!SkyLink.writeRender(Proto.REN_SHAPES, shapeHeader, SHAPES.flip())) {\n\t\t\t\t\tmarkDirty(sx, sy, sz);',
+               '\t\t\t\tif (!SkyLink.writeRender(Proto.REN_SHAPES, shapeHeader, SHAPES.flip())) {\n\t\t\t\t\tcollisionSent = false;\n\t\t\t\t\tmarkDirty(sx, sy, sz);'),
+              ("\t\t\t// Cells dug out of Skyrim's world: its geometry there goes.",
+               "\t\t\tif (collisionSent && !collisionSame) {\n\t\t\t\tCOLLISION_HASH.put(key, collisionHash);\n\t\t\t}\n\t\t\t// Cells dug out of Skyrim's world: its geometry there goes."),
+          ]
+          for a, b in reps:
+              if s.count(a) != 1:
+                  print("::error::WorldExporter.java is not what the collision de-duplication edit expects; not applied.")
+                  sys.exit(1)
+          for a, b in reps:
+              s = s.replace(a, b, 1)
+          open(p, "w", encoding="utf-8", newline="").write(s.replace("\n", nl))
+          print("A section with unchanged collision is no longer sent to Skyrim again.")
+          PYEOF
+
       # A repo made from "Download ZIP" has no submodule contents. Fetch CommonLibSSE-NG ourselves
       # then (the branch's latest commit, not the exact one the author built with).
       - name: Make sure CommonLibSSE-NG is there
