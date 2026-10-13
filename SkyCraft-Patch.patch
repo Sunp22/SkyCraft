@@ -2619,10 +2619,10 @@ index 0000000..9f18d6b
 +}
 diff --git a/fabric/src/main/java/dev/skycraft/combat/SkyrimSwings.java b/fabric/src/main/java/dev/skycraft/combat/SkyrimSwings.java
 new file mode 100644
-index 0000000..258911a
+index 0000000..7cd4df6
 --- /dev/null
 +++ b/fabric/src/main/java/dev/skycraft/combat/SkyrimSwings.java
-@@ -0,0 +1,148 @@
+@@ -0,0 +1,151 @@
 +package dev.skycraft.combat;
 +
 +import dev.skycraft.SkyCraft;
@@ -2690,6 +2690,9 @@ index 0000000..258911a
 +	public static void proxyHurt(ServerPlayer player, int mobId, float skyrimDamage, boolean byPlayer) {
 +		ServerLevel level = player.level();
 +		if (!(level.getEntity(mobId) instanceof Mob mob) || !mob.isAlive() || skyrimDamage <= 0.0F) {
++			if (proxyLogs++ < 60) {
++				SkyCraft.LOG.info("SkyCraft: Skyrim hurt stand-in of mob {} for {}, but there is no live mob to take it", mobId, skyrimDamage);
++			}
 +			return;
 +		}
 +		if (byPlayer) {
@@ -4038,7 +4041,7 @@ index 92b585a..193b6bc 100644
 +fRange = 40
 diff --git a/skse/src/BlockCollision.cpp b/skse/src/BlockCollision.cpp
 new file mode 100644
-index 0000000..a04839a
+index 0000000..4192d18
 --- /dev/null
 +++ b/skse/src/BlockCollision.cpp
 @@ -0,0 +1,1311 @@
@@ -4309,9 +4312,9 @@ index 0000000..a04839a
 +
 +			const double U = proto::kUnitsPerBlock;
 +			auto         emit = [&](const float a_lo[3], const float a_hi[3], float a_pad) {
-+                // (Minecraft: x east, y up, z south.) Merged whole cubes are a little wider on the sides and underneath (the top left exactly at
++                // (Minecraft: x east, y up, z south.) Merged whole cubes are a little wider on the sides only (the top and underside left exactly at
 +                // the block's top) so neighbours leave no seam. Every other shape is Minecraft's exact box: a door stays 3/16 thick.
-+				const float lo[3] = { a_lo[0] - a_pad, a_lo[1] - a_pad, a_lo[2] - a_pad };
++				const float lo[3] = { a_lo[0] - a_pad, a_lo[1], a_lo[2] - a_pad };
 +				const float hi[3] = { a_hi[0] + a_pad, a_hi[1], a_hi[2] + a_pad };
 +				collisionnif::Box b;
 +				b.lo[0] = float((lo[0] - x0) * U);
@@ -6158,7 +6161,7 @@ index 0000000..e2e734d
 +	}
 +}
 diff --git a/skse/src/Combat.cpp b/skse/src/Combat.cpp
-index 0954b7f..636efcd 100644
+index 0954b7f..88a7c9e 100644
 --- a/skse/src/Combat.cpp
 +++ b/skse/src/Combat.cpp
 @@ -1,5 +1,8 @@
@@ -6368,7 +6371,7 @@ index 0954b7f..636efcd 100644
  				const auto mc = SkyToMc(pos);
  				r.x = static_cast<float>(mc.x);
  				r.y = static_cast<float>(mc.y);
-@@ -240,161 +395,1894 @@ namespace skycraft
+@@ -240,161 +395,1901 @@ namespace skycraft
  				logger::warn("hit pipeline: melee call site doesn't match this game build; using plain damage");
  				return;
  			}
@@ -6504,6 +6507,13 @@ index 0954b7f..636efcd 100644
 +					// mob (proxyOverkill, see AbsorbProxyDamage), and the stand-in loses exactly what the mob then loses.
 +					const float size = std::fabs(a_damage);
 +					if (size > 0.0f) {
++						// Diagnostic: every blow that reaches a stand-in, and who threw it (does an NPC's swing ever connect?).
++						static int seen = 0;
++						if (seen++ < 60) {
++							logger::info("Blow on stand-in ({:08X}): {:.1f} damage from '{}' ({:08X}){}", a_this->GetFormID(), size,
++								a_attacker ? a_attacker->GetDisplayFullName() : "nobody", a_attacker ? a_attacker->GetFormID() : 0u,
++								a_attacker && a_attacker->IsPlayerRef() ? " (the player)" : "");
++						}
 +						proxyOverkill[a_this->GetFormID()] += size;
 +						a_damage = 0.0f;
 +					}
@@ -8385,7 +8395,7 @@ index 0954b7f..636efcd 100644
  		}
  
  		void KillPlayer(RE::PlayerCharacter* a_player, const proto::McEvent& a_ev)
-@@ -580,7 +2468,7 @@ namespace skycraft
+@@ -580,7 +2475,7 @@ namespace skycraft
  			for (auto& handle : lists->highActorHandles) {
  				auto actorPtr = handle.get();
  				auto* actor = actorPtr.get();
@@ -8394,7 +8404,7 @@ index 0954b7f..636efcd 100644
  					continue;
  				}
  				const auto hazard = HazardAtActor(actor);
-@@ -698,6 +2586,7 @@ namespace skycraft
+@@ -698,6 +2593,7 @@ namespace skycraft
  			RE::NiPoint3 center;
  			float        radius;  // Minecraft blocks
  			float        delay;   // seconds: after the blast's damage has landed
@@ -8402,7 +8412,7 @@ index 0954b7f..636efcd 100644
  		};
  		std::vector<PendingExplosion> pendingExplosions;
  
-@@ -786,6 +2675,9 @@ namespace skycraft
+@@ -786,6 +2682,9 @@ namespace skycraft
  					continue;
  				}
  				if (auto* actor = ref->As<RE::Actor>()) {
@@ -8412,7 +8422,7 @@ index 0954b7f..636efcd 100644
  					if (!actor->IsDead()) {
  						if (auto* process = actor->GetActorRuntimeData().currentProcess) {
  							process->KnockExplosion(actor, a_blast.center, 25.0f * falloff * power);
-@@ -830,6 +2722,183 @@ namespace skycraft
+@@ -830,6 +2729,183 @@ namespace skycraft
  			}
  			logger::info("Minecraft explosion (radius {:.1f}): knocked {} people away, threw {} objects", a_blast.radius, people, objects);
  		}
@@ -8596,7 +8606,7 @@ index 0954b7f..636efcd 100644
  	}
  
  	namespace Combat
-@@ -838,8 +2907,15 @@ namespace skycraft
+@@ -838,8 +2914,15 @@ namespace skycraft
  		{
  			REL::Relocation<std::uintptr_t> vtbl{ RE::VTABLE_PlayerCharacter[0] };
  			HandleHealthDamageHook::func = vtbl.write_vfunc(0x104, HandleHealthDamageHook::thunk);
@@ -8612,7 +8622,7 @@ index 0954b7f..636efcd 100644
  			}
  			ResolveHitPipeline();
  			logger::info("combat hooks installed");
-@@ -854,20 +2930,66 @@ namespace skycraft
+@@ -854,20 +2937,66 @@ namespace skycraft
  				}
  				healthPrimed = false;
  				engaged = false;
@@ -8685,7 +8695,7 @@ index 0954b7f..636efcd 100644
  			SetEssential(a_player, true);
  			WriteActorTable(a_player);
  			engagedTimer -= a_delta;
-@@ -878,29 +3000,11 @@ namespace skycraft
+@@ -878,29 +3007,11 @@ namespace skycraft
  
  			proto::McEvent ev;
  			while (link.PopEvent(ev)) {
@@ -8718,7 +8728,7 @@ index 0954b7f..636efcd 100644
  			for (auto it = pendingExplosions.begin(); it != pendingExplosions.end();) {
  				it->delay -= a_delta;
  				if (it->delay <= 0.0f) {
-@@ -924,5 +3028,16 @@ namespace skycraft
+@@ -924,5 +3035,16 @@ namespace skycraft
  		}
  
  		bool PlayerEngaged() { return engaged; }
@@ -10969,7 +10979,7 @@ index b877ae5..36666dc 100644
  				logger::info("in-frame block drawing: hooked after Main::RenderWorld");
  			}
 diff --git a/skse/src/main.cpp b/skse/src/main.cpp
-index eb548b4..0d9749f 100644
+index eb548b4..f127a75 100644
 --- a/skse/src/main.cpp
 +++ b/skse/src/main.cpp
 @@ -21,6 +21,9 @@ namespace
@@ -10994,7 +11004,7 @@ index eb548b4..0d9749f 100644
  	SetupLog();
  	skycraft::CrashLog::Install();
  	logger::info("SkyCraft {} loading (runtime {})", "0.1.2", a_skse->RuntimeVersion().string());
-+	logger::info("patch revision 41 (only doors, trapdoors and fence gates lose their collision when open (a barrel has an open state too and stays solid); every change of a section that Skyrim takes up is logged; revision 40: a section sent again with the same collision no longer makes Skyrim rebuild its collision model, so the sections beside a door stop being rebuilt many times a second and a door change shows at once; revision 39: open doors, trapdoors and fence gates have no collision in Skyrim; each open/close is logged on the Minecraft side; revision 38: mob stand-ins restored to the earlier, steadier version (health 1:1, damage guard, revival, 20 Hz positions from Fabric) on top of the collision and lock-on work; lock-on stays LockOn.cpp, with the stand-ins on its never-lock-on list; revision 37: mob stand-ins are back: invisible Skyrim actors for Minecraft mobs so NPCs fight them and spells hurt the mob; they sit exactly on the mob's feet at its height, stay in every control mode, and are on True Directional Movement's never-lock-on list; revision 36: doors, trapdoors and fence gates send their section to Skyrim again the moment their state changes, by any route, and the Fabric side watches every openable block each frame; walking up stairs, slabs and carpets lifts the player onto the step as Minecraft does, bStepUp in SkyCraft.ini; revision 35: the collision model's blocks are now in Skyrim's own order, the shapes before the list that holds them: the list was built before its children existed, a null read at load in every section model; the body bytes now match Skyrim's own statics: the second collision response and callback delay were zero, which is response type INVALID, and the rolling friction was 1; revision 34: the plugin makes the shape library models at load and places odd blocks as references to them once a section model is proven; collision models on by default, the crates stay under you until a model is seen working; tools/make_collision_library.py builds the shape library from the catalogue, which the Fabric side now writes by itself; ShapeKey in Game.h; revision 33: the Fabric side can list every distinct collision shape in the game with -Dskycraft.dumpShapes=true, ShapeCatalog.java; revision 32: collision test models are now loaded one at a time, smallest first, with a LOADING line logged before each; the byte-shifted variants are gone; revision 31: collision shapes: the array headers inside the list and convex shapes are empty like Skyrim's own, which was a null read at load; revision 30: collision model body now matches Skyrim's own statics: fixed motion system, flags 129 and 130; revision 29: collision models are off by default, a copy of vanilla models is made to see their layout; revision 28: section models are written into files made at plugin load, because Skyrim only loads model files that existed when it started; revision 27: smaller test models and copies of loose models tried too; revision 26: block model variants tried side by side, the first Skyrim loads is used; revision 25: exact block shapes: no padding on doors, stairs and other non-cube blocks, up to 16 boxes per block; a probe in the log tells a rejected .nif from a form that can't load models; revision 24: block collision models checked in the Havok world, crates kept until they work; lock-on survives a missing frame; revision 23: section models of merged boxes loaded as invisible statics over the whole area Minecraft sent; revision 22: crates only, the box simulation that held the Skyrim player is gone; Minecraft's mobs, passive ones too, are lock-on targets again, handed to True Directional Movement as virtual targets; revision 21: mob stand-ins removed)");
++	logger::info("patch revision 42 (damage diagnostics merged in: every blow that reaches a mob's stand-in is logged with who threw it, and Skyrim hits the Minecraft side cannot find a live mob for are logged; revision 41: only doors, trapdoors and fence gates lose their collision when open (a barrel has an open state too and stays solid); every change of a section that Skyrim takes up is logged; revision 40: a section sent again with the same collision no longer makes Skyrim rebuild its collision model, so the sections beside a door stop being rebuilt many times a second and a door change shows at once; revision 39: open doors, trapdoors and fence gates have no collision in Skyrim; each open/close is logged on the Minecraft side; revision 38: mob stand-ins restored to the earlier, steadier version (health 1:1, damage guard, revival, 20 Hz positions from Fabric) on top of the collision and lock-on work; lock-on stays LockOn.cpp, with the stand-ins on its never-lock-on list; revision 37: mob stand-ins are back: invisible Skyrim actors for Minecraft mobs so NPCs fight them and spells hurt the mob; they sit exactly on the mob's feet at its height, stay in every control mode, and are on True Directional Movement's never-lock-on list; revision 36: doors, trapdoors and fence gates send their section to Skyrim again the moment their state changes, by any route, and the Fabric side watches every openable block each frame; walking up stairs, slabs and carpets lifts the player onto the step as Minecraft does, bStepUp in SkyCraft.ini; revision 35: the collision model's blocks are now in Skyrim's own order, the shapes before the list that holds them: the list was built before its children existed, a null read at load in every section model; the body bytes now match Skyrim's own statics: the second collision response and callback delay were zero, which is response type INVALID, and the rolling friction was 1; revision 34: the plugin makes the shape library models at load and places odd blocks as references to them once a section model is proven; collision models on by default, the crates stay under you until a model is seen working; tools/make_collision_library.py builds the shape library from the catalogue, which the Fabric side now writes by itself; ShapeKey in Game.h; revision 33: the Fabric side can list every distinct collision shape in the game with -Dskycraft.dumpShapes=true, ShapeCatalog.java; revision 32: collision test models are now loaded one at a time, smallest first, with a LOADING line logged before each; the byte-shifted variants are gone; revision 31: collision shapes: the array headers inside the list and convex shapes are empty like Skyrim's own, which was a null read at load; revision 30: collision model body now matches Skyrim's own statics: fixed motion system, flags 129 and 130; revision 29: collision models are off by default, a copy of vanilla models is made to see their layout; revision 28: section models are written into files made at plugin load, because Skyrim only loads model files that existed when it started; revision 27: smaller test models and copies of loose models tried too; revision 26: block model variants tried side by side, the first Skyrim loads is used; revision 25: exact block shapes: no padding on doors, stairs and other non-cube blocks, up to 16 boxes per block; a probe in the log tells a rejected .nif from a form that can't load models; revision 24: block collision models checked in the Havok world, crates kept until they work; lock-on survives a missing frame; revision 23: section models of merged boxes loaded as invisible statics over the whole area Minecraft sent; revision 22: crates only, the box simulation that held the Skyrim player is gone; Minecraft's mobs, passive ones too, are lock-on targets again, handed to True Directional Movement as virtual targets; revision 21: mob stand-ins removed)");
 +	skycraft::BlockCollision::PrepareFiles();
  	SKSE::GetMessagingInterface()->RegisterListener(OnMessage);
  	// As early as possible: Minecraft takes about as long to start as Skyrim does to reach its menu.
