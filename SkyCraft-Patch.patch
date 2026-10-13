@@ -2749,7 +2749,7 @@ index 0000000..258911a
 +	}
 +}
 diff --git a/fabric/src/main/java/dev/skycraft/link/Proto.java b/fabric/src/main/java/dev/skycraft/link/Proto.java
-index 26b7fe6..f4312cf 100644
+index 26b7fe6..d70809c 100644
 --- a/fabric/src/main/java/dev/skycraft/link/Proto.java
 +++ b/fabric/src/main/java/dev/skycraft/link/Proto.java
 @@ -8,7 +8,7 @@ public final class Proto {
@@ -2827,7 +2827,16 @@ index 26b7fe6..f4312cf 100644
  	public static final int WEAPON_UNARMED = 0;
  	public static final int WEAPON_BLADE = 1;
  	public static final int WEAPON_AXE = 2;
-@@ -118,6 +156,7 @@ public final class Proto {
+@@ -100,6 +138,8 @@ public final class Proto {
+ 	public static final int WE_BLOCK = 4;
+ 	public static final int WE_CRACK = 5;
+ 	public static final int WE_SHADOW = 6;
++	public static final int WE_MOB = 7;
++	public static final int MOB_NAME_BYTES = 32;
+ 
+ 	// Render ring (relative to OFF_RENDER_RING)
+ 	public static final long RR_HEAD = 0x00;
+@@ -118,6 +158,7 @@ public final class Proto {
  	public static final int REN_RAGDOLL = 9;
  	public static final int REN_SOLIDS = 10;
  	public static final int REN_DUG = 11;
@@ -2835,7 +2844,7 @@ index 26b7fe6..f4312cf 100644
  	public static final int PART_HEAD = 1, PART_BODY = 2, PART_RIGHT_ARM = 3, PART_LEFT_ARM = 4, PART_RIGHT_LEG = 5, PART_LEFT_LEG = 6;
  	public static final int LIGHT_STEADY = 0, LIGHT_FLAME = 1, LIGHT_LAVA = 2;
  	public static final int REN_VERTEX_BYTES = 32;
-@@ -144,10 +183,14 @@ public final class Proto {
+@@ -144,10 +185,14 @@ public final class Proto {
  	public static final long SS_VIEWPORT_W = 0x34;
  	public static final long SS_VIEWPORT_H = 0x38;
  	public static final long SS_GAME_HOUR = 0x3C;
@@ -2850,7 +2859,7 @@ index 26b7fe6..f4312cf 100644
  
  	// McState (relative to OFF_MC_STATE)
  	public static final long MS_SEQ = 0x00;
-@@ -189,6 +232,7 @@ public final class Proto {
+@@ -189,6 +234,7 @@ public final class Proto {
  	public static final int MC_DEAD = 1 << 5;
  	public static final int MC_SWIMMING = 1 << 6;
  	public static final int MC_FLYING = 1 << 7;
@@ -3694,7 +3703,7 @@ index 5ea8e5b..ae3cf6e 100644
      "PressurePlateMixin",
      "ProjectileMixin",
 diff --git a/protocol/skycraft_protocol.h b/protocol/skycraft_protocol.h
-index fce6cf8..77bf3e0 100644
+index fce6cf8..913e8dd 100644
 --- a/protocol/skycraft_protocol.h
 +++ b/protocol/skycraft_protocol.h
 @@ -13,7 +13,7 @@
@@ -3824,7 +3833,26 @@ index fce6cf8..77bf3e0 100644
  	};
  	static_assert(sizeof(McEvent) == 32);
  
-@@ -345,6 +396,11 @@ namespace skycraft::proto
+@@ -283,6 +334,8 @@ namespace skycraft::proto
+ 	// block outline.
+ 	inline constexpr std::uint32_t kMaxWorldEntities = 160;
+ 
++	inline constexpr std::uint32_t kMobNameBytes = 32;
++
+ 	enum WorldEntityKind : std::uint32_t
+ 	{
+ 		kWeArrow = 1,    // uv[0]: the arrow's item icon
+@@ -291,6 +344,9 @@ namespace skycraft::proto
+ 		kWeBlock = 4,    // dropped block item: a spinning cube of side `scale`, uv[0..2] = side, top, bottom
+ 		kWeCrack = 5,    // block-breaking cracks over the box at (x, y, z) of size ext, uv[0] = crack stage
+ 		kWeShadow = 6,   // a player's or mob's feet at (x, y, z), `scale` wide: its soft contact shadow
++		kWeMob = 7,      // a Minecraft mob Skyrim's player may lock on to (not drawn: Minecraft draws it). id = entity id, (x, y, z) = its feet,
++		                 // scale = its height in blocks, ext[0] = health 0..1 (< 0: unknown), ext[1] = its width in blocks, and its name is
++		                 // zero-ended UTF-8 in the first 32 bytes of uv (kMobNameBytes)
+ 	};
+ 
+ 	struct WorldEntity
+@@ -345,6 +401,11 @@ namespace skycraft::proto
  		                      // section NPCs collide with (sent after its kRenSection; 0 = none)
  		kRenDug = 11,         // RenDug + 512-byte bitset (bit x + 16z + 256y): which blocks of a section
  		                      // were dug out of Skyrim's world (its geometry there is gone); 0 = none
@@ -3836,7 +3864,7 @@ index fce6cf8..77bf3e0 100644
  		kRenRagdoll = 9,      // RenAvatar + RenBatch[] + RenVertex[]: the player's body standing still,
  		                      // relative to the feet and facing +Z, split into its parts (RenBatch
  		                      // flags bits 8-11: RagdollPart). Sent about once a second while alive;
-@@ -357,6 +413,12 @@ namespace skycraft::proto
+@@ -357,6 +418,12 @@ namespace skycraft::proto
  		std::uint32_t count;       // solid blocks (0: none, and no bitset follows)
  	};
  
@@ -3849,6 +3877,11 @@ index fce6cf8..77bf3e0 100644
  	struct RenDug
  	{
  		std::int32_t  sx, sy, sz;  // section coords, as in RenSection
+@@ -566,3 +633,4 @@ namespace skycraft::proto
+ 	};
+ 	static_assert(sizeof(ColBlock) == 80);
+ }
++
 diff --git a/skse/SkyCraft.ini b/skse/SkyCraft.ini
 index 92b585a..193b6bc 100644
 --- a/skse/SkyCraft.ini
