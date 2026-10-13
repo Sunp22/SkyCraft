@@ -72,6 +72,41 @@ jobs:
           }
           apply_patch SkyCraft-Patch.patch LockOn::Install skse/src/main.cpp
 
+      # Open doors, trapdoors and fence gates have no collision in Skyrim (SkyCraft-Patch.patch already has this; the edit is repeated here
+      # because a source that already has an earlier SkyCraft-Patch.patch committed skips the patch above, and would never get it).
+      # Does nothing when the source already has it.
+      - name: Make sure open doors have no collision in Skyrim
+        shell: bash
+        run: |
+          py=python3; command -v python3 >/dev/null 2>&1 || py=python
+          "$py" - <<'PYEOF'
+          import re, sys
+          p = "fabric/src/client/java/dev/skycraft/client/render/WorldExporter.java"
+          s = open(p, encoding="utf-8", newline="").read()
+          if "isOpenNow" in s:
+              print("Open doors already have no collision; nothing to do.")
+              sys.exit(0)
+          nl = "\r\n" if "\r\n" in s else "\n"
+          s = s.replace("\r\n", "\n")
+          a = "\tprivate static boolean isOpenable(BlockState state) {\n\t\treturn state.hasProperty(BlockStateProperties.OPEN);\n\t}\n"
+          b = "\t\t\t\t\t\tvar collision = state.getCollisionShape(level, pos);\n"
+          c = "\t\t\t\tif (now != o.state[i]) {\n\t\t\t\t\to.state[i] = now;"
+          for part in (a, b, c):
+              if s.count(part) != 1:
+                  print("::error::WorldExporter.java is not what the door edit expects; not applied.")
+                  sys.exit(1)
+          s = s.replace(a, a + "\n\t/** A door, trapdoor or fence gate that is open: Skyrim gets no collision for it at all (Minecraft still has its thin panel). */\n\tprivate static boolean isOpenNow(BlockState state) {\n\t\treturn state.hasProperty(BlockStateProperties.OPEN) && state.getValue(BlockStateProperties.OPEN);\n\t}\n", 1)
+          s = s.replace(b, "\t\t\t\t\t\tvar collision = isOpenNow(state) ? net.minecraft.world.phys.shapes.Shapes.empty() : state.getCollisionShape(level, pos);\n", 1)
+          s = s.replace(c, "\t\t\t\tif (now != o.state[i]) {\n\t\t\t\t\tSkyCraft.LOG.info(\"SkyCraft: {} at {} is now {}; its section goes to Skyrim again\", now.getBlock().getDescriptionId(), o.pos[i], isOpenNow(now) ? \"open (no collision in Skyrim)\" : \"closed\");\n\t\t\t\t\to.state[i] = now;", 1)
+          open(p, "w", encoding="utf-8", newline="").write(s.replace("\n", nl))
+          m = "skse/src/main.cpp"
+          t = open(m, encoding="utf-8", newline="").read()
+          if "patch revision 39 (" not in t:
+              t = t.replace("patch revision 38 (", "patch revision 39 (open doors, trapdoors and fence gates have no collision in Skyrim; each open/close is logged on the Minecraft side; revision 38: ", 1)
+              open(m, "w", encoding="utf-8", newline="").write(t)
+          print("Open doors now have no collision in Skyrim.")
+          PYEOF
+
       # A repo made from "Download ZIP" has no submodule contents. Fetch CommonLibSSE-NG ourselves
       # then (the branch's latest commit, not the exact one the author built with).
       - name: Make sure CommonLibSSE-NG is there
