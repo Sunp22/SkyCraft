@@ -7873,7 +7873,7 @@ index 0954b7f..94d6688 100644
 +			const auto playerPos = a_player->GetPosition();
 +			std::unordered_set<RE::FormID> liveStandIns;
 +			for (const auto& entry : mobProxies) {
-+				if (!entry.second.targetOnly && !entry.second.warm) {
++				if (!entry.second.targetOnly && !(entry.second.warm > 0.0f)) {  // warm counts down past zero and stays there: only a positive value is still warming up
 +					liveStandIns.insert(entry.second.formId);
 +				}
 +			}
@@ -7909,8 +7909,8 @@ index 0954b7f..94d6688 100644
 +				float       bestDistance = reach;
 +				for (const auto& entry : mobProxies) {
 +					const auto& proxy = entry.second;
-+					if (proxy.targetOnly) {
-+						continue;  // there for the player to lock on to: no business of the NPCs
++					if (proxy.targetOnly || proxy.warm > 0.0f) {
++						continue;  // there for the player to lock on to (no business of the NPCs), or still warming up out of sight
 +					}
 +					auto*       standIn = RE::TESForm::LookupByID<RE::Actor>(proxy.formId);
 +					const float d = standIn ? npc->GetPosition().GetDistance(proxy.pos) : reach;
