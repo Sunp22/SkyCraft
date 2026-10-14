@@ -6352,19 +6352,19 @@ index 0000000..48dc1e3
 +	}
 +}
 diff --git a/skse/src/Combat.cpp b/skse/src/Combat.cpp
-index 0954b7f..228478f 100644
+index 0954b7f..d86ca71 100644
 --- a/skse/src/Combat.cpp
 +++ b/skse/src/Combat.cpp
-@@ -1,5 +1,8 @@
+@@ -1,4 +1,8 @@
  #include "Game.h"
- 
++#include "Compat.h"
++
 +#include <algorithm>
 +#include <cctype>
-+
+ 
  namespace skycraft
  {
- 	namespace
-@@ -9,6 +12,23 @@ namespace skycraft
+@@ -9,6 +13,23 @@ namespace skycraft
  		constexpr float kHitMemorySeconds = 0.35f;   // how long a hit event can explain a health drop
  		constexpr float kDotFlushSeconds = 0.5f;     // magic/other damage is batched (Minecraft i-frames)
  
@@ -6388,7 +6388,7 @@ index 0954b7f..228478f 100644
  		// ---- what hit the player (main thread) -------------------------------------------------
  		struct RecentHit
  		{
-@@ -37,6 +57,54 @@ namespace skycraft
+@@ -37,6 +58,54 @@ namespace skycraft
  		bool  engaged = false;
  		float engagedTimer = 0.0f;
  
@@ -6443,7 +6443,7 @@ index 0954b7f..228478f 100644
  		class HitSink final : public RE::BSTEventSink<RE::TESHitEvent>
  		{
  		public:
-@@ -49,6 +117,36 @@ namespace skycraft
+@@ -49,6 +118,36 @@ namespace skycraft
  			RE::BSEventNotifyControl ProcessEvent(const RE::TESHitEvent* a_event, RE::BSTEventSource<RE::TESHitEvent>*) override
  			{
  				auto* player = RE::PlayerCharacter::GetSingleton();
@@ -6480,7 +6480,7 @@ index 0954b7f..228478f 100644
  				if (!a_event || !player || a_event->target.get() != player || !State().puppeting) {
  					return RE::BSEventNotifyControl::kContinue;
  				}
-@@ -168,6 +266,53 @@ namespace skycraft
+@@ -168,6 +267,53 @@ namespace skycraft
  			}
  		}
  
@@ -6534,7 +6534,7 @@ index 0954b7f..228478f 100644
  		void WriteActorTable(RE::PlayerCharacter* a_player)
  		{
  			static std::vector<proto::ActorRecord> records;
-@@ -181,7 +326,7 @@ namespace skycraft
+@@ -181,7 +327,7 @@ namespace skycraft
  			for (auto& handle : lists->highActorHandles) {
  				auto actorPtr = handle.get();
  				auto* actor = actorPtr.get();
@@ -6543,7 +6543,7 @@ index 0954b7f..228478f 100644
  					continue;
  				}
  				const auto pos = actor->GetPosition();
-@@ -191,7 +336,26 @@ namespace skycraft
+@@ -191,7 +337,26 @@ namespace skycraft
  				proto::ActorRecord r{};
  				r.formId = actor->GetFormID();
  				r.flags = (actor->IsHostileToActor(a_player) ? proto::kActorHostile : 0u) | (actor->IsDead() ? proto::kActorDead : 0u) |
@@ -6571,7 +6571,7 @@ index 0954b7f..228478f 100644
  				const auto mc = SkyToMc(pos);
  				r.x = static_cast<float>(mc.x);
  				r.y = static_cast<float>(mc.y);
-@@ -230,171 +394,2056 @@ namespace skycraft
+@@ -230,171 +395,2049 @@ namespace skycraft
  				logger::info("hit pipeline: not on AE; using plain damage");
  				return;
  			}
@@ -7380,17 +7380,23 @@ index 0954b7f..228478f 100644
 +			}
 +			RE::TESNPC* made = nullptr;
 +			if (auto* stock = FindProxyBase()) {
-+				auto* npc = RE::IFormFactory::Create<RE::TESNPC>();
++				// Only a size that is to have a skeleton of its own is cloned (the trial marker is set first: a clone Skyrim can't take must not
++				// be tried again at the next start); every other size uses the stock creature, as before.
++				bool        copied = false;
++				RE::TESNPC* npc = nullptr;
++				if (MobBodies::CustomSkeletonOn() && !skeletonTrialFailed) {
++					if (skeletonTrialActor == 0) {
++						MobBodies::ArmSkeletonTrial();
++					}
++					npc = compat::CloneForm(stock, copied);
++					if (!copied && skeletonTrialActor == 0) {
++						MobBodies::SkeletonTrialPassed();  // nothing was cloned, so there is nothing to crash on: no marker left behind
++						skeletonTrialFailed = true;
++						logger::warn("Custom skeletons need a copy of a creature's NPC and race records, and this CommonLib has neither CopyFrom nor CreateDuplicateForm; the stock creature is used");
++					}
++				}
 +				if (npc) {
-+					if (npc->GetFormID() == 0) {
-+						npc->SetFormID(0, true);
-+					}
 +					const auto ownId = npc->GetFormID();
-+					bool       copied = false;
-+					if constexpr (requires { npc->CopyFrom(stock); }) {
-+						npc->CopyFrom(stock);
-+						copied = true;
-+					}
 +					if (copied && ownId != 0 && npc->GetFormID() == ownId) {
 +						made = npc;
 +						int w16 = 0, h16 = 0;
@@ -7400,23 +7406,11 @@ index 0954b7f..228478f 100644
 +							const auto model = MobBodies::SkeletonModel(a_key, w16, h16);
 +							if constexpr (requires { stock->race; npc->race = stock->race; }) {
 +								if (!model.empty() && stock->race) {
-+									auto* race = RE::IFormFactory::Create<RE::TESRace>();
++									bool  raceCopied = false;
++									auto* race = compat::CloneForm(stock->race, raceCopied);
 +									bool  raceOk = false;
-+									if (race) {
-+										if (race->GetFormID() == 0) {
-+											race->SetFormID(0, true);
-+										}
-+										const auto raceId = race->GetFormID();
-+										if constexpr (requires { race->CopyFrom(stock->race); race->skeletonModels[0].SetModel(model.c_str()); }) {
-+											race->CopyFrom(stock->race);
-+											if (raceId != 0 && race->GetFormID() == raceId) {
-+												race->skeletonModels[0].SetModel(model.c_str());
-+												if constexpr (requires { race->skeletonModels[1].SetModel(model.c_str()); }) {
-+													race->skeletonModels[1].SetModel(model.c_str());
-+												}
-+												raceOk = true;
-+											}
-+										}
++									if (race && raceCopied) {
++										raceOk = compat::SetSkeleton(race, model.c_str());
 +									}
 +									if (raceOk) {
 +										npc->race = race;
@@ -7430,7 +7424,6 @@ index 0954b7f..228478f 100644
 +											npc->boundData.boundMax.z = static_cast<std::int16_t>(h16 * u / 16.0f);
 +										}
 +										if (skeletonTrialActor == 0) {
-+											MobBodies::ArmSkeletonTrial();
 +											skeletonTrialPending = true;
 +										}
 +										logger::info("Custom stand-in {:08X} for mob size {}: its race {:08X} has the skeleton {}", npc->GetFormID(), a_key, race->GetFormID(), model);
@@ -8761,7 +8754,7 @@ index 0954b7f..228478f 100644
  		}
  
  		void KillPlayer(RE::PlayerCharacter* a_player, const proto::McEvent& a_ev)
-@@ -580,7 +2629,7 @@ namespace skycraft
+@@ -580,7 +2623,7 @@ namespace skycraft
  			for (auto& handle : lists->highActorHandles) {
  				auto actorPtr = handle.get();
  				auto* actor = actorPtr.get();
@@ -8770,7 +8763,7 @@ index 0954b7f..228478f 100644
  					continue;
  				}
  				const auto hazard = HazardAtActor(actor);
-@@ -698,6 +2747,7 @@ namespace skycraft
+@@ -698,6 +2741,7 @@ namespace skycraft
  			RE::NiPoint3 center;
  			float        radius;  // Minecraft blocks
  			float        delay;   // seconds: after the blast's damage has landed
@@ -8778,7 +8771,7 @@ index 0954b7f..228478f 100644
  		};
  		std::vector<PendingExplosion> pendingExplosions;
  
-@@ -786,6 +2836,9 @@ namespace skycraft
+@@ -786,6 +2830,9 @@ namespace skycraft
  					continue;
  				}
  				if (auto* actor = ref->As<RE::Actor>()) {
@@ -8788,7 +8781,7 @@ index 0954b7f..228478f 100644
  					if (!actor->IsDead()) {
  						if (auto* process = actor->GetActorRuntimeData().currentProcess) {
  							process->KnockExplosion(actor, a_blast.center, 25.0f * falloff * power);
-@@ -830,6 +2883,183 @@ namespace skycraft
+@@ -830,6 +2877,183 @@ namespace skycraft
  			}
  			logger::info("Minecraft explosion (radius {:.1f}): knocked {} people away, threw {} objects", a_blast.radius, people, objects);
  		}
@@ -8972,7 +8965,7 @@ index 0954b7f..228478f 100644
  	}
  
  	namespace Combat
-@@ -838,8 +3068,15 @@ namespace skycraft
+@@ -838,8 +3062,15 @@ namespace skycraft
  		{
  			REL::Relocation<std::uintptr_t> vtbl{ RE::VTABLE_PlayerCharacter[0] };
  			HandleHealthDamageHook::func = vtbl.write_vfunc(0x104, HandleHealthDamageHook::thunk);
@@ -8988,7 +8981,7 @@ index 0954b7f..228478f 100644
  			}
  			ResolveHitPipeline();
  			logger::info("combat hooks installed");
-@@ -854,20 +3091,66 @@ namespace skycraft
+@@ -854,20 +3085,66 @@ namespace skycraft
  				}
  				healthPrimed = false;
  				engaged = false;
@@ -9061,7 +9054,7 @@ index 0954b7f..228478f 100644
  			SetEssential(a_player, true);
  			WriteActorTable(a_player);
  			engagedTimer -= a_delta;
-@@ -878,29 +3161,11 @@ namespace skycraft
+@@ -878,29 +3155,11 @@ namespace skycraft
  
  			proto::McEvent ev;
  			while (link.PopEvent(ev)) {
@@ -9094,7 +9087,7 @@ index 0954b7f..228478f 100644
  			for (auto it = pendingExplosions.begin(); it != pendingExplosions.end();) {
  				it->delay -= a_delta;
  				if (it->delay <= 0.0f) {
-@@ -924,5 +3189,16 @@ namespace skycraft
+@@ -924,5 +3183,16 @@ namespace skycraft
  		}
  
  		bool PlayerEngaged() { return engaged; }
@@ -9111,6 +9104,71 @@ index 0954b7f..228478f 100644
 +		}
  	}
  }
+diff --git a/skse/src/Compat.h b/skse/src/Compat.h
+new file mode 100644
+index 0000000..f83e850
+--- /dev/null
++++ b/skse/src/Compat.h
+@@ -0,0 +1,59 @@
++#pragma once
++
++// Things this CommonLibSSE-NG may or may not have, asked in templates so that a missing one is "false" and not a compile error
++// (a requires-expression in a plain function is a hard error on MSVC; this is what stopped the build at revisions 45-47).
++
++namespace skycraft::compat
++{
++	// A new form of the same kind as a_src with a_src's data, or nullptr. a_copied says whether it really has a_src's data.
++	//   1. a form made at runtime and filled with CopyFrom, if this CommonLib has it
++	//   2. else the engine's own duplication (TESForm::CreateDuplicateForm), if this CommonLib has it
++	// Neither: a form is made but a_copied stays false and the caller must not use it.
++	template <class T>
++	T* CloneForm(T* a_src, bool& a_copied)
++	{
++		a_copied = false;
++		if (!a_src) {
++			return nullptr;
++		}
++		if constexpr (requires(T* a_dest) { a_dest->CopyFrom(a_src); }) {
++			auto* made = RE::IFormFactory::Create<T>();
++			if (made) {
++				if (made->GetFormID() == 0) {
++					made->SetFormID(0, true);
++				}
++				made->CopyFrom(a_src);
++				a_copied = true;
++			}
++			return made;
++		} else if constexpr (requires { a_src->CreateDuplicateForm(true, static_cast<void*>(nullptr)); }) {
++			std::unordered_map<RE::TESForm*, RE::TESForm*> done;
++			auto* dup = a_src->CreateDuplicateForm(true, static_cast<void*>(&done));
++			if (dup) {
++				if (dup->GetFormID() == 0) {
++					dup->SetFormID(0, true);
++				}
++				a_copied = true;
++				return static_cast<T*>(dup);
++			}
++			return nullptr;
++		} else {
++			return RE::IFormFactory::Create<T>();
++		}
++	}
++
++	// Points a race's skeleton model(s) at a_path (relative to Data\\Meshes). False when this CommonLib has no such field.
++	template <class R>
++	bool SetSkeleton(R* a_race, const char* a_path)
++	{
++		if constexpr (requires { a_race->skeletonModels[0].SetModel(a_path); }) {
++			a_race->skeletonModels[0].SetModel(a_path);
++			if constexpr (requires { a_race->skeletonModels[1].SetModel(a_path); }) {
++				a_race->skeletonModels[1].SetModel(a_path);
++			}
++			return true;
++		} else {
++			return false;
++		}
++	}
++}
 diff --git a/skse/src/Dig.h b/skse/src/Dig.h
 index 9b1d191..0106d8c 100644
 --- a/skse/src/Dig.h
@@ -10447,12 +10505,13 @@ index 0000000..0939189
 +}
 diff --git a/skse/src/MobBodies.cpp b/skse/src/MobBodies.cpp
 new file mode 100644
-index 0000000..66f065d
+index 0000000..b44589d
 --- /dev/null
 +++ b/skse/src/MobBodies.cpp
-@@ -0,0 +1,763 @@
+@@ -0,0 +1,760 @@
 +#include "Game.h"
 +#include "CollisionNif.h"
++#include "Compat.h"
 +
 +#include <SimpleIni.h>
 +
@@ -10887,27 +10946,23 @@ index 0000000..66f065d
 +				FinishProbe("no stock rabbit to copy");
 +				return;
 +			}
-+			auto* npc = RE::IFormFactory::Create<RE::TESNPC>();
++			bool  copied = false;
++			auto* npc = compat::CloneForm(rabbit, copied);
 +			if (!npc) {
 +				FinishProbe("an NPC record can't be made at runtime");
 +				return;
 +			}
 +			logger::info("Mob actor probe: an NPC record was made at runtime ({:08X})", npc->GetFormID());
-+			bool copied = false;
-+			if constexpr (requires { npc->CopyFrom(rabbit); }) {
-+				npc->CopyFrom(rabbit);
-+				copied = true;
-+			}
-+			logger::info("Mob actor probe: copying the rabbit's NPC record into it: {}", copied ? "done" : "this CommonLib has no CopyFrom");
++			logger::info("Mob actor probe: copying the rabbit's NPC record into it: {}", copied ? "done" : "this CommonLib has neither CopyFrom nor CreateDuplicateForm");
 +			if constexpr (requires { rabbit->race; }) {
 +				auto* stockRace = rabbit->race;
 +				logger::info("Mob actor probe: the rabbit's race is {:08X}", stockRace ? stockRace->GetFormID() : 0u);
 +				if (stockRace) {
-+					auto* race = RE::IFormFactory::Create<RE::TESRace>();
++					bool  raceCopied = false;
++					auto* race = compat::CloneForm(stockRace, raceCopied);
 +					logger::info("Mob actor probe: a race record {} at runtime", race ? "was made" : "can't be made");
 +					if (race) {
-+						if constexpr (requires { race->CopyFrom(stockRace); }) {
-+							race->CopyFrom(stockRace);
++						if (raceCopied) {
 +							logger::info("Mob actor probe: copied the rabbit's race into it");
 +						}
 +						if constexpr (requires { npc->race = race; }) {
@@ -10922,7 +10977,7 @@ index 0000000..66f065d
 +			}
 +			RE::NiPointer<RE::TESObjectREFR> ref;
 +			if constexpr (requires { a_player->PlaceObjectAtMe(npc, false); }) {
-+				ref = a_player->PlaceObjectAtMe(npc, false).get();
++				ref = a_player->PlaceObjectAtMe(npc, false);
 +			}
 +			if (!ref) {
 +				FinishProbe("an actor can't be placed from the copies");
@@ -12136,7 +12191,7 @@ index b877ae5..36666dc 100644
  				logger::info("in-frame block drawing: hooked after Main::RenderWorld");
  			}
 diff --git a/skse/src/main.cpp b/skse/src/main.cpp
-index eb548b4..1b7248f 100644
+index eb548b4..e74def5 100644
 --- a/skse/src/main.cpp
 +++ b/skse/src/main.cpp
 @@ -21,6 +21,9 @@ namespace
@@ -12161,7 +12216,7 @@ index eb548b4..1b7248f 100644
  	SetupLog();
  	skycraft::CrashLog::Install();
  	logger::info("SkyCraft {} loading (runtime {})", "0.1.2", a_skse->RuntimeVersion().string());
-+	logger::info("patch revision 48 (the custom skeletons are real actor skeletons: NPC Root/COM/Head nodes and a keyframed body on the biped layer, not the static block box; revision 47: stand-in actors get a skeleton of our own per mob size, a box, with the NPC bounds set to it; the first one is a trial that turns custom skeletons off if the actor gets no 3D; revision 46: stand-in actors are made from a custom NPC record per mob size, built at runtime from the library's sizes, and kept in a pool per size; the box body is the mob's exact shape; revision 45: round one of the custom stand-in actors: a probe at the first mob, logged as 'Mob actor probe', that reads how Skyrim's creature skeletons are laid out and tries making an NPC and race record at runtime; nothing else changes; revision 44: the stand-in actors are back alongside the mob bodies, bStandInActors in SkyCraft.ini, because Skyrim's NPCs can only fight an actor; revision 43: mob bodies: every Minecraft mob is a collision box the size of its bounding box in Skyrim's world, made from a mob catalogue Minecraft writes at start (modded mobs included), replacing the stand-in actors; revision 42: damage diagnostics merged in: every blow that reaches a mob's stand-in is logged with who threw it, and Skyrim hits the Minecraft side cannot find a live mob for are logged; revision 41: only doors, trapdoors and fence gates lose their collision when open (a barrel has an open state too and stays solid); every change of a section that Skyrim takes up is logged; revision 40: a section sent again with the same collision no longer makes Skyrim rebuild its collision model, so the sections beside a door stop being rebuilt many times a second and a door change shows at once; revision 39: open doors, trapdoors and fence gates have no collision in Skyrim; each open/close is logged on the Minecraft side; revision 38: mob stand-ins restored to the earlier, steadier version (health 1:1, damage guard, revival, 20 Hz positions from Fabric) on top of the collision and lock-on work; lock-on stays LockOn.cpp, with the stand-ins on its never-lock-on list; revision 37: mob stand-ins are back: invisible Skyrim actors for Minecraft mobs so NPCs fight them and spells hurt the mob; they sit exactly on the mob's feet at its height, stay in every control mode, and are on True Directional Movement's never-lock-on list; revision 36: doors, trapdoors and fence gates send their section to Skyrim again the moment their state changes, by any route, and the Fabric side watches every openable block each frame; walking up stairs, slabs and carpets lifts the player onto the step as Minecraft does, bStepUp in SkyCraft.ini; revision 35: the collision model's blocks are now in Skyrim's own order, the shapes before the list that holds them: the list was built before its children existed, a null read at load in every section model; the body bytes now match Skyrim's own statics: the second collision response and callback delay were zero, which is response type INVALID, and the rolling friction was 1; revision 34: the plugin makes the shape library models at load and places odd blocks as references to them once a section model is proven; collision models on by default, the crates stay under you until a model is seen working; tools/make_collision_library.py builds the shape library from the catalogue, which the Fabric side now writes by itself; ShapeKey in Game.h; revision 33: the Fabric side can list every distinct collision shape in the game with -Dskycraft.dumpShapes=true, ShapeCatalog.java; revision 32: collision test models are now loaded one at a time, smallest first, with a LOADING line logged before each; the byte-shifted variants are gone; revision 31: collision shapes: the array headers inside the list and convex shapes are empty like Skyrim's own, which was a null read at load; revision 30: collision model body now matches Skyrim's own statics: fixed motion system, flags 129 and 130; revision 29: collision models are off by default, a copy of vanilla models is made to see their layout; revision 28: section models are written into files made at plugin load, because Skyrim only loads model files that existed when it started; revision 27: smaller test models and copies of loose models tried too; revision 26: block model variants tried side by side, the first Skyrim loads is used; revision 25: exact block shapes: no padding on doors, stairs and other non-cube blocks, up to 16 boxes per block; a probe in the log tells a rejected .nif from a form that can't load models; revision 24: block collision models checked in the Havok world, crates kept until they work; lock-on survives a missing frame; revision 23: section models of merged boxes loaded as invisible statics over the whole area Minecraft sent; revision 22: crates only, the box simulation that held the Skyrim player is gone; Minecraft's mobs, passive ones too, are lock-on targets again, handed to True Directional Movement as virtual targets; revision 21: mob stand-ins removed)");
++	logger::info("patch revision 49 (the plugin builds again: the CopyFrom / skeletonModels checks are template-safe (Compat.h), a creature record is cloned with CopyFrom or the engine's CreateDuplicateForm, whichever this CommonLib has; revision 48: the custom skeletons are real actor skeletons: NPC Root/COM/Head nodes and a keyframed body on the biped layer, not the static block box; revision 47: stand-in actors get a skeleton of our own per mob size, a box, with the NPC bounds set to it; the first one is a trial that turns custom skeletons off if the actor gets no 3D; revision 46: stand-in actors are made from a custom NPC record per mob size, built at runtime from the library's sizes, and kept in a pool per size; the box body is the mob's exact shape; revision 45: round one of the custom stand-in actors: a probe at the first mob, logged as 'Mob actor probe', that reads how Skyrim's creature skeletons are laid out and tries making an NPC and race record at runtime; nothing else changes; revision 44: the stand-in actors are back alongside the mob bodies, bStandInActors in SkyCraft.ini, because Skyrim's NPCs can only fight an actor; revision 43: mob bodies: every Minecraft mob is a collision box the size of its bounding box in Skyrim's world, made from a mob catalogue Minecraft writes at start (modded mobs included), replacing the stand-in actors; revision 42: damage diagnostics merged in: every blow that reaches a mob's stand-in is logged with who threw it, and Skyrim hits the Minecraft side cannot find a live mob for are logged; revision 41: only doors, trapdoors and fence gates lose their collision when open (a barrel has an open state too and stays solid); every change of a section that Skyrim takes up is logged; revision 40: a section sent again with the same collision no longer makes Skyrim rebuild its collision model, so the sections beside a door stop being rebuilt many times a second and a door change shows at once; revision 39: open doors, trapdoors and fence gates have no collision in Skyrim; each open/close is logged on the Minecraft side; revision 38: mob stand-ins restored to the earlier, steadier version (health 1:1, damage guard, revival, 20 Hz positions from Fabric) on top of the collision and lock-on work; lock-on stays LockOn.cpp, with the stand-ins on its never-lock-on list; revision 37: mob stand-ins are back: invisible Skyrim actors for Minecraft mobs so NPCs fight them and spells hurt the mob; they sit exactly on the mob's feet at its height, stay in every control mode, and are on True Directional Movement's never-lock-on list; revision 36: doors, trapdoors and fence gates send their section to Skyrim again the moment their state changes, by any route, and the Fabric side watches every openable block each frame; walking up stairs, slabs and carpets lifts the player onto the step as Minecraft does, bStepUp in SkyCraft.ini; revision 35: the collision model's blocks are now in Skyrim's own order, the shapes before the list that holds them: the list was built before its children existed, a null read at load in every section model; the body bytes now match Skyrim's own statics: the second collision response and callback delay were zero, which is response type INVALID, and the rolling friction was 1; revision 34: the plugin makes the shape library models at load and places odd blocks as references to them once a section model is proven; collision models on by default, the crates stay under you until a model is seen working; tools/make_collision_library.py builds the shape library from the catalogue, which the Fabric side now writes by itself; ShapeKey in Game.h; revision 33: the Fabric side can list every distinct collision shape in the game with -Dskycraft.dumpShapes=true, ShapeCatalog.java; revision 32: collision test models are now loaded one at a time, smallest first, with a LOADING line logged before each; the byte-shifted variants are gone; revision 31: collision shapes: the array headers inside the list and convex shapes are empty like Skyrim's own, which was a null read at load; revision 30: collision model body now matches Skyrim's own statics: fixed motion system, flags 129 and 130; revision 29: collision models are off by default, a copy of vanilla models is made to see their layout; revision 28: section models are written into files made at plugin load, because Skyrim only loads model files that existed when it started; revision 27: smaller test models and copies of loose models tried too; revision 26: block model variants tried side by side, the first Skyrim loads is used; revision 25: exact block shapes: no padding on doors, stairs and other non-cube blocks, up to 16 boxes per block; a probe in the log tells a rejected .nif from a form that can't load models; revision 24: block collision models checked in the Havok world, crates kept until they work; lock-on survives a missing frame; revision 23: section models of merged boxes loaded as invisible statics over the whole area Minecraft sent; revision 22: crates only, the box simulation that held the Skyrim player is gone; Minecraft's mobs, passive ones too, are lock-on targets again, handed to True Directional Movement as virtual targets; revision 21: mob stand-ins removed)");
 +	skycraft::BlockCollision::PrepareFiles();
 +	skycraft::MobBodies::PrepareFiles();
  	SKSE::GetMessagingInterface()->RegisterListener(OnMessage);
