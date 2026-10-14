@@ -980,7 +980,7 @@ index 0000000..f7aa8b9
 +}
 diff --git a/fabric/src/main/java/dev/skycraft/combat/MobProxies.java b/fabric/src/main/java/dev/skycraft/combat/MobProxies.java
 new file mode 100644
-index 0000000..27b3935
+index 0000000..712fbd6
 --- /dev/null
 +++ b/fabric/src/main/java/dev/skycraft/combat/MobProxies.java
 @@ -0,0 +1,192 @@
@@ -1137,18 +1137,18 @@ index 0000000..27b3935
 +				sendName(mob);
 +				NAME_SENT.put(mob.getId(), now);
 +			}
++			// The mob's vitals go first, so Skyrim knows the mob's width before it makes the stand-in (it is sized from width and height). Its
++			// health (1:1: Skyrim's lock-on bar shows exactly this), where its eyes are, and which way it is moving.
++			if (roomy) {
++				var motion = mob.getDeltaMovement();
++				SkyLink.pushEvent(Proto.EV_MOB_VITALS, mob.getId(), mob.getHealth(), mob.getMaxHealth(), mob.getEyeHeight(), mob.getBbWidth(),
++					Float.floatToRawIntBits((float) (motion.x * 20.0)), Float.floatToRawIntBits((float) (motion.z * 20.0)));
++			}
 +			// The mob's height goes in the weapon field (the stand-in is sized to it, so the head is where the mob's is).
 +			SkyLink.pushEvent(Proto.EV_MOB_PROXY, mob.getId(), (float) mob.getX(), (float) mob.getY(), (float) mob.getZ(), mob.getYRot(),
 +				want.npcFight ? 0 : Proto.MOB_PROXY_TARGET_ONLY, Float.floatToRawIntBits(mob.getBbHeight()));
-+			// Its health (1:1: Skyrim's lock-on bar shows exactly this), where its eyes are, and which way it is moving.
-+			if (!roomy) {
-+				continue;
-+			}
-+			var motion = mob.getDeltaMovement();
-+			SkyLink.pushEvent(Proto.EV_MOB_VITALS, mob.getId(), mob.getHealth(), mob.getMaxHealth(), mob.getEyeHeight(), mob.getBbWidth(), // d: the body's width (MobBodies.cpp makes the box from it and the height)
-+				
-+				Float.floatToRawIntBits((float) (motion.x * 20.0)), Float.floatToRawIntBits((float) (motion.z * 20.0)));
 +		}
++
 +		for (Integer id : new ArrayList<>(LIVE)) {
 +			if (!wanted.containsKey(id)) {
 +				SkyLink.pushEvent(Proto.EV_MOB_PROXY, id, 0.0F, 0.0F, 0.0F, 0.0F, Proto.MOB_PROXY_GONE); // dead or out of range: Skyrim drops the stand-in
@@ -4052,10 +4052,10 @@ index fce6cf8..80c68f8 100644
  }
 +
 diff --git a/skse/SkyCraft.ini b/skse/SkyCraft.ini
-index 92b585a..fea8d1f 100644
+index 92b585a..c67d81e 100644
 --- a/skse/SkyCraft.ini
 +++ b/skse/SkyCraft.ini
-@@ -14,7 +14,139 @@ sLauncher =
+@@ -14,7 +14,148 @@ sLauncher =
  ; What to pass to your own launcher. For Prism: --launch and the SkyCraft instance's folder name.
  sArguments = --launch SkyCraft
  
@@ -4108,6 +4108,15 @@ index 92b585a..fea8d1f 100644
 +
 +; Most mob bodies at once.
 +iMaxBodies = 64
++
++; Skyrim's NPCs can only fight an actor, so each mob near them also keeps an invisible stand-in actor (as before) next to its body: it is what
++; they draw on, close in on and strike. 0 = bodies only: NPCs then only play Minecraft-side fights (a weapon drawn, hits landing) and never really enter combat.
++bStandInActors = 1
++
++; Each stand-in actor gets a skeleton of SkyCraft's own (Data/Meshes/SkyCraft/MobActors): the mob's box, with the NPC's bounds set to it, instead of a
++; rabbit's. The first one is a trial: if Skyrim doesn't give it a 3D, or crashes, custom skeletons turn themselves off (delete
++; Data/SKSE/Plugins/SkyCraft/custom_skeleton.marker to try again). 0 = the stock creature's skeleton.
++bCustomSkeleton = 1
 +
  [Debug]
  ; Detailed timing, camera, combat and lighting logs in SkyCraft.log (several lines a second), for
@@ -5946,10 +5955,10 @@ index 0000000..2b5b996
 +}
 diff --git a/skse/src/CollisionNif.h b/skse/src/CollisionNif.h
 new file mode 100644
-index 0000000..e2e734d
+index 0000000..48dc1e3
 --- /dev/null
 +++ b/skse/src/CollisionNif.h
-@@ -0,0 +1,366 @@
+@@ -0,0 +1,392 @@
 +#pragma once
 +
 +// Writes a Skyrim SE .nif that holds nothing but collision: an invisible static (BSFadeNode) with a fixed rigid body whose shape is a list
@@ -5992,6 +6001,10 @@ index 0000000..e2e734d
 +		std::uint32_t bsxFlags{ 130 };         // BSXFlags value (0x82 as on vanilla statics: havok + static)
 +		int           preambleExtra{ 0 };      // bytes more (or fewer) in the body before its translation
 +		int           tailExtra{ 0 };          // bytes more (or fewer) in the body after its flags and before its constraints
++		std::uint8_t  layer{ 1 };              // Havok collision layer of the body: 1 static, 8 biped (what Skyrim's weapons, arrows and spells hit on an actor)
++		std::uint8_t  motion{ 5 };             // motion system: 5 fixed, 6 keyframed (follows its node, as an actor's bones do)
++		bool          actorNodes{ false };     // an actor skeleton: the root is "NPC Root [Root]" with "NPC COM [COM ]" and "NPC Head [Head]" under it
++		float         headHeight{ 0.0f };      // game units above the feet for the head node (actorNodes)
 +		int           level{ 3 };              // 0: a bare node, 1: with BSXFlags, 2: with a body whose shape is one box, 3: the real thing (a list of boxes)
 +	};
 +
@@ -6027,9 +6040,9 @@ index 0000000..e2e734d
 +		}
 +
 +		// HavokFilter: layer (1 = static), flags and part number, group
-+		inline void Filter(Out& a_out)
++		inline void Filter(Out& a_out, std::uint8_t a_layer = 1)
 +		{
-+			a_out.Put<std::uint8_t>(1);
++			a_out.Put<std::uint8_t>(a_layer);
 +			a_out.Put<std::uint8_t>(0);
 +			a_out.Put<std::uint16_t>(0);
 +		}
@@ -6046,7 +6059,7 @@ index 0000000..e2e734d
 +		inline void RigidBody(Out& b, std::int32_t a_shapeRef, const Options& a_opt)
 +		{
 +			b.Put<std::int32_t>(a_shapeRef);  // shape
-+			Filter(b);
++			Filter(b, a_opt.layer);
 +			b.Put<std::uint32_t>(0);  // (unused)
 +			b.Put<std::uint8_t>(1);   // broad phase: entity
 +			b.Zeros(3);
@@ -6055,7 +6068,7 @@ index 0000000..e2e734d
 +			b.Put<std::uint8_t>(0);
 +			b.Put<std::uint16_t>(0xFFFF); // process contact callback delay
 +			b.Put<std::uint32_t>(0);
-+			Filter(b);                    // filter copy
++			Filter(b, a_opt.layer);       // filter copy
 +			// Revision 35: these twelve bytes were all zeros. In every one of Skyrim's own bodies (58 checked in vanilla_dump) the last four are
 +			// 01 xx FF FF: the SECOND collision response and callback delay, the pair Havok really builds the body from. Zero there is response
 +			// type INVALID, which has no contact handler, and the first thing to touch the body (the player's controller standing in the section)
@@ -6083,7 +6096,7 @@ index 0000000..e2e734d
 +			b.Put(0.15f);                 // penetration depth
 +			// These eight bytes copied from Skyrim's own static bodies (vanilla_dump: 05 01 01 00 00 00 03 00). Motion system 5 is FIXED;
 +			// the 7 written here before is CHARACTER, which made Skyrim treat the static as a character-controller body.
-+			b.Put<std::uint8_t>(5);       // motion system: fixed
++			b.Put<std::uint8_t>(a_opt.motion);  // motion system: 5 fixed, 6 keyframed
 +			b.Put<std::uint8_t>(1);       // deactivator: never
 +			b.Put<std::uint8_t>(1);       // solver deactivation: off
 +			b.Put<std::uint8_t>(0);       // quality (0 in every vanilla static)
@@ -6143,9 +6156,9 @@ index 0000000..e2e734d
 +		}
 +
 +		// The root node: its extra data (a_extra, -1 for none) and collision object (a_collision, -1 for none).
-+		inline void RootNode(Out& b, std::int32_t a_extra, std::int32_t a_collision)
++		inline void RootNode(Out& b, std::int32_t a_extra, std::int32_t a_collision, std::int32_t a_name = 0, float a_z = 0.0f, const std::vector<std::int32_t>& a_children = {})
 +		{
-+			b.Put<std::int32_t>(0);  // name: string 0
++			b.Put<std::int32_t>(a_name);  // name: a string index
 +			if (a_extra >= 0) {
 +				b.Put<std::uint32_t>(1);
 +				b.Put<std::int32_t>(a_extra);
@@ -6154,14 +6167,17 @@ index 0000000..e2e734d
 +			}
 +			b.Put<std::int32_t>(-1);  // no controller
 +			b.Put<std::uint32_t>(14); // flags
-+			b.Put(0.0f), b.Put(0.0f), b.Put(0.0f);
++			b.Put(0.0f), b.Put(0.0f), b.Put(a_z);
 +			const float identity[9] = { 1, 0, 0, 0, 1, 0, 0, 0, 1 };
 +			for (const float f : identity) {
 +				b.Put(f);
 +			}
 +			b.Put(1.0f);
 +			b.Put<std::int32_t>(a_collision);
-+			b.Put<std::uint32_t>(0);  // children
++			b.Put<std::uint32_t>(static_cast<std::uint32_t>(a_children.size()));  // children
++			for (const auto c : a_children) {
++				b.Put<std::int32_t>(c);
++			}
 +			b.Put<std::uint32_t>(0);  // effects
 +		}
 +
@@ -6233,7 +6249,8 @@ index 0000000..e2e734d
 +		}
 +
 +		const std::uint32_t boxCount = static_cast<std::uint32_t>(a_boxes.size() > kMaxBoxes ? kMaxBoxes : a_boxes.size());
-+		const std::uint32_t blockCount = 5 + boxCount;
++		const std::uint32_t extraNodes  = a_opt.actorNodes ? 2u : 0u;  // "NPC COM [COM ]" and "NPC Head [Head]", after the collision object
++		const std::uint32_t blockCount  = 5 + boxCount + extraNodes;
 +		const std::int32_t  listAt = static_cast<std::int32_t>(2 + boxCount);
 +		const std::int32_t  bodyAt = listAt + 1;
 +		const std::int32_t  collisionAt = listAt + 2;
@@ -6241,7 +6258,19 @@ index 0000000..e2e734d
 +		std::vector<Out> blocks(blockCount);
 +
 +		// 0: the root (a BSFadeNode with nothing in it but the collision)
-+		RootNode(blocks[0], 1, collisionAt);
++		if (a_opt.actorNodes) {
++			RootNode(blocks[0], 1, collisionAt, 0, 0.0f, { collisionAt + 1, collisionAt + 2 });
++			float com = 0.0f, top = 0.0f;
++			for (std::uint32_t i = 0; i < boxCount; ++i) {
++				top = std::max(top, a_boxes[i].hi[2]);
++			}
++			com = top * 0.5f;
++			const float head = a_opt.headHeight > 0.0f ? a_opt.headHeight : top * 0.9f;
++			RootNode(blocks[static_cast<std::size_t>(collisionAt + 1)], -1, -1, 2, com);
++			RootNode(blocks[static_cast<std::size_t>(collisionAt + 2)], -1, -1, 3, head);
++		} else {
++			RootNode(blocks[0], 1, collisionAt);
++		}
 +
 +		// 1: BSXFlags: havok (bit 1), so the loader makes the collision
 +		{
@@ -6313,11 +6342,17 @@ index 0000000..e2e734d
 +		typeOf[static_cast<std::size_t>(listAt)] = 3;
 +		typeOf[static_cast<std::size_t>(bodyAt)] = 4;
 +		typeOf[static_cast<std::size_t>(collisionAt)] = 5;
++		if (a_opt.actorNodes) {
++			typeNames.push_back("NiNode");
++			typeOf[static_cast<std::size_t>(collisionAt + 1)] = 6;
++			typeOf[static_cast<std::size_t>(collisionAt + 2)] = 6;
++			return Assemble(blocks, typeNames, typeOf, { "NPC Root [Root]", "BSX", "NPC COM [COM ]", "NPC Head [Head]" });
++		}
 +		return Assemble(blocks, typeNames, typeOf, { "SkyCraftCollision", "BSX" });
 +	}
 +}
 diff --git a/skse/src/Combat.cpp b/skse/src/Combat.cpp
-index 0954b7f..2c68582 100644
+index 0954b7f..228478f 100644
 --- a/skse/src/Combat.cpp
 +++ b/skse/src/Combat.cpp
 @@ -1,5 +1,8 @@
@@ -6536,17 +6571,19 @@ index 0954b7f..2c68582 100644
  				const auto mc = SkyToMc(pos);
  				r.x = static_cast<float>(mc.x);
  				r.y = static_cast<float>(mc.y);
-@@ -224,177 +388,1930 @@ namespace skycraft
- 		ProcessHitFn*  processHit = nullptr;
- 		HitDataCtorFn* hitDataCtor = nullptr;
- 
--		void ResolveHitPipeline()
-+		void ResolveHitPipeline()
-+		{
-+			if (!REL::Module::IsAE()) {
-+				logger::info("hit pipeline: not on AE; using plain damage");
-+				return;
-+			}
+@@ -230,171 +394,2056 @@ namespace skycraft
+ 				logger::info("hit pipeline: not on AE; using plain damage");
+ 				return;
+ 			}
+-			// Only trust the address if the engine's own melee code really calls it.
+-			const auto  site = REL::ID(38627).address() + 0x4A8;
+-			const auto* code = reinterpret_cast<const std::uint8_t*>(site);
+-			const auto  target = REL::ID(38586).address();
+-			std::int32_t rel = 0;
+-			std::memcpy(&rel, code + 1, 4);
+-			if (code[0] != 0xE8 || site + 5 + rel != target) {
+-				logger::warn("hit pipeline: melee call site doesn't match this game build; using plain damage");
+-				return;
 +			// Only trust the address if the engine's own melee code really calls it.
 +			const auto  site = REL::ID(38627).address() + 0x4A8;
 +			const auto* code = reinterpret_cast<const std::uint8_t*>(site);
@@ -7323,6 +7360,102 @@ index 0954b7f..2c68582 100644
 +				}
 +			}
 +			return nullptr;
++		}
++
++		// The custom stand-in records: one NPC record per mob size in the library, made at runtime (as the block forms are) from the stock
++		// creature's, so each size has a stand-in of its own that is not a stock creature. If a record can't be made the stock creature is used.
++		std::unordered_map<std::string, RE::TESNPC*> customBases;
++		std::unordered_map<RE::FormID, std::string>  actorSizeKey;  // a stand-in actor -> the size record it was made from
++		bool       skeletonTrialFailed = false;  // the first actor with a skeleton of our own got no 3D: no more are made
++		bool       skeletonTrialPending = false;  // a record with a custom skeleton was made; the first actor made from one is the trial
++		RE::FormID skeletonTrialActor = 0;
++		float      skeletonTrialAge = 0.0f;
++
++		RE::TESNPC* FindProxyBase();
++
++		RE::TESNPC* CustomProxyBase(const std::string& a_key)
++		{
++			if (const auto it = customBases.find(a_key); it != customBases.end()) {
++				return it->second;
++			}
++			RE::TESNPC* made = nullptr;
++			if (auto* stock = FindProxyBase()) {
++				auto* npc = RE::IFormFactory::Create<RE::TESNPC>();
++				if (npc) {
++					if (npc->GetFormID() == 0) {
++						npc->SetFormID(0, true);
++					}
++					const auto ownId = npc->GetFormID();
++					bool       copied = false;
++					if constexpr (requires { npc->CopyFrom(stock); }) {
++						npc->CopyFrom(stock);
++						copied = true;
++					}
++					if (copied && ownId != 0 && npc->GetFormID() == ownId) {
++						made = npc;
++						int w16 = 0, h16 = 0;
++						if (MobBodies::CustomSkeletonOn() && !skeletonTrialFailed && MobBodies::ParseKey(a_key, w16, h16)) {
++							// Our own skeleton: a race record copied from the stock creature's, pointing at a skeleton file that is this size's box, and the
++							// NPC's bounds set to the box, so the actor is the mob's shape.
++							const auto model = MobBodies::SkeletonModel(a_key, w16, h16);
++							if constexpr (requires { stock->race; npc->race = stock->race; }) {
++								if (!model.empty() && stock->race) {
++									auto* race = RE::IFormFactory::Create<RE::TESRace>();
++									bool  raceOk = false;
++									if (race) {
++										if (race->GetFormID() == 0) {
++											race->SetFormID(0, true);
++										}
++										const auto raceId = race->GetFormID();
++										if constexpr (requires { race->CopyFrom(stock->race); race->skeletonModels[0].SetModel(model.c_str()); }) {
++											race->CopyFrom(stock->race);
++											if (raceId != 0 && race->GetFormID() == raceId) {
++												race->skeletonModels[0].SetModel(model.c_str());
++												if constexpr (requires { race->skeletonModels[1].SetModel(model.c_str()); }) {
++													race->skeletonModels[1].SetModel(model.c_str());
++												}
++												raceOk = true;
++											}
++										}
++									}
++									if (raceOk) {
++										npc->race = race;
++										const float u = float(proto::kUnitsPerBlock);
++										if constexpr (requires { npc->boundData.boundMin.x = std::int16_t(0); }) {
++											npc->boundData.boundMin.x = static_cast<std::int16_t>(-w16 * u / 32.0f);
++											npc->boundData.boundMin.y = static_cast<std::int16_t>(-w16 * u / 32.0f);
++											npc->boundData.boundMin.z = 0;
++											npc->boundData.boundMax.x = static_cast<std::int16_t>(w16 * u / 32.0f);
++											npc->boundData.boundMax.y = static_cast<std::int16_t>(w16 * u / 32.0f);
++											npc->boundData.boundMax.z = static_cast<std::int16_t>(h16 * u / 16.0f);
++										}
++										if (skeletonTrialActor == 0) {
++											MobBodies::ArmSkeletonTrial();
++											skeletonTrialPending = true;
++										}
++										logger::info("Custom stand-in {:08X} for mob size {}: its race {:08X} has the skeleton {}", npc->GetFormID(), a_key, race->GetFormID(), model);
++									} else {
++										logger::warn("Couldn't make a race with a skeleton of its own for mob size {} (this CommonLib can't copy or set it); the stock creature's skeleton is used", a_key);
++									}
++								}
++							}
++						}
++					}
++				}
++				static int logged = 0;
++				if (logged++ < 12) {
++					if (made) {
++						logger::info("Custom stand-in record {:08X} made for mob size {} (from '{}')", made->GetFormID(), a_key, stock->GetName());
++					} else {
++						logger::warn("Couldn't make a custom stand-in record for mob size {}; the stock creature is used", a_key);
++					}
++				}
++				if (!made) {
++					made = stock;
++				}
++			}
++			customBases[a_key] = made;
++			return made;
 +		}
 +
 +		RE::TESNPC* FindProxyBase()
@@ -8108,9 +8241,11 @@ index 0954b7f..2c68582 100644
 +		// A mob reported by Minecraft: make or move its stand-in. a_ev.formId = the mob's id, a/b/c = its position.
 +		void MobProxyEvent(RE::PlayerCharacter* a_player, const proto::McEvent& a_ev)
 +		{
-+			if (MobBodies::Enabled()) {  // a mob's body is a collision box (MobBodies.cpp), not a stand-in actor
++			if (MobBodies::Enabled()) {  // a mob's body is a collision box (MobBodies.cpp); the stand-in actor, for Skyrim's NPCs to fight, goes on below
 +				MobBodies::OnProxy(a_player, a_ev);
-+				return;
++				if (!MobBodies::KeepActors()) {
++					return;
++				}
 +			}
 +			const auto mobId = static_cast<std::int32_t>(a_ev.formId);
 +			if ((a_ev.flags & proto::kMobProxyGone) != 0) {
@@ -8126,6 +8261,15 @@ index 0954b7f..2c68582 100644
 +				}
 +				RE::Actor* actor = nullptr;
 +				float      warm = 0.0f;
++				const std::string sizeKey = MobBodies::Enabled() ? MobBodies::KeyFor(mobId, std::bit_cast<float>(a_ev.weapon)) : std::string();
++				if (!sizeKey.empty()) {  // a parked stand-in of this mob's size first
++					for (auto pooled = proxyPool.rbegin(); pooled != proxyPool.rend(); ++pooled) {
++						if (const auto have = actorSizeKey.find(*pooled); have != actorSizeKey.end() && have->second == sizeKey) {
++							std::swap(*pooled, proxyPool.back());
++							break;
++						}
++					}
++				}
 +				while (!proxyPool.empty() && !actor) {  // a parked one first
 +					actor = RE::TESForm::LookupByID<RE::Actor>(proxyPool.back());
 +					if (!actor || actor->IsDead()) {
@@ -8140,10 +8284,18 @@ index 0954b7f..2c68582 100644
 +					}
 +					proxyPool.pop_back();
 +				}
-+				auto* base = actor ? nullptr : FindProxyBase();
++				auto* base = actor ? nullptr : (sizeKey.empty() ? FindProxyBase() : CustomProxyBase(sizeKey));
 +				if (!actor && base && mobProxies.size() + proxyPool.size() < kMaxProxies) {
 +					actor = PlaceProxyActor(a_player, base);
 +					warm = 2.0f;
++					if (actor && !sizeKey.empty()) {
++						actorSizeKey[actor->GetFormID()] = sizeKey;
++					}
++					if (actor && skeletonTrialPending && skeletonTrialActor == 0) {
++						skeletonTrialActor = actor->GetFormID();
++						skeletonTrialAge = 0.0f;
++						skeletonTrialPending = false;
++					}
 +				} else if (!actor && base) {
 +					return;  // as many stand-ins as there will ever be, and none free
 +				}
@@ -8193,39 +8345,18 @@ index 0954b7f..2c68582 100644
 +					NameProxy(actor, name->second);
 +					it->second.named = name->second;
 +				}
-+			}
-+		}
-+
-+		// A mob's health, eye height and velocity, from Minecraft (kEvMobVitals).
-+		void MobVitalsEvent(RE::PlayerCharacter* a_player, const proto::McEvent& a_ev)
- 		{
--			if (!REL::Module::IsAE()) {
--				logger::info("hit pipeline: not on AE; using plain damage");
-+			if (MobBodies::Enabled()) {
-+				MobBodies::OnVitals(a_player, a_ev);
- 				return;
- 			}
--			// Only trust the address if the engine's own melee code really calls it.
--			const auto  site = REL::ID(38627).address() + 0x4A8;
--			const auto* code = reinterpret_cast<const std::uint8_t*>(site);
--			const auto  target = REL::ID(38586).address();
--			std::int32_t rel = 0;
--			std::memcpy(&rel, code + 1, 4);
--			if (code[0] != 0xE8 || site + 5 + rel != target) {
--				logger::warn("hit pipeline: melee call site doesn't match this game build; using plain damage");
-+			const auto it = mobProxies.find(static_cast<std::int32_t>(a_ev.formId));
-+			if (it == mobProxies.end()) {
- 				return;
  			}
 -			processHit = reinterpret_cast<ProcessHitFn*>(target);
 -			hitDataCtor = reinterpret_cast<HitDataCtorFn*>(REL::ID(43995).address());
 -			logger::info("hit pipeline: Minecraft hits go through Skyrim's hit processing");
--		}
--
+ 		}
+ 
 -		// A vanilla weapon standing in for the Minecraft one: its impact set gives the blood
 -		// spray and impact sound, its type the skill and sounds.
 -		RE::TESObjectWEAP* StandInWeapon(std::uint32_t a_weapon)
--		{
++		// A mob's health, eye height and velocity, from Minecraft (kEvMobVitals).
++		void MobVitalsEvent(RE::PlayerCharacter* a_player, const proto::McEvent& a_ev)
+ 		{
 -			RE::FormID id = 0;
 -			switch (a_weapon) {
 -			case proto::kWeaponBlade:
@@ -8243,6 +8374,16 @@ index 0954b7f..2c68582 100644
 -			default:
 -				id = 0x00013982;  // Iron Mace (fists, tools, blunt things)
 -				break;
++			if (MobBodies::Enabled()) {
++				MobBodies::OnVitals(a_player, a_ev);
++				if (!MobBodies::KeepActors()) {
++					return;
++				}
++			}
++			const auto it = mobProxies.find(static_cast<std::int32_t>(a_ev.formId));
++			if (it == mobProxies.end()) {
++				return;
++			}
 +			auto& proxy = it->second;
 +			proxy.mcHealth = a_ev.a;
 +			proxy.mcMax = a_ev.b;
@@ -8375,9 +8516,18 @@ index 0954b7f..2c68582 100644
 -			if (!actor || actor->IsDead()) {
 -				return;
 +			PublishLockTargets(a_delta);
-+			if (MobBodies::Enabled()) {
-+				MobBodies::Update(a_player, a_delta);
-+				return;  // no stand-in actors to keep
++			if (skeletonTrialActor != 0 && skeletonTrialActor != 0xFFFFFFFFu && !skeletonTrialFailed) {  // the first actor with a custom skeleton: does it get a 3D?
++				skeletonTrialAge += a_delta;
++				auto* trial = RE::TESForm::LookupByID<RE::Actor>(skeletonTrialActor);
++				if (trial && trial->Is3DLoaded() && skeletonTrialAge > 1.0f) {
++					logger::info("Custom skeleton trial: the actor has a 3D with its own skeleton; custom skeletons stay on");
++					MobBodies::SkeletonTrialPassed();
++					skeletonTrialActor = 0xFFFFFFFFu;
++				} else if (skeletonTrialAge > 6.0f) {
++					logger::warn("Custom skeleton trial: the actor got no 3D in 6 seconds; custom skeletons are off from now on, and from the next start");
++					skeletonTrialFailed = true;
++					MobBodies::SkeletonTrialFailed();
++				}
  			}
 -			const float scale = 5.0f + 0.25f * static_cast<float>(actor->GetLevel());
 -			const float damage = a_ev.a * scale;
@@ -8414,6 +8564,14 @@ index 0954b7f..2c68582 100644
 -				hit->flags.reset(RE::HitData::Flag::kPowerAttack, RE::HitData::Flag::kCritical, RE::HitData::Flag::kSneakAttack, RE::HitData::Flag::kMeleeAttack);
 -				if (!projectile) {
 -					hit->flags.set(RE::HitData::Flag::kMeleeAttack);
++			if (MobBodies::Enabled()) {
++				MobBodies::Update(a_player, a_delta);
++				if (!MobBodies::KeepActors()) {
++					return;  // no stand-in actors to keep
+ 				}
+-				if (crit) {
+-					hit->flags.set(RE::HitData::Flag::kCritical);
++			}
 +			for (auto hit = proxyPlayerHitAge.begin(); hit != proxyPlayerHitAge.end();) {
 +				hit->second += a_delta;
 +				hit = hit->second > 30.0f ? proxyPlayerHitAge.erase(hit) : std::next(hit);
@@ -8430,25 +8588,12 @@ index 0954b7f..2c68582 100644
 +				if (Link::Get().McAlive()) {
 +					proxy.silence += std::min(a_delta, 0.1f);
  				}
--				if (crit) {
--					hit->flags.set(RE::HitData::Flag::kCritical);
+-				if (push > 0.45f) {
+-					hit->flags.set(RE::HitData::Flag::kPowerAttack);
 +				auto* actor = RE::TESForm::LookupByID<RE::Actor>(proxy.formId);
 +				// A knocked-down stand-in is got up again before it is judged (see ReviveProxy).
 +				if (actor && !actor->IsDead()) {
 +					ReviveProxy(actor, proxy);
- 				}
--				if (push > 0.45f) {
--					hit->flags.set(RE::HitData::Flag::kPowerAttack);
-+				if (!actor || actor->IsDead() || proxy.silence > 10.0f) {
-+					static int dropped = 0;
-+					if (dropped++ < 40) {
-+						logger::info("Stand-in ({:08X}) of mob {} dropped: {}", proxy.formId, it->first,
-+							!actor ? "Skyrim no longer has the actor" : actor->IsDead() ? "it died in Skyrim" : "Minecraft stopped reporting the mob");
-+					}
-+					const auto id = it->first;
-+					++it;
-+					RemoveProxy(id);
-+					continue;
  				}
 -				processHit(actor, *hit);
 -			} else if (damage > 0.0f) {
@@ -8460,6 +8605,17 @@ index 0954b7f..2c68582 100644
 -					actor->SetGraphVariableFloat("staggerDirection", sdir);
 -					actor->SetGraphVariableFloat("staggerMagnitude", stagger);
 -					actor->NotifyAnimationGraph("staggerStart");
++				if (!actor || actor->IsDead() || proxy.silence > 10.0f) {
++					static int dropped = 0;
++					if (dropped++ < 40) {
++						logger::info("Stand-in ({:08X}) of mob {} dropped: {}", proxy.formId, it->first,
++							!actor ? "Skyrim no longer has the actor" : actor->IsDead() ? "it died in Skyrim" : "Minecraft stopped reporting the mob");
++					}
++					const auto id = it->first;
++					++it;
++					RemoveProxy(id);
++					continue;
++				}
 +				// A stand-in whose mob is alive is never left switched off, whatever switched it off (a stand-in is only put away when its
 +				// mob is gone): it is switched on again and kept out of sight for a moment while it loads.
 +				// Skyrim hands a stand-in that was switched off back with its own default health (a rabbit's), not the mob's. That drop is
@@ -8605,7 +8761,7 @@ index 0954b7f..2c68582 100644
  		}
  
  		void KillPlayer(RE::PlayerCharacter* a_player, const proto::McEvent& a_ev)
-@@ -580,7 +2497,7 @@ namespace skycraft
+@@ -580,7 +2629,7 @@ namespace skycraft
  			for (auto& handle : lists->highActorHandles) {
  				auto actorPtr = handle.get();
  				auto* actor = actorPtr.get();
@@ -8614,7 +8770,7 @@ index 0954b7f..2c68582 100644
  					continue;
  				}
  				const auto hazard = HazardAtActor(actor);
-@@ -698,6 +2615,7 @@ namespace skycraft
+@@ -698,6 +2747,7 @@ namespace skycraft
  			RE::NiPoint3 center;
  			float        radius;  // Minecraft blocks
  			float        delay;   // seconds: after the blast's damage has landed
@@ -8622,7 +8778,7 @@ index 0954b7f..2c68582 100644
  		};
  		std::vector<PendingExplosion> pendingExplosions;
  
-@@ -786,6 +2704,9 @@ namespace skycraft
+@@ -786,6 +2836,9 @@ namespace skycraft
  					continue;
  				}
  				if (auto* actor = ref->As<RE::Actor>()) {
@@ -8632,7 +8788,7 @@ index 0954b7f..2c68582 100644
  					if (!actor->IsDead()) {
  						if (auto* process = actor->GetActorRuntimeData().currentProcess) {
  							process->KnockExplosion(actor, a_blast.center, 25.0f * falloff * power);
-@@ -830,6 +2751,183 @@ namespace skycraft
+@@ -830,6 +2883,183 @@ namespace skycraft
  			}
  			logger::info("Minecraft explosion (radius {:.1f}): knocked {} people away, threw {} objects", a_blast.radius, people, objects);
  		}
@@ -8816,7 +8972,7 @@ index 0954b7f..2c68582 100644
  	}
  
  	namespace Combat
-@@ -838,8 +2936,15 @@ namespace skycraft
+@@ -838,8 +3068,15 @@ namespace skycraft
  		{
  			REL::Relocation<std::uintptr_t> vtbl{ RE::VTABLE_PlayerCharacter[0] };
  			HandleHealthDamageHook::func = vtbl.write_vfunc(0x104, HandleHealthDamageHook::thunk);
@@ -8832,7 +8988,7 @@ index 0954b7f..2c68582 100644
  			}
  			ResolveHitPipeline();
  			logger::info("combat hooks installed");
-@@ -854,20 +2959,66 @@ namespace skycraft
+@@ -854,20 +3091,66 @@ namespace skycraft
  				}
  				healthPrimed = false;
  				engaged = false;
@@ -8905,7 +9061,7 @@ index 0954b7f..2c68582 100644
  			SetEssential(a_player, true);
  			WriteActorTable(a_player);
  			engagedTimer -= a_delta;
-@@ -878,29 +3029,11 @@ namespace skycraft
+@@ -878,29 +3161,11 @@ namespace skycraft
  
  			proto::McEvent ev;
  			while (link.PopEvent(ev)) {
@@ -8938,7 +9094,7 @@ index 0954b7f..2c68582 100644
  			for (auto it = pendingExplosions.begin(); it != pendingExplosions.end();) {
  				it->delay -= a_delta;
  				if (it->delay <= 0.0f) {
-@@ -924,5 +3057,16 @@ namespace skycraft
+@@ -924,5 +3189,16 @@ namespace skycraft
  		}
  
  		bool PlayerEngaged() { return engaged; }
@@ -9411,7 +9567,7 @@ index 3bb4d34..1527bc2 100644
  				Perf::Scope timer(Perf::kDigMeshes);
  				Dig::UpdateMeshes(digSettled > 3.0f ? a_player : nullptr, a_delta, !dugChanged.empty());
 diff --git a/skse/src/Game.h b/skse/src/Game.h
-index 05788b1..ee7ef17 100644
+index 05788b1..5191d9e 100644
 --- a/skse/src/Game.h
 +++ b/skse/src/Game.h
 @@ -2,6 +2,11 @@
@@ -9538,7 +9694,7 @@ index 05788b1..ee7ef17 100644
  		// For the blocks' contact shadows (any thread): sets a_bit in a_out[x + w*(y + h*z)] for
  		// each solid block of the box at a_origin (Minecraft block coords) of a_size blocks. The
  		// generation changes whenever any section's blocks do.
-@@ -153,6 +224,76 @@ namespace skycraft
+@@ -153,6 +224,84 @@ namespace skycraft
  		std::uint32_t Generation();
  		// Main thread, every frame: NPCs overlapping solid Minecraft blocks are pushed back out.
  		void PushActorsOut(RE::PlayerCharacter* a_player, float a_delta);
@@ -9586,12 +9742,20 @@ index 05788b1..ee7ef17 100644
 +	namespace MobBodies
 +	{
 +		bool Enabled();
++		bool KeepActors();
 +		// At plugin load, before the game reads its files (Skyrim loads only model files that existed when it started).
 +		void PrepareFiles();
 +		void OnProxy(RE::PlayerCharacter* a_player, const proto::McEvent& a_ev);
 +		void OnVitals(RE::PlayerCharacter* a_player, const proto::McEvent& a_ev);
 +		void Update(RE::PlayerCharacter* a_player, float a_delta);
 +		std::int32_t MobOfRef(RE::FormID a_refId);
++		std::string  KeyFor(std::int32_t a_mobId, float a_height);
++		bool         CustomSkeletonOn();
++		std::string  SkeletonModel(const std::string& a_key, int a_w16, int a_h16);
++		bool         ParseKey(const std::string& a_key, int& a_w16, int& a_h16);
++		void         ArmSkeletonTrial();
++		void         SkeletonTrialPassed();
++		void         SkeletonTrialFailed();
 +		void Clear();
 +	}
 +
@@ -10283,10 +10447,10 @@ index 0000000..0939189
 +}
 diff --git a/skse/src/MobBodies.cpp b/skse/src/MobBodies.cpp
 new file mode 100644
-index 0000000..622a0b5
+index 0000000..66f065d
 --- /dev/null
 +++ b/skse/src/MobBodies.cpp
-@@ -0,0 +1,414 @@
+@@ -0,0 +1,763 @@
 +#include "Game.h"
 +#include "CollisionNif.h"
 +
@@ -10296,6 +10460,7 @@ index 0000000..622a0b5
 +#include <bit>
 +#include <cmath>
 +#include <chrono>
++#include <cstdio>
 +#include <filesystem>
 +#include <fstream>
 +#include <unordered_map>
@@ -10325,6 +10490,8 @@ index 0000000..622a0b5
 +			bool        on{ true };
 +			std::string catalog;  // path of mob_catalog.json (empty: look where the Minecraft that comes with SkyCraft writes it)
 +			int         maxBodies{ 64 };
++			bool        skeleton{ true };  // each stand-in actor gets a skeleton of our own, a box, instead of the stock creature's
++			bool        actors{ true };  // the stand-in actors are kept too, for Skyrim's NPCs to fight
 +		};
 +
 +		const BodyCfg& Cfg()
@@ -10336,6 +10503,8 @@ index 0000000..622a0b5
 +				BodyCfg s;
 +				s.on = ini.GetBoolValue("Mobs", "bBoxBodies", true);
 +				s.catalog = ini.GetValue("Mobs", "sMobCatalog", "");
++				s.skeleton = ini.GetBoolValue("Mobs", "bCustomSkeleton", true);
++				s.actors = ini.GetBoolValue("Mobs", "bStandInActors", true);
 +				s.maxBodies = static_cast<int>(std::clamp<long>(ini.GetLongValue("Mobs", "iMaxBodies", 64), 4, 400));
 +				return s;
 +			}();
@@ -10346,6 +10515,13 @@ index 0000000..622a0b5
 +		const std::filesystem::path kSlotDir = "Data/Meshes/SkyCraft/MobSlots";
 +		constexpr const char*       kLibModelDir = "SkyCraft\\MobLibrary\\";
 +		constexpr const char*       kSlotModelDir = "SkyCraft\\MobSlots\\";
++		const std::filesystem::path kSkelDir = "Data/Meshes/SkyCraft/MobActors";
++		constexpr const char*       kSkelModelDir = "SkyCraft\\MobActors\\";
++		const std::filesystem::path kSkelMarker = "Data/SKSE/Plugins/SkyCraft/custom_skeleton.marker";
++		std::unordered_set<std::string> skelKeys;  // sizes whose skeleton file was made at plugin load
++		int                         skelSlotNext = 0;
++		bool                        skelSlotsReady = false;
++		bool                        skelOn = false;  // decided at plugin load
 +		constexpr int               kSlots = 200;
 +		constexpr int               kMaxWidth16 = 255;
 +		constexpr int               kMaxHeight16 = 400;
@@ -10375,6 +10551,27 @@ index 0000000..622a0b5
 +			return collisionnif::Build({ box }, collisionnif::kMaterialStone, 0.01f);
 +		}
 +
++		// The actor skeleton for a mob size (revision 48): the box as before, but as a skeleton Skyrim's actor code can use, not a static. Its root
++		// is "NPC Root [Root]" with "NPC COM [COM ]" (middle of the box) and "NPC Head [Head]" (near the top, where lock-on and head tracking
++		// aim) under it, and its body is on the BIPED layer, keyframed, so Skyrim's swings, arrows and spells treat it as the actor's body.
++		std::vector<std::uint8_t> SkeletonBytes(int a_w16, int a_h16)
++		{
++			const float u = float(proto::kUnitsPerBlock);
++			const float half = a_w16 * u / 32.0f;
++			collisionnif::Box box;
++			box.lo[0] = -half;
++			box.lo[1] = -half;
++			box.lo[2] = 0.0f;
++			box.hi[0] = half;
++			box.hi[1] = half;
++			box.hi[2] = a_h16 * u / 16.0f;
++			collisionnif::Options opt;
++			opt.actorNodes = true;
++			opt.layer = 8;
++			opt.motion = 6;
++			return collisionnif::Build({ box }, collisionnif::kMaterialStone, 0.01f, opt);
++		}
++
 +		bool WriteBytes(const std::filesystem::path& a_path, const std::vector<std::uint8_t>& a_bytes)
 +		{
 +			std::ofstream out(a_path, std::ios::binary | std::ios::trunc);
@@ -10401,6 +10598,7 @@ index 0000000..622a0b5
 +			bool         checked{ false };
 +		};
 +		std::unordered_map<std::int32_t, Body> bodies;
++		std::unordered_map<std::int32_t, float> widthSeen;  // mob id -> its width as last told (vitals come before the first proxy event)
 +
 +		template <class R>
 +		void DeleteRef(R* a_ref)
@@ -10514,6 +10712,231 @@ index 0000000..622a0b5
 +			a_body.shown = a_body.pos;
 +			return true;
 +		}
++
++		// ---- Round-one probe for the custom stand-in actors (see below): what Skyrim and this CommonLib accept, written to SkyCraft.log. ----
++		// A custom stand-in is an actor made at runtime for each mob size: its own NPC and race records, a skeleton of our own with the mob's
++		// box as its collision. Nothing in that is known to work on this install yet, so before it is built the probe asks, one step at a time:
++		//   1. how Skyrim's own creature skeletons are laid out (the block types in the file: where an actor's collision is kept, and in what shape)
++		//   2. whether an NPC record and a race record can be made at runtime and copied from a stock creature's
++		//   3. whether an actor made from the copies gets a 3D, and what kind of character controller it has
++		// A marker file is written before step 2 and removed after step 3: if Skyrim crashes in between, the marker is still there at the next
++		// start, and the probe doesn't run again (the log says so).
++		const std::filesystem::path kProbeMarker = "Data/SKSE/Plugins/SkyCraft/mob_actor_probe.marker";
++
++		template <class S>
++		bool ProbeRead(S& a_stream, std::vector<std::uint8_t>& a_out, std::size_t a_count)
++		{
++			if (a_count > (1u << 20)) {
++				return false;
++			}
++			const auto at = a_out.size();
++			a_out.resize(at + a_count);
++			if (a_count == 0) {
++				return true;
++			}
++			if constexpr (requires { a_stream.read(static_cast<char*>(nullptr), std::uint32_t(0)); }) {
++				a_stream.read(reinterpret_cast<char*>(a_out.data() + at), static_cast<std::uint32_t>(a_count));
++				return a_stream.good();
++			} else {
++				return false;
++			}
++		}
++
++		// Logs the block types (with counts) of a .nif in Skyrim's files, from its header alone.
++		void DumpBlockTypes(const std::string& a_path)
++		{
++			RE::BSResourceNiBinaryStream stream(a_path);
++			if (!stream.good()) {
++				logger::info("Mob actor probe: {} can't be opened", a_path);
++				return;
++			}
++			std::vector<std::uint8_t> b;
++			auto                      u32at = [&](std::size_t a_at) {
++                std::uint32_t v = 0;
++                std::memcpy(&v, b.data() + a_at, 4);
++                return v;
++			};
++			for (int i = 0; i < 80; ++i) {
++				if (!ProbeRead(stream, b, 1)) {
++					return;
++				}
++				if (b.back() == '\n') {
++					break;
++				}
++			}
++			std::size_t p = b.size();
++			if (!ProbeRead(stream, b, 4 + 1 + 4 + 4 + 4)) {
++				return;
++			}
++			const std::uint32_t blocks = u32at(p + 9);
++			for (int i = 0; i < 3; ++i) {
++				if (!ProbeRead(stream, b, 1) || !ProbeRead(stream, b, b.back())) {
++					return;
++				}
++			}
++			p = b.size();
++			if (blocks > 100000 || !ProbeRead(stream, b, 2)) {
++				return;
++			}
++			std::uint16_t types = 0;
++			std::memcpy(&types, b.data() + p, 2);
++			std::vector<std::string> names;
++			for (std::uint16_t i = 0; i < types; ++i) {
++				p = b.size();
++				if (!ProbeRead(stream, b, 4)) {
++					return;
++				}
++				const auto len = u32at(p);
++				p = b.size();
++				if (!ProbeRead(stream, b, len)) {
++					return;
++				}
++				names.emplace_back(reinterpret_cast<const char*>(b.data() + p), len);
++			}
++			p = b.size();
++			if (!ProbeRead(stream, b, std::size_t(blocks) * 2)) {
++				return;
++			}
++			std::vector<int> count(names.size(), 0);
++			for (std::uint32_t i = 0; i < blocks; ++i) {
++				std::uint16_t t = 0;
++				std::memcpy(&t, b.data() + p + std::size_t(i) * 2, 2);
++				if (t < count.size()) {
++					++count[t];
++				}
++			}
++			std::string line;
++			for (std::size_t i = 0; i < names.size(); ++i) {
++				line += fmt::format("{}{} x{}", i ? ", " : "", names[i], count[i]);
++			}
++			logger::info("Mob actor probe: {} has {} blocks: {}", a_path, blocks, line);
++		}
++
++		enum class ProbeState
++		{
++			kIdle,
++			kPlaced,
++			kDone
++		};
++		ProbeState probeState = ProbeState::kIdle;
++		RE::FormID probeRef = 0;
++		float      probeWait = 0.0f;
++
++		template <class D>
++		RE::TESNPC* ProbeRabbit(D* a_data)
++		{
++			if constexpr (requires { a_data->template GetFormArray<RE::TESNPC>(); }) {
++				for (auto* npc : a_data->template GetFormArray<RE::TESNPC>()) {
++					if (npc && npc->GetName() && std::string_view(npc->GetName()) == "Rabbit") {
++						return npc;
++					}
++				}
++			}
++			return nullptr;
++		}
++
++		void FinishProbe(const char* a_why)
++		{
++			logger::info("Mob actor probe: finished ({})", a_why);
++			std::error_code ec;
++			std::filesystem::remove(kProbeMarker, ec);
++			probeState = ProbeState::kDone;
++		}
++
++		void RunProbe(RE::PlayerCharacter* a_player, float a_delta)
++		{
++			if (probeState == ProbeState::kDone) {
++				return;
++			}
++			if (probeState == ProbeState::kPlaced) {
++				probeWait += a_delta;
++				if (probeWait < 2.0f) {
++					return;
++				}
++				if (auto* ref = RE::TESForm::LookupByID<RE::TESObjectREFR>(probeRef)) {
++					logger::info("Mob actor probe: the actor made from the copies has {} 3D", ref->Get3D() ? "a" : "NO");
++					if (auto* actor = ref->template As<RE::Actor>()) {
++						if constexpr (requires { actor->GetCharController(); }) {
++							auto* controller = actor->GetCharController();
++							logger::info("Mob actor probe: character controller: {}{}", controller ? "present" : "none",
++								skyrim_cast<RE::bhkCharProxyController*>(controller) ? ", a proxy controller (capsule)" : ", not a proxy controller");
++						}
++					}
++					DeleteRef(ref);
++				}
++				FinishProbe("the copies work as far as placing an actor");
++				return;
++			}
++			if (!a_player || !a_player->Is3DLoaded()) {
++				return;
++			}
++			std::error_code ec;
++			if (std::filesystem::exists(kProbeMarker, ec)) {
++				logger::warn("Mob actor probe: not run: the previous one didn't finish (Skyrim probably crashed in it); delete {} to try again", kProbeMarker.string());
++				probeState = ProbeState::kDone;
++				return;
++			}
++			DumpBlockTypes("Meshes\\Actors\\Rabbit\\Character Assets\\skeleton.nif");
++			DumpBlockTypes("Meshes\\Actors\\Wolf\\Character Assets\\skeleton.nif");
++			DumpBlockTypes("Meshes\\Actors\\Character\\Character Assets\\skeleton.nif");
++			std::filesystem::create_directories(kProbeMarker.parent_path(), ec);
++			std::ofstream(kProbeMarker) << "mob actor probe running\n";
++			auto* data = RE::TESDataHandler::GetSingleton();
++			auto* rabbit = data ? ProbeRabbit(data) : nullptr;
++			if (!rabbit) {
++				FinishProbe("no stock rabbit to copy");
++				return;
++			}
++			auto* npc = RE::IFormFactory::Create<RE::TESNPC>();
++			if (!npc) {
++				FinishProbe("an NPC record can't be made at runtime");
++				return;
++			}
++			logger::info("Mob actor probe: an NPC record was made at runtime ({:08X})", npc->GetFormID());
++			bool copied = false;
++			if constexpr (requires { npc->CopyFrom(rabbit); }) {
++				npc->CopyFrom(rabbit);
++				copied = true;
++			}
++			logger::info("Mob actor probe: copying the rabbit's NPC record into it: {}", copied ? "done" : "this CommonLib has no CopyFrom");
++			if constexpr (requires { rabbit->race; }) {
++				auto* stockRace = rabbit->race;
++				logger::info("Mob actor probe: the rabbit's race is {:08X}", stockRace ? stockRace->GetFormID() : 0u);
++				if (stockRace) {
++					auto* race = RE::IFormFactory::Create<RE::TESRace>();
++					logger::info("Mob actor probe: a race record {} at runtime", race ? "was made" : "can't be made");
++					if (race) {
++						if constexpr (requires { race->CopyFrom(stockRace); }) {
++							race->CopyFrom(stockRace);
++							logger::info("Mob actor probe: copied the rabbit's race into it");
++						}
++						if constexpr (requires { npc->race = race; }) {
++							npc->race = race;
++						}
++					}
++				}
++			}
++			if (!copied) {
++				FinishProbe("no copy, so no actor is made");
++				return;
++			}
++			RE::NiPointer<RE::TESObjectREFR> ref;
++			if constexpr (requires { a_player->PlaceObjectAtMe(npc, false); }) {
++				ref = a_player->PlaceObjectAtMe(npc, false).get();
++			}
++			if (!ref) {
++				FinishProbe("an actor can't be placed from the copies");
++				return;
++			}
++			if (auto* actor = ref->template As<RE::Actor>()) {
++				if constexpr (requires { actor->SetAlpha(0.0f); }) {
++					actor->SetAlpha(0.0f);
++				}
++			}
++			probeRef = ref->GetFormID();
++			probeWait = 0.0f;
++			probeState = ProbeState::kPlaced;
++		}
 +	}
 +
 +	namespace MobBodies
@@ -10521,6 +10944,12 @@ index 0000000..622a0b5
 +		bool Enabled()
 +		{
 +			return Cfg().on && !broken;
++		}
++
++		// Skyrim's combat AI can only fight an actor, so the stand-in actors are kept alongside the bodies unless this is off.
++		bool KeepActors()
++		{
++			return Cfg().actors;
 +		}
 +
 +		// Reads mob_catalog.json (written by the Fabric side: MobCatalog.java) and writes a model for every size in it, then makes the spare
@@ -10545,6 +10974,21 @@ index 0000000..622a0b5
 +				spare += WriteBytes(kSlotDir / fmt::format("slot{:04d}.nif", i), BoxBytes(8, 8)) ? 1 : 0;
 +			}
 +			slotsReady = spare == kSlots;
++
++			// Skeletons of our own for the stand-in actors: the same box as the body, in a file that is the actor's skeleton (see Combat.cpp).
++			std::filesystem::create_directories(kSkelDir, ec);
++			skelOn = Cfg().skeleton && std::filesystem::is_directory(kSkelDir);
++			if (skelOn && std::filesystem::exists(kSkelMarker, ec)) {
++				skelOn = false;
++				logger::warn("Custom skeletons are off: the last time one was tried it never got a 3D (Skyrim probably crashed or the actor failed); delete {} to try again", kSkelMarker.string());
++			}
++			if (skelOn) {
++				int skelSpare = 0;
++				for (int i = 0; i < kSlots; ++i) {
++					skelSpare += WriteBytes(kSkelDir / fmt::format("slot{:04d}.nif", i), SkeletonBytes(8, 8)) ? 1 : 0;
++				}
++				skelSlotsReady = skelSpare == kSlots;
++			}
 +
 +			std::vector<std::filesystem::path> candidates;
 +			if (!Cfg().catalog.empty()) {
@@ -10584,6 +11028,9 @@ index 0000000..622a0b5
 +					libraryKeys.insert(key);
 +					++made;
 +				}
++				if (skelOn && !skelKeys.contains(key) && WriteBytes(kSkelDir / ("sk_" + key + ".nif"), SkeletonBytes(w, h))) {
++					skelKeys.insert(key);
++				}
 +			}
 +			const auto ms = std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now() - started).count();
 +			if (text.empty()) {
@@ -10599,6 +11046,7 @@ index 0000000..622a0b5
 +			const auto mobId = static_cast<std::int32_t>(a_ev.formId);
 +			if ((a_ev.flags & proto::kMobProxyGone) != 0) {
 +				RemoveBody(mobId);
++				widthSeen.erase(mobId);
 +				return;
 +			}
 +			const auto pos = McToSky(a_ev.a, a_ev.b, a_ev.c);
@@ -10608,6 +11056,9 @@ index 0000000..622a0b5
 +					return;
 +				}
 +				it = bodies.emplace(mobId, Body{}).first;
++				if (const auto w = widthSeen.find(mobId); w != widthSeen.end()) {
++					it->second.width = w->second;
++				}
 +			}
 +			auto& body = it->second;
 +			body.pos = pos;
@@ -10626,6 +11077,9 @@ index 0000000..622a0b5
 +		// (a slime that splits, a mob that grows) gets a body of its new size.
 +		void OnVitals(RE::PlayerCharacter* a_player, const proto::McEvent& a_ev)
 +		{
++			if (a_ev.d > 0.0f && a_ev.d < 64.0f) {
++				widthSeen[static_cast<std::int32_t>(a_ev.formId)] = a_ev.d;
++			}
 +			const auto it = bodies.find(static_cast<std::int32_t>(a_ev.formId));
 +			if (it == bodies.end()) {
 +				return;
@@ -10648,8 +11102,9 @@ index 0000000..622a0b5
 +
 +		// Main thread, every frame: bodies follow their mobs (carried on by the mob's velocity between reports), and a body whose mob has been
 +		// silent for long goes.
-+		void Update(RE::PlayerCharacter*, float a_delta)
++		void Update(RE::PlayerCharacter* a_player, float a_delta)
 +		{
++			RunProbe(a_player, a_delta);
 +			for (auto it = bodies.begin(); it != bodies.end();) {
 +				auto& body = it->second;
 +				if (Link::Get().McAlive()) {
@@ -10682,6 +11137,53 @@ index 0000000..622a0b5
 +			}
 +		}
 +
++		bool CustomSkeletonOn()
++		{
++			return Enabled() && skelOn;
++		}
++
++		// The skeleton model (relative to Data\\Meshes) for a size key, or empty: its file from the library, else the next spare file written with the box.
++		std::string SkeletonModel(const std::string& a_key, int a_w16, int a_h16)
++		{
++			if (!skelOn) {
++				return {};
++			}
++			if (skelKeys.contains(a_key)) {
++				return std::string(kSkelModelDir) + "sk_" + a_key + ".nif";
++			}
++			if (skelSlotsReady && skelSlotNext < kSlots) {
++				const auto file = fmt::format("slot{:04d}.nif", skelSlotNext++);
++				if (WriteBytes(kSkelDir / file, SkeletonBytes(a_w16, a_h16))) {
++					return std::string(kSkelModelDir) + file;
++				}
++			}
++			return {};
++		}
++
++		bool ParseKey(const std::string& a_key, int& a_w16, int& a_h16)
++		{
++			return std::sscanf(a_key.c_str(), "w%d_h%d", &a_w16, &a_h16) == 2 && a_w16 > 0 && a_h16 > 0;
++		}
++
++		// The first actor with a custom skeleton is a trial: the marker stays until it has a 3D, and a start that finds it doesn't try again.
++		void ArmSkeletonTrial()
++		{
++			std::error_code ec;
++			std::filesystem::create_directories(kSkelMarker.parent_path(), ec);
++			std::ofstream(kSkelMarker) << "custom skeleton trial running\n";
++		}
++
++		void SkeletonTrialPassed()
++		{
++			std::error_code ec;
++			std::filesystem::remove(kSkelMarker, ec);
++		}
++
++		void SkeletonTrialFailed()
++		{
++			skelOn = false;
++		}
++
 +		// The mob a body belongs to (for diagnostics), or -1.
 +		std::int32_t MobOfRef(RE::FormID a_refId)
 +		{
@@ -10693,8 +11195,19 @@ index 0000000..622a0b5
 +			return -1;
 +		}
 +
++		// The size key ("w<width>_h<height>", sixteenths of a block) of a mob whose width has been reported; empty if it hasn't.
++		std::string KeyFor(std::int32_t a_mobId, float a_height)
++		{
++			const auto w = widthSeen.find(a_mobId);
++			if (w == widthSeen.end() || !(a_height > 0.0f) || a_height >= 64.0f) {
++				return {};
++			}
++			return SizeKey(Sixteenths(w->second, kMaxWidth16), Sixteenths(a_height, kMaxHeight16));
++		}
++
 +		void Clear()
 +		{
++			widthSeen.clear();
 +			while (!bodies.empty()) {
 +				RemoveBody(bodies.begin()->first);
 +			}
@@ -11623,7 +12136,7 @@ index b877ae5..36666dc 100644
  				logger::info("in-frame block drawing: hooked after Main::RenderWorld");
  			}
 diff --git a/skse/src/main.cpp b/skse/src/main.cpp
-index eb548b4..2bbbcaf 100644
+index eb548b4..1b7248f 100644
 --- a/skse/src/main.cpp
 +++ b/skse/src/main.cpp
 @@ -21,6 +21,9 @@ namespace
@@ -11648,7 +12161,7 @@ index eb548b4..2bbbcaf 100644
  	SetupLog();
  	skycraft::CrashLog::Install();
  	logger::info("SkyCraft {} loading (runtime {})", "0.1.2", a_skse->RuntimeVersion().string());
-+	logger::info("patch revision 43 (mob bodies: every Minecraft mob is a collision box the size of its bounding box in Skyrim's world, made from a mob catalogue Minecraft writes at start (modded mobs included), replacing the stand-in actors; revision 42: damage diagnostics merged in: every blow that reaches a mob's stand-in is logged with who threw it, and Skyrim hits the Minecraft side cannot find a live mob for are logged; revision 41: only doors, trapdoors and fence gates lose their collision when open (a barrel has an open state too and stays solid); every change of a section that Skyrim takes up is logged; revision 40: a section sent again with the same collision no longer makes Skyrim rebuild its collision model, so the sections beside a door stop being rebuilt many times a second and a door change shows at once; revision 39: open doors, trapdoors and fence gates have no collision in Skyrim; each open/close is logged on the Minecraft side; revision 38: mob stand-ins restored to the earlier, steadier version (health 1:1, damage guard, revival, 20 Hz positions from Fabric) on top of the collision and lock-on work; lock-on stays LockOn.cpp, with the stand-ins on its never-lock-on list; revision 37: mob stand-ins are back: invisible Skyrim actors for Minecraft mobs so NPCs fight them and spells hurt the mob; they sit exactly on the mob's feet at its height, stay in every control mode, and are on True Directional Movement's never-lock-on list; revision 36: doors, trapdoors and fence gates send their section to Skyrim again the moment their state changes, by any route, and the Fabric side watches every openable block each frame; walking up stairs, slabs and carpets lifts the player onto the step as Minecraft does, bStepUp in SkyCraft.ini; revision 35: the collision model's blocks are now in Skyrim's own order, the shapes before the list that holds them: the list was built before its children existed, a null read at load in every section model; the body bytes now match Skyrim's own statics: the second collision response and callback delay were zero, which is response type INVALID, and the rolling friction was 1; revision 34: the plugin makes the shape library models at load and places odd blocks as references to them once a section model is proven; collision models on by default, the crates stay under you until a model is seen working; tools/make_collision_library.py builds the shape library from the catalogue, which the Fabric side now writes by itself; ShapeKey in Game.h; revision 33: the Fabric side can list every distinct collision shape in the game with -Dskycraft.dumpShapes=true, ShapeCatalog.java; revision 32: collision test models are now loaded one at a time, smallest first, with a LOADING line logged before each; the byte-shifted variants are gone; revision 31: collision shapes: the array headers inside the list and convex shapes are empty like Skyrim's own, which was a null read at load; revision 30: collision model body now matches Skyrim's own statics: fixed motion system, flags 129 and 130; revision 29: collision models are off by default, a copy of vanilla models is made to see their layout; revision 28: section models are written into files made at plugin load, because Skyrim only loads model files that existed when it started; revision 27: smaller test models and copies of loose models tried too; revision 26: block model variants tried side by side, the first Skyrim loads is used; revision 25: exact block shapes: no padding on doors, stairs and other non-cube blocks, up to 16 boxes per block; a probe in the log tells a rejected .nif from a form that can't load models; revision 24: block collision models checked in the Havok world, crates kept until they work; lock-on survives a missing frame; revision 23: section models of merged boxes loaded as invisible statics over the whole area Minecraft sent; revision 22: crates only, the box simulation that held the Skyrim player is gone; Minecraft's mobs, passive ones too, are lock-on targets again, handed to True Directional Movement as virtual targets; revision 21: mob stand-ins removed)");
++	logger::info("patch revision 48 (the custom skeletons are real actor skeletons: NPC Root/COM/Head nodes and a keyframed body on the biped layer, not the static block box; revision 47: stand-in actors get a skeleton of our own per mob size, a box, with the NPC bounds set to it; the first one is a trial that turns custom skeletons off if the actor gets no 3D; revision 46: stand-in actors are made from a custom NPC record per mob size, built at runtime from the library's sizes, and kept in a pool per size; the box body is the mob's exact shape; revision 45: round one of the custom stand-in actors: a probe at the first mob, logged as 'Mob actor probe', that reads how Skyrim's creature skeletons are laid out and tries making an NPC and race record at runtime; nothing else changes; revision 44: the stand-in actors are back alongside the mob bodies, bStandInActors in SkyCraft.ini, because Skyrim's NPCs can only fight an actor; revision 43: mob bodies: every Minecraft mob is a collision box the size of its bounding box in Skyrim's world, made from a mob catalogue Minecraft writes at start (modded mobs included), replacing the stand-in actors; revision 42: damage diagnostics merged in: every blow that reaches a mob's stand-in is logged with who threw it, and Skyrim hits the Minecraft side cannot find a live mob for are logged; revision 41: only doors, trapdoors and fence gates lose their collision when open (a barrel has an open state too and stays solid); every change of a section that Skyrim takes up is logged; revision 40: a section sent again with the same collision no longer makes Skyrim rebuild its collision model, so the sections beside a door stop being rebuilt many times a second and a door change shows at once; revision 39: open doors, trapdoors and fence gates have no collision in Skyrim; each open/close is logged on the Minecraft side; revision 38: mob stand-ins restored to the earlier, steadier version (health 1:1, damage guard, revival, 20 Hz positions from Fabric) on top of the collision and lock-on work; lock-on stays LockOn.cpp, with the stand-ins on its never-lock-on list; revision 37: mob stand-ins are back: invisible Skyrim actors for Minecraft mobs so NPCs fight them and spells hurt the mob; they sit exactly on the mob's feet at its height, stay in every control mode, and are on True Directional Movement's never-lock-on list; revision 36: doors, trapdoors and fence gates send their section to Skyrim again the moment their state changes, by any route, and the Fabric side watches every openable block each frame; walking up stairs, slabs and carpets lifts the player onto the step as Minecraft does, bStepUp in SkyCraft.ini; revision 35: the collision model's blocks are now in Skyrim's own order, the shapes before the list that holds them: the list was built before its children existed, a null read at load in every section model; the body bytes now match Skyrim's own statics: the second collision response and callback delay were zero, which is response type INVALID, and the rolling friction was 1; revision 34: the plugin makes the shape library models at load and places odd blocks as references to them once a section model is proven; collision models on by default, the crates stay under you until a model is seen working; tools/make_collision_library.py builds the shape library from the catalogue, which the Fabric side now writes by itself; ShapeKey in Game.h; revision 33: the Fabric side can list every distinct collision shape in the game with -Dskycraft.dumpShapes=true, ShapeCatalog.java; revision 32: collision test models are now loaded one at a time, smallest first, with a LOADING line logged before each; the byte-shifted variants are gone; revision 31: collision shapes: the array headers inside the list and convex shapes are empty like Skyrim's own, which was a null read at load; revision 30: collision model body now matches Skyrim's own statics: fixed motion system, flags 129 and 130; revision 29: collision models are off by default, a copy of vanilla models is made to see their layout; revision 28: section models are written into files made at plugin load, because Skyrim only loads model files that existed when it started; revision 27: smaller test models and copies of loose models tried too; revision 26: block model variants tried side by side, the first Skyrim loads is used; revision 25: exact block shapes: no padding on doors, stairs and other non-cube blocks, up to 16 boxes per block; a probe in the log tells a rejected .nif from a form that can't load models; revision 24: block collision models checked in the Havok world, crates kept until they work; lock-on survives a missing frame; revision 23: section models of merged boxes loaded as invisible statics over the whole area Minecraft sent; revision 22: crates only, the box simulation that held the Skyrim player is gone; Minecraft's mobs, passive ones too, are lock-on targets again, handed to True Directional Movement as virtual targets; revision 21: mob stand-ins removed)");
 +	skycraft::BlockCollision::PrepareFiles();
 +	skycraft::MobBodies::PrepareFiles();
  	SKSE::GetMessagingInterface()->RegisterListener(OnMessage);
