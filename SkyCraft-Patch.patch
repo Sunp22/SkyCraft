@@ -761,7 +761,7 @@ index 9f909ce..ca4828b 100644
 +	}
  }
 diff --git a/fabric/src/main/java/dev/skycraft/SkyCraft.java b/fabric/src/main/java/dev/skycraft/SkyCraft.java
-index 1670d74..ee1ffeb 100644
+index 1670d74..7127a57 100644
 --- a/fabric/src/main/java/dev/skycraft/SkyCraft.java
 +++ b/fabric/src/main/java/dev/skycraft/SkyCraft.java
 @@ -24,6 +24,8 @@ public final class SkyCraft implements ModInitializer {
@@ -785,7 +785,7 @@ index 1670d74..ee1ffeb 100644
  	private static void configureServer(MinecraftServer server) {
  		GameRules rules = server.getGameRules();
  		rules.set(GameRules.ADVANCE_TIME, false, server);
-@@ -48,6 +53,20 @@ public final class SkyCraft implements ModInitializer {
+@@ -48,6 +53,33 @@ public final class SkyCraft implements ModInitializer {
  		rules.set(GameRules.SHOW_ADVANCEMENT_MESSAGES, false, server);
  		server.getCommands().performPrefixedCommand(server.createCommandSourceStack().withSuppressedOutput(), "time set noon");
  		LOG.info("SkyCraft: mirror world configured");
@@ -802,6 +802,19 @@ index 1670d74..ee1ffeb 100644
 +			}
 +		} catch (RuntimeException ex) {
 +			LOG.warn("SkyCraft: shape catalog skipped", ex);
++		}
++
++		// The same for mobs: every distinct mob body size (modded mobs included), for the mob body library (MobBodies.cpp). -Dskycraft.dumpMobs=false
++		// turns it off, -Dskycraft.dumpMobs=force writes it every start.
++		try {
++			String mode = System.getProperty("skycraft.dumpMobs", "auto");
++			java.nio.file.Path mobCatalog = net.fabricmc.loader.api.FabricLoader.getInstance().getGameDir().resolve("skycraft").resolve("mob_catalog.json");
++			if (!"false".equalsIgnoreCase(mode) && ("force".equalsIgnoreCase(mode) || "true".equalsIgnoreCase(mode) || !java.nio.file.Files.exists(mobCatalog)
++				|| !dev.skycraft.world.MobCatalog.upToDate(mobCatalog))) {
++				dev.skycraft.world.MobCatalog.dump(mobCatalog);
++			}
++		} catch (RuntimeException ex) {
++			LOG.warn("SkyCraft: mob catalog skipped", ex);
 +		}
  	}
  
@@ -967,10 +980,10 @@ index 0000000..f7aa8b9
 +}
 diff --git a/fabric/src/main/java/dev/skycraft/combat/MobProxies.java b/fabric/src/main/java/dev/skycraft/combat/MobProxies.java
 new file mode 100644
-index 0000000..9804d7c
+index 0000000..27b3935
 --- /dev/null
 +++ b/fabric/src/main/java/dev/skycraft/combat/MobProxies.java
-@@ -0,0 +1,191 @@
+@@ -0,0 +1,192 @@
 +package dev.skycraft.combat;
 +
 +import dev.skycraft.link.Proto;
@@ -1016,8 +1029,8 @@ index 0000000..9804d7c
 +	private static final double RANGE = 30.0;
 +	/** Mobs this close to the player (blocks) get one to be locked on to and hit by spells. */
 +	private static final double PLAYER_RANGE = 40.0;
-+	/** At most this many stand-ins at once, the ones that matter most first (Skyrim makes no more than this, either). */
-+	private static final int MAX = 12;
++	/** At most this many mob bodies at once, the ones that matter most first. A body is a collision box, cheap beside the actor stand-in it replaces. */
++	private static final int MAX = 48;
 +	private static final Set<Integer> LIVE = new HashSet<>();
 +	/** Mob id -> game time its name was last sent. Skyrim names each stand-in after its mob (it would otherwise show as a skeever). */
 +	private static final Map<Integer, Long> NAME_SENT = new HashMap<>();
@@ -1132,7 +1145,8 @@ index 0000000..9804d7c
 +				continue;
 +			}
 +			var motion = mob.getDeltaMovement();
-+			SkyLink.pushEvent(Proto.EV_MOB_VITALS, mob.getId(), mob.getHealth(), mob.getMaxHealth(), mob.getEyeHeight(), 0.0F,
++			SkyLink.pushEvent(Proto.EV_MOB_VITALS, mob.getId(), mob.getHealth(), mob.getMaxHealth(), mob.getEyeHeight(), mob.getBbWidth(), // d: the body's width (MobBodies.cpp makes the box from it and the height)
++				
 +				Float.floatToRawIntBits((float) (motion.x * 20.0)), Float.floatToRawIntBits((float) (motion.z * 20.0)));
 +		}
 +		for (Integer id : new ArrayList<>(LIVE)) {
@@ -2775,7 +2789,7 @@ index 0000000..7cd4df6
 +	}
 +}
 diff --git a/fabric/src/main/java/dev/skycraft/link/Proto.java b/fabric/src/main/java/dev/skycraft/link/Proto.java
-index 26b7fe6..d70809c 100644
+index 26b7fe6..5e94056 100644
 --- a/fabric/src/main/java/dev/skycraft/link/Proto.java
 +++ b/fabric/src/main/java/dev/skycraft/link/Proto.java
 @@ -8,7 +8,7 @@ public final class Proto {
@@ -2839,7 +2853,7 @@ index 26b7fe6..d70809c 100644
 +	// Skyrim control mode has just begun: a = Minecraft's player health 0..1, which Skyrim's player takes over.
 +	public static final int EV_PLAYER_HEALTH = 11;
 +	// The live state of a mob that has a stand-in: formId = its entity id, a = health, b = max health, c = eye height (blocks),
-+	// flags / weapon = velocity x / z in blocks per second (float bits).
++	// d = the body's width in blocks (the height comes with EV_MOB_PROXY), flags / weapon = velocity x / z in blocks per second (float bits).
 +	public static final int EV_MOB_VITALS = 12;
  	// Skyrim skills (ActorValue) Minecraft reports use of; weapon skills come from EV_HIT_ACTOR.
  	public static final int SKILL_BLOCK = 9;
@@ -3082,6 +3096,134 @@ index be1a22a..f8a8c68 100644
 +		SkyLink.pushEvent(Proto.EV_EXPLOSION, 0, (float) center.x, (float) center.y, (float) center.z, self.radius(), creeper ? 1 : 0);
  	}
  }
+diff --git a/fabric/src/main/java/dev/skycraft/world/MobCatalog.java b/fabric/src/main/java/dev/skycraft/world/MobCatalog.java
+new file mode 100644
+index 0000000..c61d9ce
+--- /dev/null
++++ b/fabric/src/main/java/dev/skycraft/world/MobCatalog.java
+@@ -0,0 +1,122 @@
++package dev.skycraft.world;
++
++import dev.skycraft.SkyCraft;
++import java.io.IOException;
++import java.nio.charset.StandardCharsets;
++import java.nio.file.Files;
++import java.nio.file.Path;
++import java.util.ArrayList;
++import java.util.List;
++import java.util.Map;
++import java.util.TreeMap;
++import net.minecraft.core.registries.BuiltInRegistries;
++import net.minecraft.world.entity.EntityType;
++
++/**
++ * The list of every distinct mob body size in the game, for the mob body library: the Skyrim-side stand-in of a Minecraft mob is a
++ * collision-only box the size of the mob's own bounding box, made once per distinct size.
++ *
++ * A size is a width and a height in sixteenths of a block ({@link #sixteenths}), and its key is {@code w<width>_h<height>}. The SKSE side
++ * (MobBodies.cpp) computes the same key from the width and height Minecraft reports for a live mob, so {@link #key} is the one definition.
++ * Every registered entity type is walked, modded ones too, each at its own size and as a baby (half size), so a size no vanilla mob has
++ * is in the library the next start. A size that is not in it (a slime of an odd size, a mod's growing mob) is still made while the game
++ * runs, by the SKSE side, from spare model files it keeps for the purpose.
++ *
++ * Written to {@code skycraft/mob_catalog.json} in the game folder the first time the world starts, and again when the registered entity
++ * types change ({@code -Dskycraft.dumpMobs=false} turns it off, {@code force} writes it every start).
++ */
++public final class MobCatalog {
++	private MobCatalog() {}
++
++	public static final int MAX_WIDTH = 255;
++	public static final int MAX_HEIGHT = 400;
++
++	/** A length in blocks as whole sixteenths, at least one, so no mob is a box of nothing. */
++	public static int sixteenths(float blocks, int max) {
++		return Math.max(1, Math.min(max, Math.round(blocks * 16.0F)));
++	}
++
++	public static String key(float width, float height) {
++		return key(sixteenths(width, MAX_WIDTH), sixteenths(height, MAX_HEIGHT));
++	}
++
++	public static String key(int w16, int h16) {
++		return "w" + w16 + "_h" + h16;
++	}
++
++	private static int typeCount() {
++		int n = 0;
++		for (EntityType<?> ignored : BuiltInRegistries.ENTITY_TYPE) {
++			n++;
++		}
++		return n;
++	}
++
++	/** Whether the catalogue in a_file was made for the entity types that are registered now. */
++	public static boolean upToDate(Path a_file) {
++		try {
++			return Files.readString(a_file, StandardCharsets.UTF_8).contains("\"entityTypes\": " + typeCount() + ",");
++		} catch (IOException ex) {
++			return false;
++		}
++	}
++
++	private static final class Entry {
++		final int w16;
++		final int h16;
++		final List<String> examples = new ArrayList<>();
++
++		Entry(int w16, int h16) {
++			this.w16 = w16;
++			this.h16 = h16;
++		}
++	}
++
++	private static void add(Map<String, Entry> sizes, String id, float width, float height) {
++		if (!(width > 0.0F) || !(height > 0.0F) || width > 64.0F || height > 64.0F) {
++			return;
++		}
++		int w16 = sixteenths(width, MAX_WIDTH);
++		int h16 = sixteenths(height, MAX_HEIGHT);
++		Entry e = sizes.computeIfAbsent(key(w16, h16), k -> new Entry(w16, h16));
++		if (e.examples.size() < 4 && !e.examples.contains(id)) {
++			e.examples.add(id);
++		}
++	}
++
++	/** Walks every registered entity type (modded ones too) and writes the distinct body sizes as JSON. */
++	public static void dump(Path file) {
++		Map<String, Entry> sizes = new TreeMap<>();
++		int types = 0;
++		for (EntityType<?> type : BuiltInRegistries.ENTITY_TYPE) {
++			types++;
++			String id = BuiltInRegistries.ENTITY_TYPE.getKey(type).toString();
++			try {
++				float w = type.getWidth();
++				float h = type.getHeight();
++				add(sizes, id, w, h);
++				add(sizes, id + " (baby)", w * 0.5F, h * 0.5F);
++			} catch (RuntimeException ex) {
++				SkyCraft.LOG.warn("SkyCraft: mob catalog: no size for {}", id);
++			}
++		}
++		StringBuilder json = new StringBuilder("{\n  \"entityTypes\": " + types + ",\n  \"unit\": \"sixteenths\",\n  \"sizes\": [\n");
++		boolean first = true;
++		for (Entry e : sizes.values()) {
++			json.append(first ? "" : ",\n").append("    {\"w\": ").append(e.w16).append(", \"h\": ").append(e.h16).append(", \"examples\": [");
++			for (int i = 0; i < e.examples.size(); i++) {
++				json.append(i == 0 ? "" : ", ").append('"').append(e.examples.get(i)).append('"');
++			}
++			json.append("]}");
++			first = false;
++		}
++		json.append("\n  ]\n}\n");
++		try {
++			Files.createDirectories(file.toAbsolutePath().getParent());
++			Files.writeString(file, json.toString(), StandardCharsets.UTF_8);
++			SkyCraft.LOG.info("SkyCraft: mob catalog: {} distinct body sizes over {} entity types -> {}", sizes.size(), types, file);
++		} catch (IOException ex) {
++			SkyCraft.LOG.error("SkyCraft: couldn't write the mob catalog", ex);
++		}
++	}
++}
 diff --git a/fabric/src/main/java/dev/skycraft/world/ShapeCatalog.java b/fabric/src/main/java/dev/skycraft/world/ShapeCatalog.java
 new file mode 100644
 index 0000000..13b3a54
@@ -3729,7 +3871,7 @@ index 5ea8e5b..ae3cf6e 100644
      "PressurePlateMixin",
      "ProjectileMixin",
 diff --git a/protocol/skycraft_protocol.h b/protocol/skycraft_protocol.h
-index fce6cf8..913e8dd 100644
+index fce6cf8..80c68f8 100644
 --- a/protocol/skycraft_protocol.h
 +++ b/protocol/skycraft_protocol.h
 @@ -13,7 +13,7 @@
@@ -3797,7 +3939,7 @@ index fce6cf8..913e8dd 100644
  	};
  
  	struct ActorRecord
-@@ -242,11 +260,43 @@ namespace skycraft::proto
+@@ -242,11 +260,44 @@ namespace skycraft::proto
  	{
  		kEvHitActor = 1,    // formId, a = MC damage (after MC's own modifiers), b/c = knockback dir x/z (MC), d = knockback strength
  		kEvPlayerDied = 2,  // the Minecraft player died: kill the Skyrim player
@@ -3822,6 +3964,7 @@ index fce6cf8..913e8dd 100644
 +		                    // b = its max health (Skyrim's health bar for the stand-in is then exactly the mob's, 1:1), c = its eye height in blocks above its feet
 +		                    // (the stand-in's head is put there), flags / weapon = its velocity x / z in blocks per second (float bits), so the stand-in glides
 +		                    // with the mob between reports instead of stepping
++		                    // d = the mob's body width in blocks (its height comes with kEvMobProxy): MobBodies.cpp makes the stand-in's collision box from the two
 +		kEvNpcStance = 7,   // a Skyrim NPC readies for a fight with Minecraft mobs or stands down: formId = the NPC, a/b/c = the threat's
 +		                    // position (MC coords), d = 1 weapon out and facing it, 0 weapon away. Skyrim draws or sheathes it
 +	};
@@ -3842,7 +3985,7 @@ index fce6cf8..913e8dd 100644
  	};
  
  	enum HitFlags : std::uint32_t
-@@ -255,6 +305,7 @@ namespace skycraft::proto
+@@ -255,6 +306,7 @@ namespace skycraft::proto
  		kHitProjectile = 1u << 1,
  		kHitSweep = 1u << 2,
  		kHitFire = 1u << 3,
@@ -3850,7 +3993,7 @@ index fce6cf8..913e8dd 100644
  	};
  
  	// What landed a kEvHitActor (Skyrim plays that weapon class's impact effect and sounds).
-@@ -274,7 +325,7 @@ namespace skycraft::proto
+@@ -274,7 +326,7 @@ namespace skycraft::proto
  		std::uint32_t formId;
  		float         a, b, c, d;
  		std::uint32_t flags;
@@ -3859,7 +4002,7 @@ index fce6cf8..913e8dd 100644
  	};
  	static_assert(sizeof(McEvent) == 32);
  
-@@ -283,6 +334,8 @@ namespace skycraft::proto
+@@ -283,6 +335,8 @@ namespace skycraft::proto
  	// block outline.
  	inline constexpr std::uint32_t kMaxWorldEntities = 160;
  
@@ -3868,7 +4011,7 @@ index fce6cf8..913e8dd 100644
  	enum WorldEntityKind : std::uint32_t
  	{
  		kWeArrow = 1,    // uv[0]: the arrow's item icon
-@@ -291,6 +344,9 @@ namespace skycraft::proto
+@@ -291,6 +345,9 @@ namespace skycraft::proto
  		kWeBlock = 4,    // dropped block item: a spinning cube of side `scale`, uv[0..2] = side, top, bottom
  		kWeCrack = 5,    // block-breaking cracks over the box at (x, y, z) of size ext, uv[0] = crack stage
  		kWeShadow = 6,   // a player's or mob's feet at (x, y, z), `scale` wide: its soft contact shadow
@@ -3878,7 +4021,7 @@ index fce6cf8..913e8dd 100644
  	};
  
  	struct WorldEntity
-@@ -345,6 +401,11 @@ namespace skycraft::proto
+@@ -345,6 +402,11 @@ namespace skycraft::proto
  		                      // section NPCs collide with (sent after its kRenSection; 0 = none)
  		kRenDug = 11,         // RenDug + 512-byte bitset (bit x + 16z + 256y): which blocks of a section
  		                      // were dug out of Skyrim's world (its geometry there is gone); 0 = none
@@ -3890,7 +4033,7 @@ index fce6cf8..913e8dd 100644
  		kRenRagdoll = 9,      // RenAvatar + RenBatch[] + RenVertex[]: the player's body standing still,
  		                      // relative to the feet and facing +Z, split into its parts (RenBatch
  		                      // flags bits 8-11: RagdollPart). Sent about once a second while alive;
-@@ -357,6 +418,12 @@ namespace skycraft::proto
+@@ -357,6 +419,12 @@ namespace skycraft::proto
  		std::uint32_t count;       // solid blocks (0: none, and no bitset follows)
  	};
  
@@ -3903,16 +4046,16 @@ index fce6cf8..913e8dd 100644
  	struct RenDug
  	{
  		std::int32_t  sx, sy, sz;  // section coords, as in RenSection
-@@ -566,3 +633,4 @@ namespace skycraft::proto
+@@ -566,3 +634,4 @@ namespace skycraft::proto
  	};
  	static_assert(sizeof(ColBlock) == 80);
  }
 +
 diff --git a/skse/SkyCraft.ini b/skse/SkyCraft.ini
-index 92b585a..193b6bc 100644
+index 92b585a..fea8d1f 100644
 --- a/skse/SkyCraft.ini
 +++ b/skse/SkyCraft.ini
-@@ -14,7 +14,126 @@ sLauncher =
+@@ -14,7 +14,139 @@ sLauncher =
  ; What to pass to your own launcher. For Prism: --launch and the SkyCraft instance's folder name.
  sArguments = --launch SkyCraft
  
@@ -3952,6 +4095,19 @@ index 92b585a..193b6bc 100644
 +; the default is a rabbit, which has no growls to make. A name of any creature in your game, or "Plugin.esp:0xFORMID" (the FormID without its
 +; load-order byte) for an actor from a mod, e.g. a silent one you made. Stand-ins are never made from a skeever by default, nor from a creature that has spells or abilities of its own (the Wabbajack's rabbit does, which shows as a red mist).
 +sStandInBase =
++
++; Minecraft's mobs each have a body in Skyrim's world: an invisible collision box the size of the mob's own bounding box, which the player, NPCs,
++; arrows and spells meet like a wall, and which follows the mob. This replaces the invisible creature (the stand-in actor) each mob used to have.
++; Minecraft writes skycraft/mob_catalog.json (every distinct mob size, modded mobs included) the first time its world starts, and at plugin load a
++; box model is made for each size into Data/Meshes/SkyCraft/MobLibrary. A size not in it is made while the game runs from spare models. 0 = the
++; stand-in actors again (sStandInHide and sStandInBase above then apply).
++bBoxBodies = 1
++
++; Where mob_catalog.json is. Empty: where the Minecraft that comes with SkyCraft writes it.
++sMobCatalog =
++
++; Most mob bodies at once.
++iMaxBodies = 64
 +
  [Debug]
  ; Detailed timing, camera, combat and lighting logs in SkyCraft.log (several lines a second), for
@@ -6161,7 +6317,7 @@ index 0000000..e2e734d
 +	}
 +}
 diff --git a/skse/src/Combat.cpp b/skse/src/Combat.cpp
-index 0954b7f..88a7c9e 100644
+index 0954b7f..2c68582 100644
 --- a/skse/src/Combat.cpp
 +++ b/skse/src/Combat.cpp
 @@ -1,5 +1,8 @@
@@ -6252,10 +6408,19 @@ index 0954b7f..88a7c9e 100644
  		class HitSink final : public RE::BSTEventSink<RE::TESHitEvent>
  		{
  		public:
-@@ -49,6 +117,27 @@ namespace skycraft
+@@ -49,6 +117,36 @@ namespace skycraft
  			RE::BSEventNotifyControl ProcessEvent(const RE::TESHitEvent* a_event, RE::BSTEventSource<RE::TESHitEvent>*) override
  			{
  				auto* player = RE::PlayerCharacter::GetSingleton();
++				if (a_event && a_event->target) {  // diagnostic: does the engine report hits on a mob's collision box at all? (Only logs.)
++					static int seen = 0;
++					if (seen < 20) {
++						if (const auto mobId = MobBodies::MobOfRef(a_event->target->GetFormID()); mobId >= 0) {
++							++seen;
++							logger::info("Hit event on the body of mob {}: source {:08X}, projectile {:08X}", mobId, a_event->source, a_event->projectile);
++						}
++					}
++				}
 +				if (a_event && player && a_event->cause && a_event->cause.get() == player && a_event->target && proxyIds.contains(a_event->target->GetFormID())) {
 +					bool spell = false;
 +					if (auto* source = RE::TESForm::LookupByID(a_event->source)) {
@@ -6280,7 +6445,7 @@ index 0954b7f..88a7c9e 100644
  				if (!a_event || !player || a_event->target.get() != player || !State().puppeting) {
  					return RE::BSEventNotifyControl::kContinue;
  				}
-@@ -168,6 +257,53 @@ namespace skycraft
+@@ -168,6 +266,53 @@ namespace skycraft
  			}
  		}
  
@@ -6334,7 +6499,7 @@ index 0954b7f..88a7c9e 100644
  		void WriteActorTable(RE::PlayerCharacter* a_player)
  		{
  			static std::vector<proto::ActorRecord> records;
-@@ -181,7 +317,7 @@ namespace skycraft
+@@ -181,7 +326,7 @@ namespace skycraft
  			for (auto& handle : lists->highActorHandles) {
  				auto actorPtr = handle.get();
  				auto* actor = actorPtr.get();
@@ -6343,7 +6508,7 @@ index 0954b7f..88a7c9e 100644
  					continue;
  				}
  				const auto pos = actor->GetPosition();
-@@ -191,7 +327,26 @@ namespace skycraft
+@@ -191,7 +336,26 @@ namespace skycraft
  				proto::ActorRecord r{};
  				r.formId = actor->GetFormID();
  				r.flags = (actor->IsHostileToActor(a_player) ? proto::kActorHostile : 0u) | (actor->IsDead() ? proto::kActorDead : 0u) |
@@ -6371,13 +6536,27 @@ index 0954b7f..88a7c9e 100644
  				const auto mc = SkyToMc(pos);
  				r.x = static_cast<float>(mc.x);
  				r.y = static_cast<float>(mc.y);
-@@ -240,161 +395,1901 @@ namespace skycraft
- 				logger::warn("hit pipeline: melee call site doesn't match this game build; using plain damage");
- 				return;
- 			}
--			processHit = reinterpret_cast<ProcessHitFn*>(target);
--			hitDataCtor = reinterpret_cast<HitDataCtorFn*>(REL::ID(43995).address());
--			logger::info("hit pipeline: Minecraft hits go through Skyrim's hit processing");
+@@ -224,177 +388,1930 @@ namespace skycraft
+ 		ProcessHitFn*  processHit = nullptr;
+ 		HitDataCtorFn* hitDataCtor = nullptr;
+ 
+-		void ResolveHitPipeline()
++		void ResolveHitPipeline()
++		{
++			if (!REL::Module::IsAE()) {
++				logger::info("hit pipeline: not on AE; using plain damage");
++				return;
++			}
++			// Only trust the address if the engine's own melee code really calls it.
++			const auto  site = REL::ID(38627).address() + 0x4A8;
++			const auto* code = reinterpret_cast<const std::uint8_t*>(site);
++			const auto  target = REL::ID(38586).address();
++			std::int32_t rel = 0;
++			std::memcpy(&rel, code + 1, 4);
++			if (code[0] != 0xE8 || site + 5 + rel != target) {
++				logger::warn("hit pipeline: melee call site doesn't match this game build; using plain damage");
++				return;
++			}
 +			processHit = reinterpret_cast<ProcessHitFn*>(target);
 +			hitDataCtor = reinterpret_cast<HitDataCtorFn*>(REL::ID(43995).address());
 +			logger::info("hit pipeline: Minecraft hits go through Skyrim's hit processing");
@@ -7833,6 +8012,7 @@ index 0954b7f..88a7c9e 100644
 +
 +		void ClearProxies()
 +		{
++			MobBodies::Clear();
 +			while (!mobProxies.empty()) {
 +				RemoveProxy(mobProxies.begin()->first);
 +			}
@@ -7923,31 +8103,15 @@ index 0954b7f..88a7c9e 100644
 +				}
 +				++it;
 +			}
- 		}
- 
--		// A vanilla weapon standing in for the Minecraft one: its impact set gives the blood
--		// spray and impact sound, its type the skill and sounds.
--		RE::TESObjectWEAP* StandInWeapon(std::uint32_t a_weapon)
++		}
++
 +		// A mob reported by Minecraft: make or move its stand-in. a_ev.formId = the mob's id, a/b/c = its position.
 +		void MobProxyEvent(RE::PlayerCharacter* a_player, const proto::McEvent& a_ev)
- 		{
--			RE::FormID id = 0;
--			switch (a_weapon) {
--			case proto::kWeaponBlade:
--				id = 0x00012EB7;  // Iron Sword
--				break;
--			case proto::kWeaponAxe:
--				id = 0x00013790;  // Iron War Axe
--				break;
--			case proto::kWeaponPierce:
--				id = 0x0001397E;  // Iron Dagger
--				break;
--			case proto::kWeaponArrow:
--				id = 0x00013985;  // Hunting Bow
--				break;
--			default:
--				id = 0x00013982;  // Iron Mace (fists, tools, blunt things)
--				break;
++		{
++			if (MobBodies::Enabled()) {  // a mob's body is a collision box (MobBodies.cpp), not a stand-in actor
++				MobBodies::OnProxy(a_player, a_ev);
++				return;
++			}
 +			const auto mobId = static_cast<std::int32_t>(a_ev.formId);
 +			if ((a_ev.flags & proto::kMobProxyGone) != 0) {
 +				mobNames.erase(mobId);
@@ -8029,30 +8193,56 @@ index 0954b7f..88a7c9e 100644
 +					NameProxy(actor, name->second);
 +					it->second.named = name->second;
 +				}
- 			}
--			return RE::TESForm::LookupByID<RE::TESObjectWEAP>(id);
- 		}
- 
--		// The Skyrim skill a Minecraft hit trains: swords, maces and tools One-Handed; axes and
--		// tridents/spears in hand Two-Handed; arrows and anything thrown Archery; fists nothing.
--		RE::ActorValue HitSkill(const proto::McEvent& a_ev)
++			}
++		}
++
 +		// A mob's health, eye height and velocity, from Minecraft (kEvMobVitals).
-+		void MobVitalsEvent(const proto::McEvent& a_ev)
++		void MobVitalsEvent(RE::PlayerCharacter* a_player, const proto::McEvent& a_ev)
  		{
--			if (a_ev.flags & proto::kHitProjectile) {
--				return RE::ActorValue::kArchery;
+-			if (!REL::Module::IsAE()) {
+-				logger::info("hit pipeline: not on AE; using plain damage");
++			if (MobBodies::Enabled()) {
++				MobBodies::OnVitals(a_player, a_ev);
+ 				return;
+ 			}
+-			// Only trust the address if the engine's own melee code really calls it.
+-			const auto  site = REL::ID(38627).address() + 0x4A8;
+-			const auto* code = reinterpret_cast<const std::uint8_t*>(site);
+-			const auto  target = REL::ID(38586).address();
+-			std::int32_t rel = 0;
+-			std::memcpy(&rel, code + 1, 4);
+-			if (code[0] != 0xE8 || site + 5 + rel != target) {
+-				logger::warn("hit pipeline: melee call site doesn't match this game build; using plain damage");
 +			const auto it = mobProxies.find(static_cast<std::int32_t>(a_ev.formId));
 +			if (it == mobProxies.end()) {
-+				return;
+ 				return;
  			}
--			switch (a_ev.weapon) {
--			case proto::kWeaponUnarmed:
--				return RE::ActorValue::kNone;
+-			processHit = reinterpret_cast<ProcessHitFn*>(target);
+-			hitDataCtor = reinterpret_cast<HitDataCtorFn*>(REL::ID(43995).address());
+-			logger::info("hit pipeline: Minecraft hits go through Skyrim's hit processing");
+-		}
+-
+-		// A vanilla weapon standing in for the Minecraft one: its impact set gives the blood
+-		// spray and impact sound, its type the skill and sounds.
+-		RE::TESObjectWEAP* StandInWeapon(std::uint32_t a_weapon)
+-		{
+-			RE::FormID id = 0;
+-			switch (a_weapon) {
+-			case proto::kWeaponBlade:
+-				id = 0x00012EB7;  // Iron Sword
+-				break;
 -			case proto::kWeaponAxe:
+-				id = 0x00013790;  // Iron War Axe
+-				break;
 -			case proto::kWeaponPierce:
--				return RE::ActorValue::kTwoHanded;
+-				id = 0x0001397E;  // Iron Dagger
+-				break;
+-			case proto::kWeaponArrow:
+-				id = 0x00013985;  // Hunting Bow
+-				break;
 -			default:
--				return RE::ActorValue::kOneHanded;
+-				id = 0x00013982;  // Iron Mace (fists, tools, blunt things)
+-				break;
 +			auto& proxy = it->second;
 +			proxy.mcHealth = a_ev.a;
 +			proxy.mcMax = a_ev.b;
@@ -8065,17 +8255,17 @@ index 0954b7f..88a7c9e 100644
 +				AbsorbProxyDamage(actor, proxy);  // anything Skyrim did since last frame is counted before the mob's health replaces it
 +				SyncProxyHealth(actor, proxy);
  			}
+-			return RE::TESForm::LookupByID<RE::TESObjectWEAP>(id);
  		}
  
--		// Skyrim's own skill experience (what its weapons, blocking, armour and crafting call), so
--		// skills level up with Skyrim's notification and count towards the character's level.
--		// Uses are counted like Skyrim counts them: a weapon hit is worth the weapon's damage.
--		void TrainSkill(RE::PlayerCharacter* a_player, RE::ActorValue a_skill, float a_uses)
+-		// The Skyrim skill a Minecraft hit trains: swords, maces and tools One-Handed; axes and
+-		// tridents/spears in hand Two-Handed; arrows and anything thrown Archery; fists nothing.
+-		RE::ActorValue HitSkill(const proto::McEvent& a_ev)
 +		// A mob's name, from Minecraft: 24 ASCII bytes spread over a, b, c, d, flags, weapon.
 +		void MobNameEvent(const proto::McEvent& a_ev)
  		{
--			if (a_skill == RE::ActorValue::kNone || !(a_uses >= 0.05f)) {
--				return;  // nothing, or a scratch (damage over time ticks)
+-			if (a_ev.flags & proto::kHitProjectile) {
+-				return RE::ActorValue::kArchery;
 +			std::array<char, 25> text{};
 +			std::memcpy(text.data() + 0, &a_ev.a, 4);
 +			std::memcpy(text.data() + 4, &a_ev.b, 4);
@@ -8088,13 +8278,14 @@ index 0954b7f..88a7c9e 100644
 +			if (name.empty()) {
 +				return;
  			}
--			const float before = a_player->AsActorValueOwner()->GetBaseActorValue(a_skill);
--			a_player->AddSkillExperience(a_skill, std::min(a_uses, 500.0f));
--			const float after = a_player->AsActorValueOwner()->GetBaseActorValue(a_skill);
--			static int logged = 0;
--			if (after > before || logged < 8) {
--				++logged;
--				logger::info("skill {} +{:.1f} uses ({:.0f}{})", static_cast<int>(a_skill), a_uses, after, after > before ? ", levelled up" : "");
+-			switch (a_ev.weapon) {
+-			case proto::kWeaponUnarmed:
+-				return RE::ActorValue::kNone;
+-			case proto::kWeaponAxe:
+-			case proto::kWeaponPierce:
+-				return RE::ActorValue::kTwoHanded;
+-			default:
+-				return RE::ActorValue::kOneHanded;
 +			mobNames[mobId] = name;
 +			if (const auto it = mobProxies.find(mobId); it != mobProxies.end() && it->second.named != name) {
 +				if (auto* actor = RE::TESForm::LookupByID<RE::Actor>(it->second.formId)) {
@@ -8104,7 +8295,10 @@ index 0954b7f..88a7c9e 100644
  			}
  		}
  
--		RE::NiAVObject* HitNode(RE::Actor* a_actor)
+-		// Skyrim's own skill experience (what its weapons, blocking, armour and crafting call), so
+-		// skills level up with Skyrim's notification and count towards the character's level.
+-		// Uses are counted like Skyrim counts them: a weapon hit is worth the weapon's damage.
+-		void TrainSkill(RE::PlayerCharacter* a_player, RE::ActorValue a_skill, float a_uses)
 +		// Each frame: stand-ins whose mob has gone quiet are dropped, and what Skyrim's NPCs took off a stand-in is
 +		// handed to Minecraft and given back.
 +		// Diagnostics for stand-ins that seem to vanish: what Skyrim says about one is logged whenever it changes (not every frame), so the
@@ -8112,19 +8306,19 @@ index 0954b7f..88a7c9e 100644
 +		template <class A>
 +		void WatchProxy(A* a_actor, const MobProxy& a_proxy, bool a_skyrimMode)
  		{
--			auto* root = a_actor->Get3D();
--			if (!root) {
--				return nullptr;
+-			if (a_skill == RE::ActorValue::kNone || !(a_uses >= 0.05f)) {
+-				return;  // nothing, or a scratch (damage over time ticks)
 +			static std::unordered_map<RE::FormID, std::uint32_t> seen;
 +			static int                                           logged = 0;
 +			int state = -1;
 +			if constexpr (requires { a_actor->AsActorState()->actorState1.lifeState; }) {
 +				state = static_cast<int>(a_actor->AsActorState()->actorState1.lifeState);
  			}
--			for (const char* name : { "NPC Spine2 [Spn2]", "NPC Spine1 [Spn1]", "NPC Spine [Spn0]", "NPC Pelvis [Pelv]" }) {
--				if (auto* node = root->GetObjectByName(name)) {
--					return node;
--				}
+-			const float before = a_player->AsActorValueOwner()->GetBaseActorValue(a_skill);
+-			a_player->AddSkillExperience(a_skill, std::min(a_uses, 500.0f));
+-			const float after = a_player->AsActorValueOwner()->GetBaseActorValue(a_skill);
+-			static int logged = 0;
+-			if (after > before || logged < 8) {
 +			bool ragdoll = false;
 +			if constexpr (requires { a_actor->IsInRagdollState(); }) {
 +				ragdoll = a_actor->IsInRagdollState();
@@ -8140,28 +8334,50 @@ index 0954b7f..88a7c9e 100644
 +			auto& last = seen[a_proxy.formId];
 +			if (last != key && logged < 150) {
 +				last = key;
-+				++logged;
+ 				++logged;
+-				logger::info("skill {} +{:.1f} uses ({:.0f}{})", static_cast<int>(a_skill), a_uses, after, after > before ? ", levelled up" : "");
 +				logger::info("Watch stand-in ({:08X}): {} disabled={} 3d={} loaded={} combat={} life={} ragdoll={} near-mob={} silent={}", a_proxy.formId,
 +					a_skyrimMode ? "skyrim-mode" : "minecraft-mode", disabled, has3d, loaded, combat, state, ragdoll, nearMob, silent);
  			}
--			return root;
  		}
  
--		// A Minecraft hit on an actor's stand-in: real damage, scaled so Minecraft gear stays
--		// meaningful against higher-level enemies, delivered the way a Skyrim weapon would.
--		void ApplyHit(RE::PlayerCharacter* a_player, const proto::McEvent& a_ev)
+-		RE::NiAVObject* HitNode(RE::Actor* a_actor)
 +		// Lock-on is LockOn.cpp's: Minecraft's mobs are handed to True Directional Movement as virtual targets there. The stand-ins are
 +		// only reported to it (as actors it must never pick), whenever the set of them changes, so a mob is never offered twice.
 +		std::vector<std::uint32_t> ignoredStandIns;
 +
 +		void PublishLockTargets(float)
  		{
--			auto* actor = RE::TESForm::LookupByID<RE::Actor>(a_ev.formId);
--			if (!actor || actor->IsDead()) {
+-			auto* root = a_actor->Get3D();
+-			if (!root) {
+-				return nullptr;
+-			}
+-			for (const char* name : { "NPC Spine2 [Spn2]", "NPC Spine1 [Spn1]", "NPC Spine [Spn0]", "NPC Pelvis [Pelv]" }) {
+-				if (auto* node = root->GetObjectByName(name)) {
+-					return node;
+-				}
 +			std::vector<std::uint32_t> now(proxyIds.begin(), proxyIds.end());
 +			std::sort(now.begin(), now.end());
 +			if (now == ignoredStandIns) {
- 				return;
++				return;
+ 			}
+-			return root;
++			ignoredStandIns = now;
++			LockOn::SetIgnoredActors(ignoredStandIns);
+ 		}
+ 
+-		// A Minecraft hit on an actor's stand-in: real damage, scaled so Minecraft gear stays
+-		// meaningful against higher-level enemies, delivered the way a Skyrim weapon would.
+-		void ApplyHit(RE::PlayerCharacter* a_player, const proto::McEvent& a_ev)
++		void UpdateProxies(RE::PlayerCharacter* a_player, float a_delta)
+ 		{
+-			auto* actor = RE::TESForm::LookupByID<RE::Actor>(a_ev.formId);
+-			if (!actor || actor->IsDead()) {
+-				return;
++			PublishLockTargets(a_delta);
++			if (MobBodies::Enabled()) {
++				MobBodies::Update(a_player, a_delta);
++				return;  // no stand-in actors to keep
  			}
 -			const float scale = 5.0f + 0.25f * static_cast<float>(actor->GetLevel());
 -			const float damage = a_ev.a * scale;
@@ -8177,10 +8393,7 @@ index 0954b7f..88a7c9e 100644
 -			RE::NiPoint3 dir = hitPos - a_player->GetPosition();
 -			dir.z = 0.0f;
 -			dir = dir.Length() > 1e-3f ? dir / dir.Length() : RE::NiPoint3{ 0.0f, 1.0f, 0.0f };
-+			ignoredStandIns = now;
-+			LockOn::SetIgnoredActors(ignoredStandIns);
-+		}
- 
+-
 -			if (processHit && damage > 0.0f) {
 -				alignas(16) std::array<std::byte, sizeof(RE::HitData)> storage{};
 -				auto* hit = reinterpret_cast<RE::HitData*>(storage.data());
@@ -8201,9 +8414,6 @@ index 0954b7f..88a7c9e 100644
 -				hit->flags.reset(RE::HitData::Flag::kPowerAttack, RE::HitData::Flag::kCritical, RE::HitData::Flag::kSneakAttack, RE::HitData::Flag::kMeleeAttack);
 -				if (!projectile) {
 -					hit->flags.set(RE::HitData::Flag::kMeleeAttack);
-+		void UpdateProxies(RE::PlayerCharacter* a_player, float a_delta)
-+		{
-+			PublishLockTargets(a_delta);
 +			for (auto hit = proxyPlayerHitAge.begin(); hit != proxyPlayerHitAge.end();) {
 +				hit->second += a_delta;
 +				hit = hit->second > 30.0f ? proxyPlayerHitAge.erase(hit) : std::next(hit);
@@ -8395,7 +8605,7 @@ index 0954b7f..88a7c9e 100644
  		}
  
  		void KillPlayer(RE::PlayerCharacter* a_player, const proto::McEvent& a_ev)
-@@ -580,7 +2475,7 @@ namespace skycraft
+@@ -580,7 +2497,7 @@ namespace skycraft
  			for (auto& handle : lists->highActorHandles) {
  				auto actorPtr = handle.get();
  				auto* actor = actorPtr.get();
@@ -8404,7 +8614,7 @@ index 0954b7f..88a7c9e 100644
  					continue;
  				}
  				const auto hazard = HazardAtActor(actor);
-@@ -698,6 +2593,7 @@ namespace skycraft
+@@ -698,6 +2615,7 @@ namespace skycraft
  			RE::NiPoint3 center;
  			float        radius;  // Minecraft blocks
  			float        delay;   // seconds: after the blast's damage has landed
@@ -8412,7 +8622,7 @@ index 0954b7f..88a7c9e 100644
  		};
  		std::vector<PendingExplosion> pendingExplosions;
  
-@@ -786,6 +2682,9 @@ namespace skycraft
+@@ -786,6 +2704,9 @@ namespace skycraft
  					continue;
  				}
  				if (auto* actor = ref->As<RE::Actor>()) {
@@ -8422,7 +8632,7 @@ index 0954b7f..88a7c9e 100644
  					if (!actor->IsDead()) {
  						if (auto* process = actor->GetActorRuntimeData().currentProcess) {
  							process->KnockExplosion(actor, a_blast.center, 25.0f * falloff * power);
-@@ -830,6 +2729,183 @@ namespace skycraft
+@@ -830,6 +2751,183 @@ namespace skycraft
  			}
  			logger::info("Minecraft explosion (radius {:.1f}): knocked {} people away, threw {} objects", a_blast.radius, people, objects);
  		}
@@ -8459,7 +8669,7 @@ index 0954b7f..88a7c9e 100644
 +				MobNameEvent(a_ev);
 +				break;
 +			case proto::kEvMobVitals:
-+				MobVitalsEvent(a_ev);
++				MobVitalsEvent(a_player, a_ev);
 +				break;
 +			case proto::kEvSkillUse:
 +				if (!a_skyrimMode && a_ev.formId >= static_cast<std::uint32_t>(RE::ActorValue::kOneHanded) &&
@@ -8606,7 +8816,7 @@ index 0954b7f..88a7c9e 100644
  	}
  
  	namespace Combat
-@@ -838,8 +2914,15 @@ namespace skycraft
+@@ -838,8 +2936,15 @@ namespace skycraft
  		{
  			REL::Relocation<std::uintptr_t> vtbl{ RE::VTABLE_PlayerCharacter[0] };
  			HandleHealthDamageHook::func = vtbl.write_vfunc(0x104, HandleHealthDamageHook::thunk);
@@ -8622,7 +8832,7 @@ index 0954b7f..88a7c9e 100644
  			}
  			ResolveHitPipeline();
  			logger::info("combat hooks installed");
-@@ -854,20 +2937,66 @@ namespace skycraft
+@@ -854,20 +2959,66 @@ namespace skycraft
  				}
  				healthPrimed = false;
  				engaged = false;
@@ -8695,7 +8905,7 @@ index 0954b7f..88a7c9e 100644
  			SetEssential(a_player, true);
  			WriteActorTable(a_player);
  			engagedTimer -= a_delta;
-@@ -878,29 +3007,11 @@ namespace skycraft
+@@ -878,29 +3029,11 @@ namespace skycraft
  
  			proto::McEvent ev;
  			while (link.PopEvent(ev)) {
@@ -8728,7 +8938,7 @@ index 0954b7f..88a7c9e 100644
  			for (auto it = pendingExplosions.begin(); it != pendingExplosions.end();) {
  				it->delay -= a_delta;
  				if (it->delay <= 0.0f) {
-@@ -924,5 +3035,16 @@ namespace skycraft
+@@ -924,5 +3057,16 @@ namespace skycraft
  		}
  
  		bool PlayerEngaged() { return engaged; }
@@ -9201,7 +9411,7 @@ index 3bb4d34..1527bc2 100644
  				Perf::Scope timer(Perf::kDigMeshes);
  				Dig::UpdateMeshes(digSettled > 3.0f ? a_player : nullptr, a_delta, !dugChanged.empty());
 diff --git a/skse/src/Game.h b/skse/src/Game.h
-index 05788b1..c87d226 100644
+index 05788b1..ee7ef17 100644
 --- a/skse/src/Game.h
 +++ b/skse/src/Game.h
 @@ -2,6 +2,11 @@
@@ -9328,7 +9538,7 @@ index 05788b1..c87d226 100644
  		// For the blocks' contact shadows (any thread): sets a_bit in a_out[x + w*(y + h*z)] for
  		// each solid block of the box at a_origin (Minecraft block coords) of a_size blocks. The
  		// generation changes whenever any section's blocks do.
-@@ -153,6 +224,62 @@ namespace skycraft
+@@ -153,6 +224,76 @@ namespace skycraft
  		std::uint32_t Generation();
  		// Main thread, every frame: NPCs overlapping solid Minecraft blocks are pushed back out.
  		void PushActorsOut(RE::PlayerCharacter* a_player, float a_delta);
@@ -9369,6 +9579,20 @@ index 05788b1..c87d226 100644
 +		char out[9];
 +		std::snprintf(out, sizeof out, "%08x", h);
 +		return out;
++	}
++
++	// Minecraft's mobs as things that physically exist in Skyrim's world: one invisible collision box per mob, the size of the mob's bounding
++	// box, made from a library built at plugin load from the mob catalogue Minecraft writes (MobBodies.cpp). Replaces the creature stand-ins.
++	namespace MobBodies
++	{
++		bool Enabled();
++		// At plugin load, before the game reads its files (Skyrim loads only model files that existed when it started).
++		void PrepareFiles();
++		void OnProxy(RE::PlayerCharacter* a_player, const proto::McEvent& a_ev);
++		void OnVitals(RE::PlayerCharacter* a_player, const proto::McEvent& a_ev);
++		void Update(RE::PlayerCharacter* a_player, float a_delta);
++		std::int32_t MobOfRef(RE::FormID a_refId);
++		void Clear();
 +	}
 +
 +	namespace BlockCollision
@@ -10053,6 +10277,426 @@ index 0000000..0939189
 +				logger::info("lock-on: locked on to Minecraft mob {}", locked - 1);
 +			} else {
 +				logger::info("lock-on: released");
++			}
++		}
++	}
++}
+diff --git a/skse/src/MobBodies.cpp b/skse/src/MobBodies.cpp
+new file mode 100644
+index 0000000..622a0b5
+--- /dev/null
++++ b/skse/src/MobBodies.cpp
+@@ -0,0 +1,414 @@
++#include "Game.h"
++#include "CollisionNif.h"
++
++#include <SimpleIni.h>
++
++#include <algorithm>
++#include <bit>
++#include <cmath>
++#include <chrono>
++#include <filesystem>
++#include <fstream>
++#include <unordered_map>
++#include <unordered_set>
++
++// Minecraft's mobs as things that physically exist in Skyrim's world. Each mob gets a body: an invisible static reference whose model is
++// nothing but one collision box the size of the mob's own bounding box (CollisionNif.h, the writer the block collision uses). Skyrim's
++// player, NPCs, arrows and spells meet it as they meet a wall, and it follows the mob. A mob's box is axis-aligned in Minecraft, so the body
++// never turns.
++//
++// It replaces the invisible creature (a rabbit scaled to fit) that used to stand in for each mob. That was an actor, which Skyrim's AI
++// and engine treat as its own: it was switched off, unloaded and revived at will, and its shape was a rabbit's however it was scaled.
++//
++// The library of boxes, like the block shape library:
++//   * Minecraft writes skycraft/mob_catalog.json the first time its world starts (MobCatalog.java): every distinct width and height among
++//     all registered entity types, modded ones too, each also as a baby. At plugin load a model is made for every size in it into
++//     Data/Meshes/SkyCraft/MobLibrary/mob_w<w>_h<h>.nif (sixteenths of a block), which Skyrim has from its start.
++//   * A size that is not in the library (no catalogue yet on the very first start, a slime of an odd size, a mod's growing mob) is written
++//     while the game runs over the next unused of the spare files made at plugin load (Skyrim loads only model files that existed when it
++//     started), once per size, and used for every mob of that size after.
++namespace skycraft
++{
++	namespace
++	{
++		struct BodyCfg
++		{
++			bool        on{ true };
++			std::string catalog;  // path of mob_catalog.json (empty: look where the Minecraft that comes with SkyCraft writes it)
++			int         maxBodies{ 64 };
++		};
++
++		const BodyCfg& Cfg()
++		{
++			static const BodyCfg settings = [] {
++				CSimpleIniA ini;
++				ini.SetUnicode();
++				ini.LoadFile("Data/SKSE/Plugins/SkyCraft.ini");
++				BodyCfg s;
++				s.on = ini.GetBoolValue("Mobs", "bBoxBodies", true);
++				s.catalog = ini.GetValue("Mobs", "sMobCatalog", "");
++				s.maxBodies = static_cast<int>(std::clamp<long>(ini.GetLongValue("Mobs", "iMaxBodies", 64), 4, 400));
++				return s;
++			}();
++			return settings;
++		}
++
++		const std::filesystem::path kLibDir = "Data/Meshes/SkyCraft/MobLibrary";
++		const std::filesystem::path kSlotDir = "Data/Meshes/SkyCraft/MobSlots";
++		constexpr const char*       kLibModelDir = "SkyCraft\\MobLibrary\\";
++		constexpr const char*       kSlotModelDir = "SkyCraft\\MobSlots\\";
++		constexpr int               kSlots = 200;
++		constexpr int               kMaxWidth16 = 255;
++		constexpr int               kMaxHeight16 = 400;
++
++		int Sixteenths(float a_blocks, int a_max)
++		{
++			return std::clamp(static_cast<int>(std::lround(a_blocks * 16.0f)), 1, a_max);
++		}
++
++		// The same key as MobCatalog.key in the Fabric mod: "w<width>_h<height>", both in sixteenths of a block.
++		std::string SizeKey(int a_w16, int a_h16)
++		{
++			return fmt::format("w{}_h{}", a_w16, a_h16);
++		}
++
++		std::vector<std::uint8_t> BoxBytes(int a_w16, int a_h16)
++		{
++			const float u = float(proto::kUnitsPerBlock);
++			const float half = a_w16 * u / 32.0f;
++			collisionnif::Box box;  // the model's origin is at the mob's feet, in the middle of its box
++			box.lo[0] = -half;
++			box.lo[1] = -half;
++			box.lo[2] = 0.0f;
++			box.hi[0] = half;
++			box.hi[1] = half;
++			box.hi[2] = a_h16 * u / 16.0f;
++			return collisionnif::Build({ box }, collisionnif::kMaterialStone, 0.01f);
++		}
++
++		bool WriteBytes(const std::filesystem::path& a_path, const std::vector<std::uint8_t>& a_bytes)
++		{
++			std::ofstream out(a_path, std::ios::binary | std::ios::trunc);
++			out.write(reinterpret_cast<const char*>(a_bytes.data()), static_cast<std::streamsize>(a_bytes.size()));
++			return out.good();
++		}
++
++		std::unordered_set<std::string>                     libraryKeys;  // sizes whose model was made at plugin load
++		std::unordered_map<std::string, RE::TESObjectSTAT*> forms;        // size key -> its base form (library or slot model)
++		int                                                 slotNext = 0;
++		bool                                                slotsReady = false;
++		bool                                                broken = false;
++
++		struct Body
++		{
++			RE::FormID   refId{ 0 };
++			std::string  key;
++			RE::NiPoint3 pos{};    // where Minecraft last said the mob is
++			RE::NiPoint3 shown{};  // where the body is now
++			float        velX{ 0.0f }, velZ{ 0.0f };
++			float        width{ 0.0f }, height{ 0.0f };  // blocks, as Minecraft last said (0: not told)
++			float        silence{ 0.0f };
++			float        age{ 0.0f };
++			bool         checked{ false };
++		};
++		std::unordered_map<std::int32_t, Body> bodies;
++
++		template <class R>
++		void DeleteRef(R* a_ref)
++		{
++			if (!a_ref) {
++				return;
++			}
++			if constexpr (requires { a_ref->Disable(); }) {
++				a_ref->Disable();
++			}
++			if constexpr (requires { a_ref->SetDelete(true); }) {
++				a_ref->SetDelete(true);
++			}
++		}
++
++		template <class R>
++		void Place(R* a_ref, const RE::NiPoint3& a_pos)
++		{
++			if constexpr (requires { a_ref->SetPosition(a_pos, true); }) {
++				a_ref->SetPosition(a_pos, true);
++			} else if constexpr (requires { a_ref->SetPosition(a_pos); }) {
++				a_ref->SetPosition(a_pos);
++			}
++			if constexpr (requires { a_ref->Update3DPosition(true); }) {
++				a_ref->Update3DPosition(true);
++			}
++		}
++
++		RE::TESObjectSTAT* MakeStatic(const std::string& a_modelPath, float a_sizeUnits)
++		{
++			auto* form = RE::IFormFactory::Create<RE::TESObjectSTAT>();
++			if (!form) {
++				return nullptr;
++			}
++			if (form->GetFormID() == 0) {
++				form->SetFormID(0, true);
++			}
++			if (form->GetFormID() == 0) {
++				return nullptr;
++			}
++			static_cast<RE::TESModel*>(form)->SetModel(a_modelPath.c_str());
++			const auto s = static_cast<std::int16_t>(std::clamp(a_sizeUnits + 40.0f, 1.0f, 32000.0f));
++			form->boundData.boundMin.x = static_cast<std::int16_t>(-s);
++			form->boundData.boundMin.y = static_cast<std::int16_t>(-s);
++			form->boundData.boundMin.z = -20;
++			form->boundData.boundMax.x = s;
++			form->boundData.boundMax.y = s;
++			form->boundData.boundMax.z = s;
++			return form;
++		}
++
++		// The base form for a size: its library model if it has one, else the next spare file written with the box (once per size).
++		RE::TESObjectSTAT* FormFor(int a_w16, int a_h16)
++		{
++			const auto key = SizeKey(a_w16, a_h16);
++			if (const auto it = forms.find(key); it != forms.end()) {
++				return it->second;
++			}
++			const float        size = std::max(a_w16 * 0.5f, float(a_h16)) * float(proto::kUnitsPerBlock) / 16.0f;
++			RE::TESObjectSTAT* form = nullptr;
++			if (libraryKeys.contains(key)) {
++				form = MakeStatic(std::string(kLibModelDir) + "mob_" + key + ".nif", size);
++			} else if (slotsReady && slotNext < kSlots) {
++				const auto file = fmt::format("slot{:04d}.nif", slotNext++);
++				if (WriteBytes(kSlotDir / file, BoxBytes(a_w16, a_h16))) {
++					form = MakeStatic(std::string(kSlotModelDir) + file, size);
++					logger::info("Mob bodies: size {} is not in the library; made from spare model {} ({} of {} used)", key, file, slotNext, kSlots);
++				}
++			} else {
++				static bool said = false;
++				if (!said) {
++					said = true;
++					logger::warn("Mob bodies: size {} is not in the library and the spare models are used up; mobs of such sizes have no body until the game is restarted", key);
++				}
++			}
++			forms[key] = form;
++			return form;
++		}
++
++		void RemoveBody(std::int32_t a_mobId)
++		{
++			const auto it = bodies.find(a_mobId);
++			if (it == bodies.end()) {
++				return;
++			}
++			DeleteRef(RE::TESForm::LookupByID<RE::TESObjectREFR>(it->second.refId));
++			bodies.erase(it);
++		}
++
++		bool MakeBody(RE::PlayerCharacter* a_player, Body& a_body)
++		{
++			auto* handler = RE::TESDataHandler::GetSingleton();
++			auto* cell = a_player->GetParentCell();
++			if (!handler || !cell) {
++				return false;
++			}
++			const int w16 = Sixteenths(a_body.width, kMaxWidth16);
++			const int h16 = Sixteenths(a_body.height, kMaxHeight16);
++			auto*     form = FormFor(w16, h16);
++			if (!form) {
++				return false;
++			}
++			RE::NiPointer<RE::TESObjectREFR> ref;
++			ref = handler->CreateReferenceAtLocation(form, a_body.pos, RE::NiPoint3(), cell, a_player->GetWorldspace(), nullptr, nullptr, RE::ObjectRefHandle(), false, true).get();
++			if (!ref) {
++				return false;
++			}
++			ref->SetActivationBlocked(true);
++			a_body.refId = ref->GetFormID();
++			a_body.key = SizeKey(w16, h16);
++			a_body.shown = a_body.pos;
++			return true;
++		}
++	}
++
++	namespace MobBodies
++	{
++		bool Enabled()
++		{
++			return Cfg().on && !broken;
++		}
++
++		// Reads mob_catalog.json (written by the Fabric side: MobCatalog.java) and writes a model for every size in it, then makes the spare
++		// files for sizes it didn't list.
++		void PrepareFiles()
++		{
++			if (!Cfg().on) {
++				return;
++			}
++			const auto started = std::chrono::steady_clock::now();
++			std::error_code ec;
++			std::filesystem::remove_all(kSlotDir, ec);
++			std::filesystem::create_directories(kSlotDir, ec);
++			std::filesystem::create_directories(kLibDir, ec);
++			if (!std::filesystem::is_directory(kSlotDir) || !std::filesystem::is_directory(kLibDir)) {
++				logger::warn("Mob bodies: can't make the folders under Data/Meshes/SkyCraft; no mob bodies");
++				broken = true;
++				return;
++			}
++			int spare = 0;
++			for (int i = 0; i < kSlots; ++i) {
++				spare += WriteBytes(kSlotDir / fmt::format("slot{:04d}.nif", i), BoxBytes(8, 8)) ? 1 : 0;
++			}
++			slotsReady = spare == kSlots;
++
++			std::vector<std::filesystem::path> candidates;
++			if (!Cfg().catalog.empty()) {
++				candidates.emplace_back(Cfg().catalog);
++			} else {
++				if (const char* local = std::getenv("LOCALAPPDATA")) {
++					candidates.push_back(std::filesystem::path(local) / "SkyCraft" / "Prism" / "instances" / "SkyCraft" / ".minecraft" / "skycraft" / "mob_catalog.json");
++				}
++				candidates.emplace_back("Data/SKSE/Plugins/SkyCraft/mob_catalog.json");
++			}
++			std::string text;
++			std::filesystem::path used;
++			for (const auto& c : candidates) {
++				std::ifstream in(c, std::ios::binary);
++				if (in) {
++					text.assign(std::istreambuf_iterator<char>(in), std::istreambuf_iterator<char>());
++					used = c;
++					break;
++				}
++			}
++			int         made = 0;
++			std::size_t pos = 0;
++			while (!text.empty() && (pos = text.find("{\"w\": ", pos)) != std::string::npos) {
++				pos += 6;
++				char*     end = nullptr;
++				const int w = static_cast<int>(std::strtol(text.c_str() + pos, &end, 10));
++				const auto hAt = text.find("\"h\": ", pos);
++				if (hAt == std::string::npos) {
++					break;
++				}
++				const int h = static_cast<int>(std::strtol(text.c_str() + hAt + 5, &end, 10));
++				if (w < 1 || w > kMaxWidth16 || h < 1 || h > kMaxHeight16) {
++					continue;
++				}
++				const auto key = SizeKey(w, h);
++				if (!libraryKeys.contains(key) && WriteBytes(kLibDir / ("mob_" + key + ".nif"), BoxBytes(w, h))) {
++					libraryKeys.insert(key);
++					++made;
++				}
++			}
++			const auto ms = std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now() - started).count();
++			if (text.empty()) {
++				logger::info("Mob bodies: no mob catalogue yet ({} places tried); Minecraft writes it the first time its world starts. Until the next start every size is made from the {} spare models ({} ms)", candidates.size(), spare, ms);
++			} else {
++				logger::info("Mob bodies: library of {} body sizes in {} from {}; {} spare models for any other size ({} ms)", made, std::filesystem::absolute(kLibDir, ec).string(), used.string(), spare, ms);
++			}
++		}
++
++		// A mob's body is made (or moved) from kEvMobProxy: its position and yaw, and its height in the weapon field.
++		void OnProxy(RE::PlayerCharacter* a_player, const proto::McEvent& a_ev)
++		{
++			const auto mobId = static_cast<std::int32_t>(a_ev.formId);
++			if ((a_ev.flags & proto::kMobProxyGone) != 0) {
++				RemoveBody(mobId);
++				return;
++			}
++			const auto pos = McToSky(a_ev.a, a_ev.b, a_ev.c);
++			auto       it = bodies.find(mobId);
++			if (it == bodies.end()) {
++				if (static_cast<int>(bodies.size()) >= Cfg().maxBodies || a_player->IsDead()) {
++					return;
++				}
++				it = bodies.emplace(mobId, Body{}).first;
++			}
++			auto& body = it->second;
++			body.pos = pos;
++			body.silence = 0.0f;
++			if (const float height = std::bit_cast<float>(a_ev.weapon); height > 0.0f && height < 64.0f) {
++				body.height = height;
++			}
++			if (body.refId == 0 && body.width > 0.0f && body.height > 0.0f) {
++				if (!MakeBody(a_player, body)) {
++					bodies.erase(it);
++				}
++			}
++		}
++
++		// The body's width (d) comes with the mob's vitals, so a body is made once both it and the height are known; a mob that changes size
++		// (a slime that splits, a mob that grows) gets a body of its new size.
++		void OnVitals(RE::PlayerCharacter* a_player, const proto::McEvent& a_ev)
++		{
++			const auto it = bodies.find(static_cast<std::int32_t>(a_ev.formId));
++			if (it == bodies.end()) {
++				return;
++			}
++			auto& body = it->second;
++			body.velX = std::bit_cast<float>(a_ev.flags);
++			body.velZ = std::bit_cast<float>(a_ev.weapon);
++			if (a_ev.d > 0.0f && a_ev.d < 64.0f) {
++				const bool changed = body.refId != 0 && SizeKey(Sixteenths(a_ev.d, kMaxWidth16), Sixteenths(body.height, kMaxHeight16)) != body.key;
++				body.width = a_ev.d;
++				if (changed) {
++					DeleteRef(RE::TESForm::LookupByID<RE::TESObjectREFR>(body.refId));
++					body.refId = 0;
++				}
++				if (body.refId == 0 && body.height > 0.0f && !MakeBody(a_player, body)) {
++					bodies.erase(it);
++				}
++			}
++		}
++
++		// Main thread, every frame: bodies follow their mobs (carried on by the mob's velocity between reports), and a body whose mob has been
++		// silent for long goes.
++		void Update(RE::PlayerCharacter*, float a_delta)
++		{
++			for (auto it = bodies.begin(); it != bodies.end();) {
++				auto& body = it->second;
++				if (Link::Get().McAlive()) {
++					body.silence += std::min(a_delta, 0.1f);
++				}
++				body.age += a_delta;
++				auto* ref = RE::TESForm::LookupByID<RE::TESObjectREFR>(body.refId);
++				if (body.silence > 10.0f || (body.refId != 0 && !ref)) {
++					DeleteRef(ref);
++					it = bodies.erase(it);
++					continue;
++				}
++				if (ref) {
++					const float        carry = std::min(body.silence, 0.2f);
++					const RE::NiPoint3 want(body.pos.x + body.velX * carry * float(proto::kUnitsPerBlock), body.pos.y - body.velZ * carry * float(proto::kUnitsPerBlock), body.pos.z);
++					const float        dx = want.x - body.shown.x, dy = want.y - body.shown.y, dz = want.z - body.shown.z;
++					if (dx * dx + dy * dy + dz * dz > 0.25f) {
++						body.shown = want;
++						Place(ref, want);
++					}
++					if (!body.checked && body.age > 1.5f) {
++						body.checked = true;
++						static int logged = 0;
++						if (logged++ < 8) {
++							logger::info("Mob body ({:08X}, {}): 3D {}", body.refId, body.key, ref->Get3D() ? "loaded" : "NOT loaded");
++						}
++					}
++				}
++				++it;
++			}
++		}
++
++		// The mob a body belongs to (for diagnostics), or -1.
++		std::int32_t MobOfRef(RE::FormID a_refId)
++		{
++			for (const auto& [id, body] : bodies) {
++				if (body.refId == a_refId) {
++					return id;
++				}
++			}
++			return -1;
++		}
++
++		void Clear()
++		{
++			while (!bodies.empty()) {
++				RemoveBody(bodies.begin()->first);
 +			}
 +		}
 +	}
@@ -10979,7 +11623,7 @@ index b877ae5..36666dc 100644
  				logger::info("in-frame block drawing: hooked after Main::RenderWorld");
  			}
 diff --git a/skse/src/main.cpp b/skse/src/main.cpp
-index eb548b4..f127a75 100644
+index eb548b4..2bbbcaf 100644
 --- a/skse/src/main.cpp
 +++ b/skse/src/main.cpp
 @@ -21,6 +21,9 @@ namespace
@@ -11000,12 +11644,13 @@ index eb548b4..f127a75 100644
  			skycraft::CrashLog::Install();
  			break;
  		case SKSE::MessagingInterface::kPostLoadGame:
-@@ -50,6 +54,8 @@ SKSEPluginLoad(const SKSE::LoadInterface* a_skse)
+@@ -50,6 +54,9 @@ SKSEPluginLoad(const SKSE::LoadInterface* a_skse)
  	SetupLog();
  	skycraft::CrashLog::Install();
  	logger::info("SkyCraft {} loading (runtime {})", "0.1.2", a_skse->RuntimeVersion().string());
-+	logger::info("patch revision 42 (damage diagnostics merged in: every blow that reaches a mob's stand-in is logged with who threw it, and Skyrim hits the Minecraft side cannot find a live mob for are logged; revision 41: only doors, trapdoors and fence gates lose their collision when open (a barrel has an open state too and stays solid); every change of a section that Skyrim takes up is logged; revision 40: a section sent again with the same collision no longer makes Skyrim rebuild its collision model, so the sections beside a door stop being rebuilt many times a second and a door change shows at once; revision 39: open doors, trapdoors and fence gates have no collision in Skyrim; each open/close is logged on the Minecraft side; revision 38: mob stand-ins restored to the earlier, steadier version (health 1:1, damage guard, revival, 20 Hz positions from Fabric) on top of the collision and lock-on work; lock-on stays LockOn.cpp, with the stand-ins on its never-lock-on list; revision 37: mob stand-ins are back: invisible Skyrim actors for Minecraft mobs so NPCs fight them and spells hurt the mob; they sit exactly on the mob's feet at its height, stay in every control mode, and are on True Directional Movement's never-lock-on list; revision 36: doors, trapdoors and fence gates send their section to Skyrim again the moment their state changes, by any route, and the Fabric side watches every openable block each frame; walking up stairs, slabs and carpets lifts the player onto the step as Minecraft does, bStepUp in SkyCraft.ini; revision 35: the collision model's blocks are now in Skyrim's own order, the shapes before the list that holds them: the list was built before its children existed, a null read at load in every section model; the body bytes now match Skyrim's own statics: the second collision response and callback delay were zero, which is response type INVALID, and the rolling friction was 1; revision 34: the plugin makes the shape library models at load and places odd blocks as references to them once a section model is proven; collision models on by default, the crates stay under you until a model is seen working; tools/make_collision_library.py builds the shape library from the catalogue, which the Fabric side now writes by itself; ShapeKey in Game.h; revision 33: the Fabric side can list every distinct collision shape in the game with -Dskycraft.dumpShapes=true, ShapeCatalog.java; revision 32: collision test models are now loaded one at a time, smallest first, with a LOADING line logged before each; the byte-shifted variants are gone; revision 31: collision shapes: the array headers inside the list and convex shapes are empty like Skyrim's own, which was a null read at load; revision 30: collision model body now matches Skyrim's own statics: fixed motion system, flags 129 and 130; revision 29: collision models are off by default, a copy of vanilla models is made to see their layout; revision 28: section models are written into files made at plugin load, because Skyrim only loads model files that existed when it started; revision 27: smaller test models and copies of loose models tried too; revision 26: block model variants tried side by side, the first Skyrim loads is used; revision 25: exact block shapes: no padding on doors, stairs and other non-cube blocks, up to 16 boxes per block; a probe in the log tells a rejected .nif from a form that can't load models; revision 24: block collision models checked in the Havok world, crates kept until they work; lock-on survives a missing frame; revision 23: section models of merged boxes loaded as invisible statics over the whole area Minecraft sent; revision 22: crates only, the box simulation that held the Skyrim player is gone; Minecraft's mobs, passive ones too, are lock-on targets again, handed to True Directional Movement as virtual targets; revision 21: mob stand-ins removed)");
++	logger::info("patch revision 43 (mob bodies: every Minecraft mob is a collision box the size of its bounding box in Skyrim's world, made from a mob catalogue Minecraft writes at start (modded mobs included), replacing the stand-in actors; revision 42: damage diagnostics merged in: every blow that reaches a mob's stand-in is logged with who threw it, and Skyrim hits the Minecraft side cannot find a live mob for are logged; revision 41: only doors, trapdoors and fence gates lose their collision when open (a barrel has an open state too and stays solid); every change of a section that Skyrim takes up is logged; revision 40: a section sent again with the same collision no longer makes Skyrim rebuild its collision model, so the sections beside a door stop being rebuilt many times a second and a door change shows at once; revision 39: open doors, trapdoors and fence gates have no collision in Skyrim; each open/close is logged on the Minecraft side; revision 38: mob stand-ins restored to the earlier, steadier version (health 1:1, damage guard, revival, 20 Hz positions from Fabric) on top of the collision and lock-on work; lock-on stays LockOn.cpp, with the stand-ins on its never-lock-on list; revision 37: mob stand-ins are back: invisible Skyrim actors for Minecraft mobs so NPCs fight them and spells hurt the mob; they sit exactly on the mob's feet at its height, stay in every control mode, and are on True Directional Movement's never-lock-on list; revision 36: doors, trapdoors and fence gates send their section to Skyrim again the moment their state changes, by any route, and the Fabric side watches every openable block each frame; walking up stairs, slabs and carpets lifts the player onto the step as Minecraft does, bStepUp in SkyCraft.ini; revision 35: the collision model's blocks are now in Skyrim's own order, the shapes before the list that holds them: the list was built before its children existed, a null read at load in every section model; the body bytes now match Skyrim's own statics: the second collision response and callback delay were zero, which is response type INVALID, and the rolling friction was 1; revision 34: the plugin makes the shape library models at load and places odd blocks as references to them once a section model is proven; collision models on by default, the crates stay under you until a model is seen working; tools/make_collision_library.py builds the shape library from the catalogue, which the Fabric side now writes by itself; ShapeKey in Game.h; revision 33: the Fabric side can list every distinct collision shape in the game with -Dskycraft.dumpShapes=true, ShapeCatalog.java; revision 32: collision test models are now loaded one at a time, smallest first, with a LOADING line logged before each; the byte-shifted variants are gone; revision 31: collision shapes: the array headers inside the list and convex shapes are empty like Skyrim's own, which was a null read at load; revision 30: collision model body now matches Skyrim's own statics: fixed motion system, flags 129 and 130; revision 29: collision models are off by default, a copy of vanilla models is made to see their layout; revision 28: section models are written into files made at plugin load, because Skyrim only loads model files that existed when it started; revision 27: smaller test models and copies of loose models tried too; revision 26: block model variants tried side by side, the first Skyrim loads is used; revision 25: exact block shapes: no padding on doors, stairs and other non-cube blocks, up to 16 boxes per block; a probe in the log tells a rejected .nif from a form that can't load models; revision 24: block collision models checked in the Havok world, crates kept until they work; lock-on survives a missing frame; revision 23: section models of merged boxes loaded as invisible statics over the whole area Minecraft sent; revision 22: crates only, the box simulation that held the Skyrim player is gone; Minecraft's mobs, passive ones too, are lock-on targets again, handed to True Directional Movement as virtual targets; revision 21: mob stand-ins removed)");
 +	skycraft::BlockCollision::PrepareFiles();
++	skycraft::MobBodies::PrepareFiles();
  	SKSE::GetMessagingInterface()->RegisterListener(OnMessage);
  	// As early as possible: Minecraft takes about as long to start as Skyrim does to reach its menu.
  	skycraft::Launcher::StartMinecraft();
