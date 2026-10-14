@@ -4206,10 +4206,10 @@ index 92b585a..7bf3c86 100644
 +fRange = 40
 diff --git a/skse/src/BlockCollision.cpp b/skse/src/BlockCollision.cpp
 new file mode 100644
-index 0000000..4192d18
+index 0000000..bb14f29
 --- /dev/null
 +++ b/skse/src/BlockCollision.cpp
-@@ -0,0 +1,1311 @@
+@@ -0,0 +1,1318 @@
 +#include "Game.h"
 +#include "CollisionNif.h"
 +
@@ -4376,6 +4376,13 @@ index 0000000..4192d18
 +		{
 +			if (!a_ref) {
 +				return;
++			}
++			// Never delete an actor: a stored ID can outlive its reference (Skyrim frees our references when a cell unloads or a save loads,
++			// then reuses the ID), and deleting what it now names, a stand-in actor, crashes the engine's movement code.
++			if constexpr (requires { a_ref->template As<RE::Actor>(); }) {
++				if (a_ref->template As<RE::Actor>()) {
++					return;
++				}
 +			}
 +			if constexpr (requires { a_ref->Disable(); }) {
 +				a_ref->Disable();
@@ -5523,10 +5530,10 @@ index 0000000..4192d18
 +}
 diff --git a/skse/src/BlockCrates.cpp b/skse/src/BlockCrates.cpp
 new file mode 100644
-index 0000000..2b5b996
+index 0000000..89ce05e
 --- /dev/null
 +++ b/skse/src/BlockCrates.cpp
-@@ -0,0 +1,426 @@
+@@ -0,0 +1,433 @@
 +#include "Game.h"
 +
 +#include <SimpleIni.h>
@@ -5643,6 +5650,13 @@ index 0000000..2b5b996
 +		{
 +			if (!a_ref) {
 +				return;
++			}
++			// Never delete an actor: a stored ID can outlive its reference (Skyrim frees our references when a cell unloads or a save loads,
++			// then reuses the ID), and deleting what it now names, a stand-in actor, crashes the engine's movement code.
++			if constexpr (requires { a_ref->template As<RE::Actor>(); }) {
++				if (a_ref->template As<RE::Actor>()) {
++					return;
++				}
 +			}
 +			if constexpr (requires { a_ref->Disable(); }) {
 +				a_ref->Disable();
@@ -9415,7 +9429,7 @@ index 4ce955a..41f51a0 100644
  	{
  		REL::Relocation<std::uintptr_t> collector{ RE::VTABLE_bhkCharacterPointCollector[0] };
 diff --git a/skse/src/Game.cpp b/skse/src/Game.cpp
-index 3bb4d34..1527bc2 100644
+index 3bb4d34..f604563 100644
 --- a/skse/src/Game.cpp
 +++ b/skse/src/Game.cpp
 @@ -4,6 +4,14 @@
@@ -9671,8 +9685,16 @@ index 3bb4d34..1527bc2 100644
  			{
  				Perf::Scope timer(Perf::kDigMeshes);
  				Dig::UpdateMeshes(digSettled > 3.0f ? a_player : nullptr, a_delta, !dugChanged.empty());
+@@ -1293,6 +1446,7 @@ namespace skycraft
+ 
+ 		void OnGameLoaded()
+ 		{
++			MobBodies::Forget();
+ 			teleportPending = true;
+ 			haveLastSet = false;
+ 			State().lookInitialized = false;
 diff --git a/skse/src/Game.h b/skse/src/Game.h
-index 05788b1..1143c0f 100644
+index 05788b1..12bc061 100644
 --- a/skse/src/Game.h
 +++ b/skse/src/Game.h
 @@ -2,6 +2,11 @@
@@ -9799,7 +9821,7 @@ index 05788b1..1143c0f 100644
  		// For the blocks' contact shadows (any thread): sets a_bit in a_out[x + w*(y + h*z)] for
  		// each solid block of the box at a_origin (Minecraft block coords) of a_size blocks. The
  		// generation changes whenever any section's blocks do.
-@@ -153,6 +224,85 @@ namespace skycraft
+@@ -153,6 +224,86 @@ namespace skycraft
  		std::uint32_t Generation();
  		// Main thread, every frame: NPCs overlapping solid Minecraft blocks are pushed back out.
  		void PushActorsOut(RE::PlayerCharacter* a_player, float a_delta);
@@ -9863,6 +9885,7 @@ index 05788b1..1143c0f 100644
 +		void         SkeletonTrialPassed();
 +		void         SkeletonTrialFailed();
 +		void Clear();
++		void Forget();
 +	}
 +
 +	namespace BlockCollision
@@ -10553,10 +10576,10 @@ index 0000000..0939189
 +}
 diff --git a/skse/src/MobBodies.cpp b/skse/src/MobBodies.cpp
 new file mode 100644
-index 0000000..913f95f
+index 0000000..3665aaf
 --- /dev/null
 +++ b/skse/src/MobBodies.cpp
-@@ -0,0 +1,765 @@
+@@ -0,0 +1,779 @@
 +#include "Game.h"
 +#include "CollisionNif.h"
 +#include "Compat.h"
@@ -10712,6 +10735,13 @@ index 0000000..913f95f
 +		{
 +			if (!a_ref) {
 +				return;
++			}
++			// Never delete an actor: a stored ID can outlive its reference (Skyrim frees our references when a cell unloads or a save loads,
++			// then reuses the ID), and deleting what it now names, a stand-in actor, crashes the engine's movement code.
++			if constexpr (requires { a_ref->template As<RE::Actor>(); }) {
++				if (a_ref->template As<RE::Actor>()) {
++					return;
++				}
 +			}
 +			if constexpr (requires { a_ref->Disable(); }) {
 +				a_ref->Disable();
@@ -11311,6 +11341,13 @@ index 0000000..913f95f
 +				return {};
 +			}
 +			return SizeKey(Sixteenths(w->second, kMaxWidth16), Sixteenths(a_height, kMaxHeight16));
++		}
++
++		// A save has loaded or a new game started: Skyrim has freed every reference we made, so their IDs mean nothing (and may be reused).
++		void Forget()
++		{
++			widthSeen.clear();
++			bodies.clear();
 +		}
 +
 +		void Clear()
