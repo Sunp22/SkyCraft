@@ -6394,7 +6394,7 @@ index 0000000..48dc1e3
 +	}
 +}
 diff --git a/skse/src/Combat.cpp b/skse/src/Combat.cpp
-index 0954b7f..a909ea1 100644
+index 0954b7f..1a39c29 100644
 --- a/skse/src/Combat.cpp
 +++ b/skse/src/Combat.cpp
 @@ -1,4 +1,8 @@
@@ -6621,7 +6621,7 @@ index 0954b7f..a909ea1 100644
  				const auto mc = SkyToMc(pos);
  				r.x = static_cast<float>(mc.x);
  				r.y = static_cast<float>(mc.y);
-@@ -230,171 +403,2197 @@ namespace skycraft
+@@ -230,171 +403,2273 @@ namespace skycraft
  				logger::info("hit pipeline: not on AE; using plain damage");
  				return;
  			}
@@ -7308,6 +7308,7 @@ index 0954b7f..a909ea1 100644
 +			float         mcHealth{ 0.0f };       // the mob's health and max health (kEvMobVitals); mcMax 0: not told yet
 +			float         mcMax{ 0.0f };
 +			int           hideFrames{ 0 };        // frames the stand-in has been hidden every frame (its body can load in after the actor exists)
++			float         fxStrip{ 0.0f };        // seconds left in which every effect that appears on the stand-in is stopped (its spawn mist)
 +			float         warm{ 0.0f };           // seconds left of its warm-up: a new (or switched-on) actor is kept parked high above the player, hidden, while whatever it plays when it first loads plays out unseen
 +			float         velY{ 0.0f };           // the mob's vertical speed in Skyrim units per second, worked out from its reported positions
 +		};
@@ -8073,6 +8074,68 @@ index 0954b7f..a909ea1 100644
 +			return total;
 +		}
 +
++		// A spell the player holds on a mob: Skyrim reports the first hit on the mob's box and no more, so the damage it does each second is
++		// kept here, per mob, and goes on being handed to the mob while the player is still casting that spell towards it.
++		struct SpellStream
++		{
++			float         perSecond{ 0.0f };  // Skyrim damage per second
++			RE::FormID    source{ 0 };
++			float         age{ 0.0f };        // seconds since the box last reported a hit of it
++		};
++		std::unordered_map<std::int32_t, SpellStream> spellStreams;
++
++		// Is the player still casting this spell? (Whichever of the CommonLib spellings of the casters exists is used; without any, a
++		// stream lasts only a moment past its last hit.)
++		bool PlayerStillCasting(RE::PlayerCharacter* a_player, RE::FormID a_spell)
++		{
++			bool casting = false;
++			const auto check = [&](auto* a_caster) {
++				if constexpr (requires { a_caster->currentSpell->GetFormID(); a_caster->state == RE::MagicCaster::State::kCasting; }) {
++					if (a_caster && a_caster->currentSpell && a_caster->currentSpell->GetFormID() == a_spell && a_caster->state == RE::MagicCaster::State::kCasting) {
++						casting = true;
++					}
++				}
++			};
++			if constexpr (requires { a_player->magicCasters[0]; }) {
++				for (int i = 0; i < 2; ++i) {
++					check(a_player->magicCasters[i]);
++				}
++			} else if constexpr (requires { a_player->GetActorRuntimeData().magicCasters[0]; }) {
++				for (int i = 0; i < 2; ++i) {
++					check(a_player->GetActorRuntimeData().magicCasters[i]);
++				}
++			}
++			return casting;
++		}
++
++		void UpdateSpellStreams(RE::PlayerCharacter* a_player, float a_delta)
++		{
++			for (auto it = spellStreams.begin(); it != spellStreams.end();) {
++				auto&      stream = it->second;
++				const auto proxy = mobProxies.find(it->first);
++				stream.age += a_delta;
++				bool keep = proxy != mobProxies.end() && stream.age < 12.0f;
++				if (keep && stream.age > 0.4f) {
++					// Past a moment after its last reported hit it goes on only while the player casts it, facing the mob and in reach.
++					const auto  to = proxy->second.shown - a_player->GetPosition();
++					const float flat = std::sqrt(to.x * to.x + to.y * to.y);
++					const float yaw = a_player->GetAngleZ();
++					const float facing = flat > 1.0f ? (to.x * std::sin(yaw) + to.y * std::cos(yaw)) / flat : 1.0f;
++					keep = PlayerStillCasting(a_player, stream.source) && facing > 0.8f && flat < 40.0f * static_cast<float>(proto::kUnitsPerBlock);
++				}
++				if (!keep) {
++					it = spellStreams.erase(it);
++					continue;
++				}
++				auto& mob = proxy->second;
++				mob.pendingDamage += stream.perSecond * a_delta;
++				mob.byPlayer = true;
++				proxyPlayerHitAge[mob.formId] = 0.0f;
++				proxyWeaponHits[mob.formId] = 0.3f;
++				++it;
++			}
++		}
++
 +		// Something hit a mob's collision box. Skyrim's weapons, arrows and spells meet the box before the stand-in, so what hurts the mob in
 +		// Skyrim arrives here, from the NPCs and from the player alike, and is handed to the mob as damage by the one route (the stand-in's
 +		// pending damage, which goes to Minecraft in batches). The one thing left out is what Minecraft already has: the player's swings and
@@ -8153,6 +8216,11 @@ index 0954b7f..a909ea1 100644
 +			}
 +			if (damage <= 0.01f) {
 +				return;  // a spell that does no harm to health (a ward, a light, a calm)
++			}
++			if (byPlayer && concentration) {
++				// A held spell (flames, sparks) reports its hit on the box once, not every tick: it goes on hurting the mob for as long as the
++				// player keeps casting it at the mob (see UpdateSpellStreams).
++				spellStreams[a_mobId] = SpellStream{ damage / std::clamp(since, 0.05f, 0.5f), a_event->source, 0.0f };
 +			}
 +			proxy.pendingDamage += damage;
 +			if (byPlayer) {
@@ -8499,6 +8567,7 @@ index 0954b7f..a909ea1 100644
 +				MobProxy made;
 +				made.formId = actor->GetFormID();
 +				made.mobId = mobId;
++				made.fxStrip = 4.0f;
 +				made.pos = pos;
 +				made.shown = pos;
 +				made.warm = warm;
@@ -8772,6 +8841,7 @@ index 0954b7f..a909ea1 100644
 +				hit->second -= a_delta;
 +				hit = hit->second <= 0.0f ? proxyWeaponHits.erase(hit) : std::next(hit);
 +			}
++			UpdateSpellStreams(a_player, a_delta);
 +			for (auto it = mobProxies.begin(); it != mobProxies.end();) {
 +				auto& proxy = it->second;
 +				// Silence is only counted while Minecraft is really there and in steps of at most 0.1 s: a long Skyrim frame (the
@@ -8857,12 +8927,14 @@ index 0954b7f..a909ea1 100644
 +						actor->Enable(false);
 +					}
 +					reloaded = true;
-+					proxy.warm = std::max(proxy.warm, 0.5f);  // hidden, at the mob, while it loads (not sent away: its attackers keep their target)
++					proxy.warm = std::max(proxy.warm, 1.5f);  // hidden, at the mob, while it loads (not sent away: its attackers keep their target)
++					proxy.fxStrip = 4.0f;  // the red spawn mist comes with its 3D, a moment after it is switched on: stopped as it appears
++					proxy.hideFrames = 0;
 +					static int switchedBack = 0;
 +					if (switchedBack++ < 20) {
 +						logger::info("Stand-in ({:08X}) of mob {} had been switched off while its mob lives; switched back on", proxy.formId, it->first);
 +					}
-+				}
+ 				}
 +				if (reloaded || proxy.warm > 0.0f) {
 +					// Just switched back on, or still warming up out of sight: whatever its health reads is not damage, and nothing can be
 +					// hitting it yet. SyncProxyHealth below gives it the mob's health again.
@@ -8872,6 +8944,10 @@ index 0954b7f..a909ea1 100644
 +					AbsorbProxyDamage(actor, proxy);
 +				}
 +				SyncProxyHealth(actor, proxy);  // every frame, so the health is the mob's at all times, not only when Minecraft reports it
++				if (proxy.fxStrip > 0.0f) {
++					proxy.fxStrip -= a_delta;
++					StripSpawnEffects(actor);  // (every frame: the mist appears when its 3D does, which is after the warm-up used to end)
++				}
 +				WatchProxy(actor, proxy, State().skyrimMode);
 +				if (proxy.warm > 0.0f) {
 +					proxy.warm -= a_delta;
@@ -8886,7 +8962,7 @@ index 0954b7f..a909ea1 100644
 +					}
 +				} else {
 +					FollowProxy(actor, proxy, a_delta);
- 				}
++				}
 +				proxy.flushAge += a_delta;
 +				if (proxy.pendingDamage > 0.0f && (proxy.pendingDamage >= kProxyBigHit || proxy.flushAge >= kProxyFlushSeconds)) {
 +					FlushProxyDamage(it->first, proxy);
@@ -8952,7 +9028,7 @@ index 0954b7f..a909ea1 100644
  		}
  
  		void KillPlayer(RE::PlayerCharacter* a_player, const proto::McEvent& a_ev)
-@@ -580,7 +2779,7 @@ namespace skycraft
+@@ -580,7 +2855,7 @@ namespace skycraft
  			for (auto& handle : lists->highActorHandles) {
  				auto actorPtr = handle.get();
  				auto* actor = actorPtr.get();
@@ -8961,7 +9037,7 @@ index 0954b7f..a909ea1 100644
  					continue;
  				}
  				const auto hazard = HazardAtActor(actor);
-@@ -698,6 +2897,7 @@ namespace skycraft
+@@ -698,6 +2973,7 @@ namespace skycraft
  			RE::NiPoint3 center;
  			float        radius;  // Minecraft blocks
  			float        delay;   // seconds: after the blast's damage has landed
@@ -8969,7 +9045,7 @@ index 0954b7f..a909ea1 100644
  		};
  		std::vector<PendingExplosion> pendingExplosions;
  
-@@ -786,6 +2986,9 @@ namespace skycraft
+@@ -786,6 +3062,9 @@ namespace skycraft
  					continue;
  				}
  				if (auto* actor = ref->As<RE::Actor>()) {
@@ -8979,7 +9055,7 @@ index 0954b7f..a909ea1 100644
  					if (!actor->IsDead()) {
  						if (auto* process = actor->GetActorRuntimeData().currentProcess) {
  							process->KnockExplosion(actor, a_blast.center, 25.0f * falloff * power);
-@@ -830,6 +3033,183 @@ namespace skycraft
+@@ -830,6 +3109,183 @@ namespace skycraft
  			}
  			logger::info("Minecraft explosion (radius {:.1f}): knocked {} people away, threw {} objects", a_blast.radius, people, objects);
  		}
@@ -9163,7 +9239,7 @@ index 0954b7f..a909ea1 100644
  	}
  
  	namespace Combat
-@@ -838,8 +3218,15 @@ namespace skycraft
+@@ -838,8 +3294,15 @@ namespace skycraft
  		{
  			REL::Relocation<std::uintptr_t> vtbl{ RE::VTABLE_PlayerCharacter[0] };
  			HandleHealthDamageHook::func = vtbl.write_vfunc(0x104, HandleHealthDamageHook::thunk);
@@ -9179,7 +9255,7 @@ index 0954b7f..a909ea1 100644
  			}
  			ResolveHitPipeline();
  			logger::info("combat hooks installed");
-@@ -854,20 +3241,66 @@ namespace skycraft
+@@ -854,20 +3317,66 @@ namespace skycraft
  				}
  				healthPrimed = false;
  				engaged = false;
@@ -9252,7 +9328,7 @@ index 0954b7f..a909ea1 100644
  			SetEssential(a_player, true);
  			WriteActorTable(a_player);
  			engagedTimer -= a_delta;
-@@ -878,29 +3311,11 @@ namespace skycraft
+@@ -878,29 +3387,11 @@ namespace skycraft
  
  			proto::McEvent ev;
  			while (link.PopEvent(ev)) {
@@ -9285,7 +9361,7 @@ index 0954b7f..a909ea1 100644
  			for (auto it = pendingExplosions.begin(); it != pendingExplosions.end();) {
  				it->delay -= a_delta;
  				if (it->delay <= 0.0f) {
-@@ -924,5 +3339,16 @@ namespace skycraft
+@@ -924,5 +3415,16 @@ namespace skycraft
  		}
  
  		bool PlayerEngaged() { return engaged; }
