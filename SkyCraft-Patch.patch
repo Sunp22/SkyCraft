@@ -6394,7 +6394,7 @@ index 0000000..48dc1e3
 +	}
 +}
 diff --git a/skse/src/Combat.cpp b/skse/src/Combat.cpp
-index 0954b7f..1a39c29 100644
+index 0954b7f..f6a6767 100644
 --- a/skse/src/Combat.cpp
 +++ b/skse/src/Combat.cpp
 @@ -1,4 +1,8 @@
@@ -6621,7 +6621,7 @@ index 0954b7f..1a39c29 100644
  				const auto mc = SkyToMc(pos);
  				r.x = static_cast<float>(mc.x);
  				r.y = static_cast<float>(mc.y);
-@@ -230,171 +403,2273 @@ namespace skycraft
+@@ -230,171 +403,2278 @@ namespace skycraft
  				logger::info("hit pipeline: not on AE; using plain damage");
  				return;
  			}
@@ -8086,7 +8086,8 @@ index 0954b7f..1a39c29 100644
 +
 +		// Is the player still casting this spell? (Whichever of the CommonLib spellings of the casters exists is used; without any, a
 +		// stream lasts only a moment past its last hit.)
-+		bool PlayerStillCasting(RE::PlayerCharacter* a_player, RE::FormID a_spell)
++		template <class P>
++		bool PlayerStillCasting(P* a_player, RE::FormID a_spell)
 +		{
 +			bool casting = false;
 +			const auto check = [&](auto* a_caster) {
@@ -8103,6 +8104,10 @@ index 0954b7f..1a39c29 100644
 +			} else if constexpr (requires { a_player->GetActorRuntimeData().magicCasters[0]; }) {
 +				for (int i = 0; i < 2; ++i) {
 +					check(a_player->GetActorRuntimeData().magicCasters[i]);
++				}
++			} else if constexpr (requires { a_player->GetMagicCaster(RE::MagicSystem::CastingSource::kLeftHand); }) {
++				for (const auto source : { RE::MagicSystem::CastingSource::kLeftHand, RE::MagicSystem::CastingSource::kRightHand }) {
++					check(static_cast<RE::ActorMagicCaster*>(a_player->GetMagicCaster(source)));
 +				}
 +			}
 +			return casting;
@@ -9028,7 +9033,7 @@ index 0954b7f..1a39c29 100644
  		}
  
  		void KillPlayer(RE::PlayerCharacter* a_player, const proto::McEvent& a_ev)
-@@ -580,7 +2855,7 @@ namespace skycraft
+@@ -580,7 +2860,7 @@ namespace skycraft
  			for (auto& handle : lists->highActorHandles) {
  				auto actorPtr = handle.get();
  				auto* actor = actorPtr.get();
@@ -9037,7 +9042,7 @@ index 0954b7f..1a39c29 100644
  					continue;
  				}
  				const auto hazard = HazardAtActor(actor);
-@@ -698,6 +2973,7 @@ namespace skycraft
+@@ -698,6 +2978,7 @@ namespace skycraft
  			RE::NiPoint3 center;
  			float        radius;  // Minecraft blocks
  			float        delay;   // seconds: after the blast's damage has landed
@@ -9045,7 +9050,7 @@ index 0954b7f..1a39c29 100644
  		};
  		std::vector<PendingExplosion> pendingExplosions;
  
-@@ -786,6 +3062,9 @@ namespace skycraft
+@@ -786,6 +3067,9 @@ namespace skycraft
  					continue;
  				}
  				if (auto* actor = ref->As<RE::Actor>()) {
@@ -9055,7 +9060,7 @@ index 0954b7f..1a39c29 100644
  					if (!actor->IsDead()) {
  						if (auto* process = actor->GetActorRuntimeData().currentProcess) {
  							process->KnockExplosion(actor, a_blast.center, 25.0f * falloff * power);
-@@ -830,6 +3109,183 @@ namespace skycraft
+@@ -830,6 +3114,183 @@ namespace skycraft
  			}
  			logger::info("Minecraft explosion (radius {:.1f}): knocked {} people away, threw {} objects", a_blast.radius, people, objects);
  		}
@@ -9239,7 +9244,7 @@ index 0954b7f..1a39c29 100644
  	}
  
  	namespace Combat
-@@ -838,8 +3294,15 @@ namespace skycraft
+@@ -838,8 +3299,15 @@ namespace skycraft
  		{
  			REL::Relocation<std::uintptr_t> vtbl{ RE::VTABLE_PlayerCharacter[0] };
  			HandleHealthDamageHook::func = vtbl.write_vfunc(0x104, HandleHealthDamageHook::thunk);
@@ -9255,7 +9260,7 @@ index 0954b7f..1a39c29 100644
  			}
  			ResolveHitPipeline();
  			logger::info("combat hooks installed");
-@@ -854,20 +3317,66 @@ namespace skycraft
+@@ -854,20 +3322,66 @@ namespace skycraft
  				}
  				healthPrimed = false;
  				engaged = false;
@@ -9328,7 +9333,7 @@ index 0954b7f..1a39c29 100644
  			SetEssential(a_player, true);
  			WriteActorTable(a_player);
  			engagedTimer -= a_delta;
-@@ -878,29 +3387,11 @@ namespace skycraft
+@@ -878,29 +3392,11 @@ namespace skycraft
  
  			proto::McEvent ev;
  			while (link.PopEvent(ev)) {
@@ -9361,7 +9366,7 @@ index 0954b7f..1a39c29 100644
  			for (auto it = pendingExplosions.begin(); it != pendingExplosions.end();) {
  				it->delay -= a_delta;
  				if (it->delay <= 0.0f) {
-@@ -924,5 +3415,16 @@ namespace skycraft
+@@ -924,5 +3420,16 @@ namespace skycraft
  		}
  
  		bool PlayerEngaged() { return engaged; }
